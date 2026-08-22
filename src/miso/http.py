@@ -12,11 +12,21 @@ from urllib.parse import urlsplit
 
 from miso import __version__
 from miso.config import Settings
+from miso.tools import ToolRegistry, create_runtime_registry
 
 
 class MisoHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        request_handler: Type[BaseHTTPRequestHandler],
+        tool_registry: ToolRegistry,
+    ) -> None:
+        self.tool_registry = tool_registry
+        super().__init__(server_address, request_handler)
 
 
 def handler_type(started_at: float) -> Type[BaseHTTPRequestHandler]:
@@ -55,8 +65,14 @@ def handler_type(started_at: float) -> Type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def create_server(settings: Settings, port: int | None = None) -> MisoHTTPServer:
+def create_server(
+    settings: Settings,
+    port: int | None = None,
+    *,
+    tool_registry: ToolRegistry | None = None,
+) -> MisoHTTPServer:
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(time.monotonic()),
+        tool_registry or create_runtime_registry(settings.state_dir),
     )

@@ -18,8 +18,8 @@ class BoundaryTests(unittest.TestCase):
         tool = ToolDefinition(
             name="echo",
             description="Echo a value",
-            input_schema={"type": "object"},
-            handler=lambda value: value,
+            input_schema={"type": "object", "additionalProperties": False},
+            handler=lambda value, _context: value,
         )
         registry.register(tool)
         self.assertEqual(registry.names(), ("echo",))

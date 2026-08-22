@@ -38,6 +38,7 @@ class HealthIntegrationTests(unittest.TestCase):
                 self.assertEqual(payload["status"], "ok")
                 self.assertEqual(payload["service"], "miso")
                 self.assertNotIn("database_path", payload)
+                self.assertEqual(server.tool_registry.names(), ())
 
                 connection.request("GET", "/missing")
                 missing = connection.getresponse()
