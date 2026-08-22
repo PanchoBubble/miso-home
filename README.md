@@ -56,3 +56,13 @@ allowlist. The developer command tool is disabled by default, accepts argument
 arrays rather than shell text, restricts execution to an approved directory and
 executable allowlist, and can only be enabled for a bounded interval through its
 dashboard-facing controller. Its status includes the visible scope and expiry.
+
+## Household tools
+
+The runtime registers durable timer, reminder, and shared shopping-list tools
+against the same transactional SQLite database as memory. A background worker
+normalizes scheduled timestamps to UTC, atomically fires overdue items (also on
+process restart), and emits durable audit events. Every mutation increments a
+revision. Shopping removals are retained as tombstones so operator views can
+inspect history. Tool results use stable object shapes suitable for both local
+models and the dashboard.

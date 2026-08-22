@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATION_1 = """
 CREATE TABLE conversations (
@@ -100,6 +100,46 @@ CREATE TRIGGER memories_au AFTER UPDATE OF content ON memories BEGIN
 END;
 """
 
+MIGRATION_2 = """
+CREATE TABLE scheduled_items (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('timer', 'reminder')),
+    title TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'completed', 'cancelled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)
+) STRICT;
+CREATE INDEX scheduled_items_due
+    ON scheduled_items(status, due_at, kind);
+
+CREATE TABLE shopping_lists (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    shared INTEGER NOT NULL DEFAULT 1 CHECK (shared IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE shopping_items (
+    id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL REFERENCES shopping_lists(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'removed')),
+    added_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)
+) STRICT;
+CREATE INDEX shopping_items_list_status
+    ON shopping_items(list_id, status, completed, created_at);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -139,6 +179,11 @@ class MemoryStore:
                 connection.executescript(
                     f"BEGIN IMMEDIATE;\n{MIGRATION_1}\n"
                     "PRAGMA user_version = 1;\nCOMMIT;"
+                )
+            if version < 2:
+                connection.executescript(
+                    f"BEGIN IMMEDIATE;\n{MIGRATION_2}\n"
+                    "PRAGMA user_version = 2;\nCOMMIT;"
                 )
 
     def integrity_check(self) -> str:

@@ -13,22 +13,35 @@ from miso.tools.base import (
     ToolResult,
     ToolStatus,
 )
+from miso.tools.household import (
+    HouseholdStore,
+    ScheduledItemWorker,
+    register_household_tools,
+)
 from miso.tools.mcp import MCPToolAdapter, MCPToolClient
 from miso.tools.schema import SchemaError
 from miso.tools.shell import DeveloperShellController
 
 
-def create_runtime_registry(state_dir: Path) -> ToolRegistry:
+def create_runtime_registry(
+    state_dir: Path, database_path: Path | None = None
+) -> ToolRegistry:
     """Create the production registry with a durable local audit sink."""
-    return ToolRegistry(JsonlAuditLog(state_dir / "audit" / "tools.jsonl"))
+    registry = ToolRegistry(JsonlAuditLog(state_dir / "audit" / "tools.jsonl"))
+    if database_path is not None:
+        register_household_tools(registry, database_path)
+    return registry
+
 
 __all__ = [
     "DeveloperShellController",
+    "HouseholdStore",
     "InMemoryAuditLog",
     "JsonlAuditLog",
     "MCPToolAdapter",
     "MCPToolClient",
     "SchemaError",
+    "ScheduledItemWorker",
     "ToolCancelled",
     "ToolContext",
     "ToolDeadlineExceeded",
@@ -38,4 +51,5 @@ __all__ = [
     "ToolResult",
     "ToolStatus",
     "create_runtime_registry",
+    "register_household_tools",
 ]

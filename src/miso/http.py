@@ -12,7 +12,12 @@ from urllib.parse import urlsplit
 
 from miso import __version__
 from miso.config import Settings
-from miso.tools import ToolRegistry, create_runtime_registry
+from miso.tools import (
+    HouseholdStore,
+    ScheduledItemWorker,
+    ToolRegistry,
+    create_runtime_registry,
+)
 
 
 class MisoHTTPServer(ThreadingHTTPServer):
@@ -24,9 +29,22 @@ class MisoHTTPServer(ThreadingHTTPServer):
         server_address: tuple[str, int],
         request_handler: Type[BaseHTTPRequestHandler],
         tool_registry: ToolRegistry,
+        scheduled_worker: ScheduledItemWorker,
     ) -> None:
         self.tool_registry = tool_registry
+        self.scheduled_worker = scheduled_worker
         super().__init__(server_address, request_handler)
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        self.scheduled_worker.start()
+        try:
+            super().serve_forever(poll_interval)
+        finally:
+            self.scheduled_worker.stop()
+
+    def server_close(self) -> None:
+        self.scheduled_worker.stop()
+        super().server_close()
 
 
 def handler_type(started_at: float) -> Type[BaseHTTPRequestHandler]:
@@ -71,8 +89,12 @@ def create_server(
     *,
     tool_registry: ToolRegistry | None = None,
 ) -> MisoHTTPServer:
+    registry = tool_registry or create_runtime_registry(
+        settings.state_dir, settings.database_path
+    )
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(time.monotonic()),
-        tool_registry or create_runtime_registry(settings.state_dir),
+        registry,
+        ScheduledItemWorker(HouseholdStore(settings.database_path), registry.audit_sink),
     )
