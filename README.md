@@ -87,3 +87,18 @@ selection is written to `state_dir / "audit" / "routing.jsonl"`. Provider
 overrides are strict by default, and progress chunks are emitted before health
 checks or model loading. Household schemas are narrowed to the relevant tool
 family and omitted entirely from unrelated prompts.
+
+## Local dashboard
+
+The service root (`/`) serves the dependency-free operator console. It streams
+text and tool results, exposes bounded provider health and routing progress,
+searches SQLite memory, and reads redacted tool/routing activity. Chat history
+is retained under a conversation ID without exposing database paths, provider
+URLs, API keys, or environment values to the browser.
+
+Loopback access works without a token for local development and SSH forwarding.
+Any non-loopback `MISO_HOST` requires `MISO_DASHBOARD_TOKEN`; the browser keeps
+that token in session storage only. Developer mode is visibly disabled by
+default, expires after at most 15 minutes, and runs only allowlisted argv (never
+shell text) beneath `MISO_DEVELOPER_ROOT`. The default Pi scope is read-only
+`/opt/miso/app`; override it deliberately in `/etc/miso/miso.env` if needed.

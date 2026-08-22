@@ -60,6 +60,21 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "routing timeouts must be numeric"):
             Settings.from_env({"MISO_ROUTING_ATTEMPT_TIMEOUT": "eventually"})
 
+    def test_non_loopback_dashboard_requires_secret_token(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "DASHBOARD_TOKEN is required"):
+            Settings.from_env({"MISO_HOST": "0.0.0.0"})
+        settings = Settings.from_env(
+            {
+                "MISO_HOST": "0.0.0.0",
+                "MISO_DASHBOARD_TOKEN": "dashboard-secret-at-least-32-chars",
+            }
+        )
+        self.assertNotIn("dashboard-secret-at-least-32-chars", repr(settings))
+
+    def test_rejects_relative_developer_scope(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "DEVELOPER_ROOT must be absolute"):
+            Settings.from_env({"MISO_DEVELOPER_ROOT": "relative"})
+
     def test_reports_missing_runtime_directories(self) -> None:
         settings = Settings(
             host="127.0.0.1",

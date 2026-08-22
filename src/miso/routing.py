@@ -118,6 +118,71 @@ class ProviderRouter:
             return RouteClass.ROUTINE, f"household marker: {marker}"
         return RouteClass.STANDARD, "default local-first policy"
 
+    def health_snapshot(self) -> list[dict[str, object]]:
+        providers = list(self._providers().values())
+        outcomes: queue.Queue[tuple[str, ProviderHealth | Exception, int]] = queue.Queue()
+
+        def check(provider: ModelProvider) -> None:
+            started = time.monotonic()
+            try:
+                result: ProviderHealth | Exception = provider.health()
+            except Exception as error:
+                result = error
+            outcomes.put(
+                (
+                    provider.name,
+                    result,
+                    max(0, round((time.monotonic() - started) * 1000)),
+                )
+            )
+
+        for provider in providers:
+            threading.Thread(
+                target=check,
+                args=(provider,),
+                name=f"miso-health-{provider.name}",
+                daemon=True,
+            ).start()
+        deadline = time.monotonic() + self.health_timeout_seconds
+        results: dict[str, dict[str, object]] = {}
+        while len(results) < len(providers):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                name, result, latency_ms = outcomes.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if isinstance(result, ProviderHealth):
+                results[name] = {
+                    "name": name,
+                    "available": result.available,
+                    "detail": result.detail,
+                    "model": result.model,
+                    "latency_ms": latency_ms,
+                }
+            else:
+                results[name] = {
+                    "name": name,
+                    "available": False,
+                    "detail": type(result).__name__,
+                    "model": None,
+                    "latency_ms": latency_ms,
+                }
+        return [
+            results.get(
+                provider.name,
+                {
+                    "name": provider.name,
+                    "available": False,
+                    "detail": "health_timeout",
+                    "model": None,
+                    "latency_ms": round(self.health_timeout_seconds * 1000),
+                },
+            )
+            for provider in providers
+        ]
+
     def plan(
         self,
         request: ChatRequest,

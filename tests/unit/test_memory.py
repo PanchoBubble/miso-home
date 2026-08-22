@@ -78,6 +78,24 @@ class MemoryStoreTests(unittest.TestCase):
             count = connection.execute("SELECT count(*) FROM memories").fetchone()[0]
         self.assertEqual(count, 0)
 
+    def test_lists_conversation_events_in_original_order(self) -> None:
+        conversation = self.store.create_conversation()
+        first = self.store.append_event(
+            conversation, kind="message", role="user", content="first"
+        )
+        second = self.store.append_event(
+            conversation,
+            kind="tool",
+            role="assistant",
+            content="timer_create",
+            payload={"ok": True},
+        )
+        self.assertTrue(self.store.conversation_exists(conversation))
+        self.assertFalse(self.store.conversation_exists("missing"))
+        events = self.store.events(conversation)
+        self.assertEqual([event.event_id for event in events], [first, second])
+        self.assertEqual(events[1].payload, {"ok": True})
+
 
 if __name__ == "__main__":
     unittest.main()

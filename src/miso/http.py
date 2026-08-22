@@ -1,24 +1,34 @@
-"""Minimal HTTP surface for service health and deployment testing."""
+"""Local dashboard, streaming chat, and operator API."""
 
 from __future__ import annotations
 
+import hmac
 import json
 import platform
+import threading
 import time
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Type
-from urllib.parse import urlsplit
+from pathlib import Path
+from typing import Type, cast
+from urllib.parse import parse_qs, urlsplit
 
 from miso import __version__
 from miso.config import Settings
+from miso.memory import MemoryStore
+from miso.providers import ChatRequest, ProviderCancelled
+from miso.routing import ProviderRouter, RoutingError, create_router
 from miso.tools import (
+    DeveloperShellController,
     HouseholdStore,
     ScheduledItemWorker,
     ToolRegistry,
     create_runtime_registry,
 )
-from miso.routing import ProviderRouter, create_router
+
+WEB_ROOT = Path(__file__).with_name("web")
+MAX_BODY_BYTES = 65536
 
 
 class MisoHTTPServer(ThreadingHTTPServer):
@@ -29,13 +39,23 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         request_handler: Type[BaseHTTPRequestHandler],
+        *,
+        settings: Settings,
         tool_registry: ToolRegistry,
         scheduled_worker: ScheduledItemWorker,
         router: ProviderRouter,
+        developer_shell: DeveloperShellController,
+        started_at: float,
     ) -> None:
+        self.settings = settings
         self.tool_registry = tool_registry
         self.scheduled_worker = scheduled_worker
         self.router = router
+        self.developer_shell = developer_shell
+        self.memory_store = MemoryStore(settings.database_path)
+        self.started_at = started_at
+        self._active_requests: dict[str, threading.Event] = {}
+        self._active_lock = threading.Lock()
         super().__init__(server_address, request_handler)
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
@@ -49,36 +69,398 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.scheduled_worker.stop()
         super().server_close()
 
+    def register_request(self, request_id: str, cancel: threading.Event) -> bool:
+        with self._active_lock:
+            if request_id in self._active_requests:
+                return False
+            self._active_requests[request_id] = cancel
+            return True
 
-def handler_type(started_at: float) -> Type[BaseHTTPRequestHandler]:
+    def unregister_request(self, request_id: str) -> None:
+        with self._active_lock:
+            self._active_requests.pop(request_id, None)
+
+    def cancel_request(self, request_id: str) -> bool:
+        with self._active_lock:
+            cancel = self._active_requests.get(request_id)
+        if cancel is None:
+            return False
+        cancel.set()
+        return True
+
+
+def handler_type() -> Type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "Miso"
         sys_version = ""
 
+        @property
+        def miso(self) -> MisoHTTPServer:
+            return cast(MisoHTTPServer, self.server)
+
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            if urlsplit(self.path).path != "/healthz":
+            parsed = urlsplit(self.path)
+            if parsed.path == "/healthz":
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "status": "ok",
+                        "service": "miso",
+                        "version": __version__,
+                        "architecture": platform.machine(),
+                        "uptime_seconds": round(
+                            time.monotonic() - self.miso.started_at, 3
+                        ),
+                    },
+                )
+                return
+            if parsed.path in {"/", "/index.html", "/app.js", "/styles.css"}:
+                self._static(parsed.path)
+                return
+            if not parsed.path.startswith("/api/"):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            if not self._authorized():
+                return
+            if parsed.path == "/api/status":
+                self._status()
+            elif parsed.path == "/api/memory":
+                query = parse_qs(parsed.query).get("q", [""])[0]
+                self._memory(query)
+            elif parsed.path == "/api/activity":
+                raw_limit = parse_qs(parsed.query).get("limit", ["50"])[0]
+                try:
+                    limit = max(1, min(int(raw_limit), 100))
+                except ValueError:
+                    limit = 50
+                self._activity(limit)
+            else:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            parsed = urlsplit(self.path)
+            if not parsed.path.startswith("/api/"):
+                self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            if not self._authorized():
+                return
+            try:
+                payload = self._request_json()
+            except ValueError as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+            if parsed.path == "/api/chat":
+                self._chat(payload)
+            elif parsed.path == "/api/chat/cancel":
+                request_id = payload.get("request_id")
+                if not isinstance(request_id, str):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_id"})
+                else:
+                    self._json(
+                        HTTPStatus.OK,
+                        {"cancelled": self.miso.cancel_request(request_id)},
+                    )
+            elif parsed.path == "/api/developer":
+                self._developer(payload)
+            elif parsed.path == "/api/developer/command":
+                self._developer_command(payload)
+            else:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+        def _authorized(self) -> bool:
+            expected = self.miso.settings.dashboard_token
+            if expected is None:
+                return True
+            provided = self.headers.get("Authorization", "")
+            if provided.startswith("Bearer ") and hmac.compare_digest(
+                provided[7:], expected
+            ):
+                return True
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return False
+
+        def _status(self) -> None:
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "service": {
+                        "status": "ok",
+                        "version": __version__,
+                        "architecture": platform.machine(),
+                        "uptime_seconds": round(
+                            time.monotonic() - self.miso.started_at, 3
+                        ),
+                    },
+                    "providers": self.miso.router.health_snapshot(),
+                    "routing": {
+                        "routine": ["pi-ollama", "lan-ollama", "hosted-gpt"],
+                        "complex": ["lan-ollama", "hosted-gpt", "pi-ollama"],
+                    },
+                    "tools": list(self.miso.tool_registry.names()),
+                    "developer_mode": self.miso.developer_shell.status(),
+                },
+            )
+
+        def _memory(self, query: str) -> None:
+            if len(query) > 500:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "query_too_long"})
+                return
+            try:
+                results = self.miso.memory_store.search(query, limit=30)
+            except Exception:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search"})
                 return
             self._json(
                 HTTPStatus.OK,
                 {
-                    "status": "ok",
-                    "service": "miso",
-                    "version": __version__,
-                    "architecture": platform.machine(),
-                    "uptime_seconds": round(time.monotonic() - started_at, 3),
+                    "results": [
+                        {
+                            "record_type": item.record_type,
+                            "record_id": item.record_id,
+                            "content": item.content,
+                            "rank": item.rank,
+                            "created_at": item.created_at,
+                        }
+                        for item in results
+                    ]
                 },
             )
 
-        def _json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
-            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(encoded)))
+        def _activity(self, limit: int) -> None:
+            audit_root = self.miso.settings.state_dir / "audit"
+            events = _jsonl_tail(audit_root / "tools.jsonl", limit)
+            events.extend(_jsonl_tail(audit_root / "routing.jsonl", limit))
+            events.sort(key=lambda item: str(item.get("timestamp", "")), reverse=True)
+            self._json(HTTPStatus.OK, {"events": events[:limit]})
+
+        def _chat(self, payload: dict[str, object]) -> None:
+            text = payload.get("text")
+            if not isinstance(text, str) or not 1 <= len(text.strip()) <= 8000:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_text"})
+                return
+            conversation_id = payload.get("conversation_id")
+            if conversation_id is not None and (
+                not isinstance(conversation_id, str)
+                or not self.miso.memory_store.conversation_exists(conversation_id)
+            ):
+                self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
+                return
+            if conversation_id is None:
+                conversation_id = self.miso.memory_store.create_conversation()
+            request_id = payload.get("request_id") or str(uuid.uuid4())
+            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 64:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_id"})
+                return
+            route_class = payload.get("route_class", "auto")
+            override = payload.get("provider")
+            if not isinstance(route_class, str) or (
+                override is not None and not isinstance(override, str)
+            ):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_routing"})
+                return
+            cancel = threading.Event()
+            if not self.miso.register_request(request_id, cancel):
+                self._json(HTTPStatus.CONFLICT, {"error": "request_already_active"})
+                return
+            self.miso.memory_store.append_event(
+                conversation_id,
+                kind="message",
+                role="user",
+                content=text.strip(),
+                payload={"request_id": request_id},
+            )
+            history = self.miso.memory_store.events(conversation_id, limit=40)
+            messages = tuple(
+                {"role": event.role, "content": event.content}
+                for event in history
+                if event.kind == "message"
+                and event.role in {"user", "assistant"}
+                and event.content
+            )
+            request = ChatRequest(messages=messages, tools=self.miso.tool_registry.schemas())
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            self.wfile.write(encoded)
+            assistant_text: list[str] = []
+            try:
+                stream = self.miso.router.stream(
+                    request,
+                    cancel,
+                    route_class=route_class,
+                    manual_override=override,
+                )
+                for chunk in stream:
+                    if chunk.progress:
+                        self._ndjson(
+                            {
+                                "type": "progress",
+                                "message": chunk.progress,
+                                "provider": chunk.provider,
+                                "route_id": chunk.route_id,
+                            }
+                        )
+                    if chunk.text:
+                        assistant_text.append(chunk.text)
+                        self._ndjson(
+                            {
+                                "type": "delta",
+                                "text": chunk.text,
+                                "provider": chunk.provider,
+                                "route_id": chunk.route_id,
+                            }
+                        )
+                    if chunk.tool_call:
+                        name = chunk.tool_call.get("name")
+                        arguments = chunk.tool_call.get("arguments")
+                        if not isinstance(name, str) or not isinstance(arguments, dict):
+                            raise RoutingError("provider returned invalid tool call")
+                        result = self.miso.tool_registry.invoke(
+                            name, arguments, cancel_event=cancel
+                        )
+                        encoded_result = result.as_dict()
+                        self.miso.memory_store.append_event(
+                            conversation_id,
+                            kind="tool",
+                            role="assistant",
+                            content=name,
+                            payload=encoded_result,
+                        )
+                        self._ndjson(
+                            {
+                                "type": "tool_result",
+                                "result": encoded_result,
+                                "provider": chunk.provider,
+                                "route_id": chunk.route_id,
+                            }
+                        )
+                combined = "".join(assistant_text)
+                if combined:
+                    self.miso.memory_store.append_event(
+                        conversation_id,
+                        kind="message",
+                        role="assistant",
+                        content=combined,
+                        payload={"request_id": request_id},
+                    )
+                self._ndjson(
+                    {
+                        "type": "complete",
+                        "conversation_id": conversation_id,
+                        "request_id": request_id,
+                    }
+                )
+            except ProviderCancelled:
+                self._ndjson({"type": "cancelled", "request_id": request_id})
+            except (RoutingError, ValueError, KeyError) as error:
+                self._ndjson(
+                    {
+                        "type": "error",
+                        "error": str(error)[:500],
+                        "request_id": request_id,
+                    }
+                )
+            except (BrokenPipeError, ConnectionResetError):
+                cancel.set()
+            finally:
+                self.miso.unregister_request(request_id)
+
+        def _developer(self, payload: dict[str, object]) -> None:
+            action = payload.get("action")
+            try:
+                if action == "enable":
+                    duration = payload.get("duration_seconds", 300)
+                    if not isinstance(duration, int) or isinstance(duration, bool):
+                        raise ValueError("duration_seconds must be an integer")
+                    status = self.miso.developer_shell.enable(
+                        duration,
+                        approved_by=f"dashboard:{self.client_address[0]}",
+                    )
+                elif action == "disable":
+                    status = self.miso.developer_shell.disable(
+                        actor=f"dashboard:{self.client_address[0]}"
+                    )
+                else:
+                    raise ValueError("action must be enable or disable")
+            except ValueError as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+            self._json(HTTPStatus.OK, {"developer_mode": status})
+
+        def _developer_command(self, payload: dict[str, object]) -> None:
+            command = payload.get("command")
+            cwd = payload.get("cwd")
+            arguments: dict[str, object] = {"command": command}
+            if cwd is not None:
+                arguments["cwd"] = cwd
+            result = self.miso.tool_registry.invoke("developer_command", arguments)
+            status = HTTPStatus.OK if result.ok else HTTPStatus.BAD_REQUEST
+            self._json(status, {"result": result.as_dict()})
+
+        def _request_json(self) -> dict[str, object]:
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                raise ValueError("content_type_must_be_application_json")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as error:
+                raise ValueError("invalid_content_length") from error
+            if not 1 <= length <= MAX_BODY_BYTES:
+                raise ValueError("invalid_body_size")
+            try:
+                value = json.loads(self.rfile.read(length))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("invalid_json") from error
+            if not isinstance(value, dict):
+                raise ValueError("json_body_must_be_an_object")
+            return value
+
+        def _static(self, path: str) -> None:
+            name = {
+                "/": "index.html",
+                "/index.html": "index.html",
+                "/app.js": "app.js",
+                "/styles.css": "styles.css",
+            }[path]
+            file_path = WEB_ROOT / name
+            if not file_path.is_file():
+                self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            content_type = {
+                ".html": "text/html; charset=utf-8",
+                ".js": "text/javascript; charset=utf-8",
+                ".css": "text/css; charset=utf-8",
+            }[file_path.suffix]
+            self._bytes(HTTPStatus.OK, file_path.read_bytes(), content_type)
+
+        def _ndjson(self, payload: dict[str, object]) -> None:
+            self.wfile.write(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+                + b"\n"
+            )
+            self.wfile.flush()
+
+        def _json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
+            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            self._bytes(status, encoded, "application/json; charset=utf-8")
+
+        def _bytes(self, status: HTTPStatus, value: bytes, content_type: str) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(value)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
+                "style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+            )
+            self.end_headers()
+            self.wfile.write(value)
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -86,19 +468,55 @@ def handler_type(started_at: float) -> Type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def _jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
+    if not path.is_file():
+        return []
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        offset = max(0, size - 262144)
+        handle.seek(offset)
+        if offset:
+            handle.readline()
+        lines = handle.readlines()
+    events = []
+    for line in lines[-limit:]:
+        try:
+            value = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+    return events
+
+
 def create_server(
     settings: Settings,
     port: int | None = None,
     *,
     tool_registry: ToolRegistry | None = None,
+    router: ProviderRouter | None = None,
+    developer_shell: DeveloperShellController | None = None,
 ) -> MisoHTTPServer:
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
     )
+    shell = developer_shell or DeveloperShellController(
+        (settings.developer_root or settings.state_dir).resolve(),
+        settings.developer_commands,
+        audit_sink=registry.audit_sink,
+    )
+    if "developer_command" not in registry.names():
+        registry.register(shell.tool_definition())
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
-        handler_type(time.monotonic()),
-        registry,
-        ScheduledItemWorker(HouseholdStore(settings.database_path), registry.audit_sink),
-        create_router(settings),
+        handler_type(),
+        settings=settings,
+        tool_registry=registry,
+        scheduled_worker=ScheduledItemWorker(
+            HouseholdStore(settings.database_path), registry.audit_sink
+        ),
+        router=router or create_router(settings),
+        developer_shell=shell,
+        started_at=time.monotonic(),
     )

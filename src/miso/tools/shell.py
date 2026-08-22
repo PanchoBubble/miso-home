@@ -132,6 +132,7 @@ class DeveloperShellController:
             },
             handler=self._run,
             timeout_seconds=timeout_seconds,
+            redact_fields=frozenset({"command"}),
         )
 
     def _run(

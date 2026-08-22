@@ -1,0 +1,234 @@
+import http.client
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event, Thread
+import unittest
+
+from miso.config import Settings
+from miso.http import create_server
+from miso.providers import ChatChunk, ProviderHealth, ProviderSet
+from miso.routing import ProviderRouter
+from miso.tools import InMemoryAuditLog
+
+
+class FakeProvider:
+    def __init__(self, name="pi-ollama", available=True):
+        self._name = name
+        self.available = available
+
+    @property
+    def name(self):
+        return self._name
+
+    def health(self):
+        return ProviderHealth(
+            self.available,
+            "ready" if self.available else "not_configured",
+            "fake-model",
+        )
+
+    def stream(self, request, _cancel):
+        content = request.messages[-1]["content"]
+        if "timer" in content.casefold():
+            yield ChatChunk(
+                tool_call={
+                    "name": "timer_create",
+                    "arguments": {"duration_seconds": 60, "title": "Dashboard timer"},
+                }
+            )
+        else:
+            yield ChatChunk(text="Hello from Miso")
+        yield ChatChunk(done=True)
+
+
+class DashboardIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.settings = Settings(
+            host="127.0.0.1",
+            port=8090,
+            database_path=root / "miso.sqlite3",
+            state_dir=root,
+            model_dir=root,
+            ollama_url="http://127.0.0.1:11434",
+            ollama_model="qwen3:0.6b",
+            provider_timeout_seconds=120,
+            log_level="INFO",
+        )
+        router = ProviderRouter(
+            ProviderSet(
+                pi=FakeProvider(),
+                lan=None,
+                hosted=FakeProvider("hosted-gpt", available=False),
+            ),
+            InMemoryAuditLog(),
+        )
+        self.server = create_server(self.settings, port=0, router=router)
+        self.thread = Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        self.temporary.cleanup()
+
+    def request(self, method, path, payload=None, headers=None):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_port, timeout=5
+        )
+        body = None if payload is None else json.dumps(payload)
+        request_headers = dict(headers or {})
+        if payload is not None:
+            request_headers["Content-Type"] = "application/json"
+        connection.request(method, path, body=body, headers=request_headers)
+        response = connection.getresponse()
+        content = response.read()
+        connection.close()
+        return response, content
+
+    def test_dashboard_assets_status_and_sensitive_config_boundary(self) -> None:
+        response, content = self.request("GET", "/")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"local household console", content)
+        self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
+        response, javascript = self.request("GET", "/app.js")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"response.body.getReader", javascript)
+
+        response, content = self.request("GET", "/api/status")
+        payload = json.loads(content)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["providers"][0]["name"], "pi-ollama")
+        self.assertIn("timer_create", payload["tools"])
+        encoded = content.decode()
+        self.assertNotIn(str(self.settings.database_path), encoded)
+        self.assertNotIn("ollama_url", encoded)
+        self.assertNotIn("api_key", encoded)
+
+    def test_streamed_routed_tool_chat_is_searchable_and_audited(self) -> None:
+        response, content = self.request(
+            "POST",
+            "/api/chat",
+            {
+                "text": "Set a timer for one minute",
+                "request_id": "dashboard-test",
+                "route_class": "auto",
+            },
+        )
+        self.assertEqual(response.status, 200)
+        events = [json.loads(line) for line in content.splitlines()]
+        self.assertEqual(events[0]["type"], "progress")
+        tool = next(item for item in events if item["type"] == "tool_result")
+        self.assertTrue(tool["result"]["ok"])
+        self.assertEqual(tool["result"]["tool"], "timer_create")
+        completed = next(item for item in events if item["type"] == "complete")
+        self.assertTrue(completed["conversation_id"])
+
+        response, content = self.request("GET", "/api/memory?q=timer")
+        results = json.loads(content)["results"]
+        self.assertTrue(any("Set a timer" in item["content"] for item in results))
+        response, content = self.request("GET", "/api/activity")
+        activity = json.loads(content)["events"]
+        self.assertTrue(
+            any(
+                item.get("event") == "tool_invocation_finished"
+                and item.get("tool") == "timer_create"
+                for item in activity
+            )
+        )
+
+    def test_developer_mode_is_visible_expiring_and_command_is_scoped(self) -> None:
+        response, content = self.request(
+            "POST",
+            "/api/developer/command",
+            {"command": ["python3", "-c", "print('should-not-run')"]},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(content)["result"]["status"], "rejected")
+
+        response, content = self.request(
+            "POST",
+            "/api/developer",
+            {"action": "enable", "duration_seconds": 2},
+        )
+        enabled = json.loads(content)["developer_mode"]
+        self.assertTrue(enabled["enabled"])
+        self.assertEqual(enabled["scope"], str(Path(self.temporary.name).resolve()))
+
+        response, content = self.request(
+            "POST",
+            "/api/developer/command",
+            {"command": ["python3", "-c", "print('dashboard-ok')"]},
+        )
+        self.assertEqual(response.status, 200)
+        result = json.loads(content)["result"]
+        self.assertEqual(result["output"]["stdout"].strip(), "dashboard-ok")
+
+        response, content = self.request(
+            "POST", "/api/developer", {"action": "disable"}
+        )
+        self.assertFalse(json.loads(content)["developer_mode"]["enabled"])
+
+
+class DashboardAuthenticationTests(unittest.TestCase):
+    def test_configured_token_protects_api_without_exposing_secret(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings(
+                host="127.0.0.1",
+                port=8090,
+                database_path=root / "miso.sqlite3",
+                state_dir=root,
+                model_dir=root,
+                ollama_url="http://127.0.0.1:11434",
+                ollama_model="qwen3:0.6b",
+                provider_timeout_seconds=120,
+                log_level="INFO",
+                dashboard_token="dashboard-secret-at-least-32-chars",
+            )
+            router = ProviderRouter(
+                ProviderSet(
+                    pi=FakeProvider(),
+                    lan=None,
+                    hosted=FakeProvider("hosted-gpt", available=False),
+                ),
+                InMemoryAuditLog(),
+            )
+            server = create_server(settings, port=0, router=router)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=5
+                )
+                connection.request("GET", "/api/status")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 401)
+                response.read()
+                connection.close()
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=5
+                )
+                connection.request(
+                    "GET",
+                    "/api/status",
+                    headers={
+                        "Authorization": "Bearer dashboard-secret-at-least-32-chars"
+                    },
+                )
+                response = connection.getresponse()
+                content = response.read()
+                self.assertEqual(response.status, 200)
+                self.assertNotIn(b"dashboard-secret-at-least-32-chars", content)
+                connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+
+if __name__ == "__main__":
+    unittest.main()

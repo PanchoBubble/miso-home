@@ -30,6 +30,9 @@ class Settings:
     openai_base_url: str = "https://api.openai.com/v1"
     routing_health_timeout_seconds: float = 2.0
     routing_attempt_timeout_seconds: float = 45.0
+    dashboard_token: str | None = field(default=None, repr=False)
+    developer_root: Path | None = None
+    developer_commands: tuple[str, ...] = ("python3", "git", "rg", "ls")
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -73,6 +76,19 @@ class Settings:
             ),
             routing_health_timeout_seconds=routing_health_timeout,
             routing_attempt_timeout_seconds=routing_attempt_timeout,
+            dashboard_token=source.get("MISO_DASHBOARD_TOKEN", "").strip() or None,
+            developer_root=(
+                Path(source["MISO_DEVELOPER_ROOT"])
+                if source.get("MISO_DEVELOPER_ROOT")
+                else None
+            ),
+            developer_commands=tuple(
+                command.strip()
+                for command in source.get(
+                    "MISO_DEVELOPER_COMMANDS", "python3,git,rg,ls"
+                ).split(",")
+                if command.strip()
+            ),
         )
         settings.validate()
         return settings
@@ -108,6 +124,16 @@ class Settings:
             raise ConfigError("MISO_ROUTING_HEALTH_TIMEOUT must be between 0 and 30")
         if not 0 < self.routing_attempt_timeout_seconds <= 600:
             raise ConfigError("MISO_ROUTING_ATTEMPT_TIMEOUT must be between 0 and 600")
+        if self.host not in {"127.0.0.1", "::1", "localhost"} and not self.dashboard_token:
+            raise ConfigError("MISO_DASHBOARD_TOKEN is required for a non-loopback host")
+        if self.dashboard_token is not None and len(self.dashboard_token) < 32:
+            raise ConfigError("MISO_DASHBOARD_TOKEN must contain at least 32 characters")
+        if self.developer_root is not None and not self.developer_root.is_absolute():
+            raise ConfigError("MISO_DEVELOPER_ROOT must be absolute")
+        if not self.developer_commands:
+            raise ConfigError("MISO_DEVELOPER_COMMANDS must not be empty")
+        if any(Path(command).name != command for command in self.developer_commands):
+            raise ConfigError("MISO_DEVELOPER_COMMANDS must contain command names")
         for name, path in (
             ("MISO_STATE_DIR", self.state_dir),
             ("MISO_MODEL_DIR", self.model_dir),
@@ -117,6 +143,8 @@ class Settings:
 
     def validate_runtime_paths(self) -> None:
         paths = (self.database_path.parent, self.state_dir, self.model_dir)
+        if self.developer_root is not None:
+            paths += (self.developer_root,)
         missing = [str(path) for path in paths if not path.is_dir()]
         if missing:
             raise ConfigError(f"required directories are missing: {', '.join(missing)}")

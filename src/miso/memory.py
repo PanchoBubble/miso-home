@@ -154,6 +154,17 @@ class SearchResult:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationEvent:
+    event_id: int
+    conversation_id: str
+    kind: str
+    role: str | None
+    content: str
+    payload: Mapping[str, object]
+    created_at: str
+
+
 class MemoryStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -224,6 +235,42 @@ class MemoryStore:
                 (now, conversation_id),
             )
             return int(cursor.lastrowid)
+
+    def conversation_exists(self, conversation_id: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        return row is not None
+
+    def events(
+        self, conversation_id: str, *, limit: int = 100
+    ) -> list[ConversationEvent]:
+        bounded_limit = max(1, min(limit, 500))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT id, conversation_id, kind, role, content,
+                           payload_json, created_at
+                    FROM events WHERE conversation_id = ?
+                    ORDER BY id DESC LIMIT ?
+                ) ORDER BY id
+                """,
+                (conversation_id, bounded_limit),
+            ).fetchall()
+        return [
+            ConversationEvent(
+                event_id=row["id"],
+                conversation_id=row["conversation_id"],
+                kind=row["kind"],
+                role=row["role"],
+                content=row["content"],
+                payload=json.loads(row["payload_json"]),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
     def add_memory(
         self,
