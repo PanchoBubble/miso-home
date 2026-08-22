@@ -4,120 +4,212 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0d0f0e">
     <title>Miso · Local assistant</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <div class="shell">
-      <header class="topbar">
-        <div class="brand">
+    <div id="offline-banner" class="offline-banner hidden" role="status">
+      <span id="connection-banner-copy">Miso is offline. Your draft is safe; reconnect to send it.</span>
+      <button id="retry-connection" class="quiet-button" type="button">Retry</button>
+    </div>
+
+    <div class="app-shell">
+      <header class="app-bar">
+        <a class="brand" href="/" aria-label="Miso home">
           <span class="brand-mark" aria-hidden="true">み</span>
-          <div>
+          <span class="brand-copy">
             <strong>Miso</strong>
-            <span>local household console</span>
-          </div>
-        </div>
-        <div class="top-actions">
-          <span id="service-status" class="status-pill">Connecting</span>
-          <button id="settings-toggle" class="icon-button" type="button" aria-expanded="false">Access</button>
-        </div>
+            <small>Local household assistant</small>
+          </span>
+        </a>
+
+        <nav class="app-actions" aria-label="Dashboard actions">
+          <button id="service-status" class="status-button" type="button" title="Refresh connection status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="status-copy">Connecting</span>
+          </button>
+          <button class="icon-button" data-open-panel="activity" type="button" aria-label="Open activity">
+            <span aria-hidden="true">Pulse</span>
+          </button>
+          <button class="icon-button" data-open-panel="system" type="button" aria-label="Open controls">
+            <span aria-hidden="true">Controls</span>
+          </button>
+        </nav>
       </header>
 
-      <section id="access-panel" class="access-panel hidden" aria-label="Dashboard access">
-        <label for="access-token">Dashboard token</label>
-        <input id="access-token" type="password" autocomplete="off" placeholder="Only needed when configured">
-        <button id="save-token" type="button">Save for this tab</button>
-      </section>
+      <main class="main-stage">
+        <section class="conversation" aria-label="Conversation with Miso">
+          <header class="conversation-header">
+            <div>
+              <p class="eyebrow">At home · private by default</p>
+              <h1>What can I help with?</h1>
+            </div>
+            <button id="new-chat" class="quiet-button" type="button">New chat</button>
+          </header>
 
-      <main class="workspace">
-        <aside class="rail" aria-label="System overview">
-          <section class="panel">
-            <div class="panel-heading">
-              <h2>Providers</h2>
-              <button id="refresh-status" class="text-button" type="button">Refresh</button>
+          <div id="messages" class="messages" aria-live="polite" aria-relevant="additions text">
+            <section class="empty-state" aria-label="Start a conversation">
+              <div class="empty-mark" aria-hidden="true">み</div>
+              <h2>I’m here when you need me.</h2>
+              <p>Ask naturally. Routine requests stay on your Pi, and Miso will show you when a tool or another model is involved.</p>
+              <div class="prompt-grid" aria-label="Example requests">
+                <button class="prompt-card" type="button" data-prompt="Set a timer for five minutes">
+                  <span class="prompt-icon" aria-hidden="true">◷</span>
+                  <span><strong>Set a timer</strong><small>Five minutes</small></span>
+                </button>
+                <button class="prompt-card" type="button" data-prompt="Add coffee to the shopping list">
+                  <span class="prompt-icon" aria-hidden="true">＋</span>
+                  <span><strong>Shopping list</strong><small>Add coffee</small></span>
+                </button>
+                <button class="prompt-card" type="button" data-prompt="What do you remember about recycling?">
+                  <span class="prompt-icon" aria-hidden="true">⌕</span>
+                  <span><strong>Search memory</strong><small>Recycling</small></span>
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <div id="turn-progress" class="turn-progress hidden" role="status">
+            <span class="thinking-orb" aria-hidden="true"></span>
+            <span id="progress-copy">Thinking…</span>
+            <span id="progress-provider" class="progress-provider"></span>
+          </div>
+
+          <form id="chat-form" class="composer">
+            <label class="sr-only" for="chat-input">Message Miso</label>
+            <textarea id="chat-input" rows="1" maxlength="8000" placeholder="Message Miso…" required></textarea>
+            <div class="composer-footer">
+              <button id="route-chip" class="route-chip" type="button" title="Open routing controls">
+                <span class="route-dot" aria-hidden="true"></span>
+                <span>Automatic route</span>
+              </button>
+              <div class="composer-actions">
+                <span class="key-hint">Shift + Enter for a new line</span>
+                <button id="cancel-chat" class="quiet-button hidden" type="button">Stop</button>
+                <button id="send-chat" class="send-button" type="submit" aria-label="Send message">
+                  <span>Send</span><span aria-hidden="true">↑</span>
+                </button>
+              </div>
+            </div>
+          </form>
+          <p class="privacy-note">Conversation history stays on Miso unless routing requires an enabled remote provider.</p>
+        </section>
+      </main>
+    </div>
+
+    <div id="panel-scrim" class="panel-scrim hidden" aria-hidden="true"></div>
+    <aside id="side-panel" class="side-panel" aria-label="Miso details" aria-hidden="true">
+      <header class="panel-header">
+        <div>
+          <p class="eyebrow">Miso details</p>
+          <h2>Context & controls</h2>
+        </div>
+        <button id="close-panel" class="close-button" type="button" aria-label="Close panel">×</button>
+      </header>
+
+      <div class="panel-tabs" role="tablist" aria-label="Detail views">
+        <button class="panel-tab active" data-tab="activity" type="button" role="tab" aria-selected="true">Activity</button>
+        <button class="panel-tab" data-tab="memory" type="button" role="tab" aria-selected="false">Memory</button>
+        <button class="panel-tab" data-tab="system" type="button" role="tab" aria-selected="false">Controls</button>
+      </div>
+
+      <div class="panel-scroll">
+        <section id="activity-view" class="panel-view" role="tabpanel">
+          <div class="section-heading">
+            <div><h3>Recent activity</h3><p>Routing and tool events, with sensitive values removed.</p></div>
+            <button id="refresh-activity" class="quiet-button" type="button">Refresh</button>
+          </div>
+          <div id="activity" class="activity-list"></div>
+        </section>
+
+        <section id="memory-view" class="panel-view hidden" role="tabpanel">
+          <div class="section-heading">
+            <div><h3>Search memory</h3><p>Find conversation fragments and remembered household facts.</p></div>
+          </div>
+          <form id="memory-form" class="search-form">
+            <label class="sr-only" for="memory-query">Search memory</label>
+            <input id="memory-query" placeholder="Try “recycling”" maxlength="500">
+            <button type="submit">Search</button>
+          </form>
+          <div id="memory-results" class="memory-results"></div>
+        </section>
+
+        <section id="system-view" class="panel-view hidden" role="tabpanel">
+          <section class="control-section">
+            <div class="section-heading">
+              <div><h3>Model route</h3><p>Automatic is best for everyday household requests.</p></div>
+            </div>
+            <div class="field-grid">
+              <label for="route-class">Request class</label>
+              <select id="route-class">
+                <option value="auto">Automatic</option>
+                <option value="routine">Routine</option>
+                <option value="standard">Standard</option>
+                <option value="complex">Complex</option>
+              </select>
+              <label for="provider-override">Provider override</label>
+              <select id="provider-override">
+                <option value="">Automatic fallback</option>
+                <option value="pi-ollama">Pi Ollama</option>
+                <option value="lan-ollama">LAN Ollama</option>
+                <option value="hosted-gpt">Hosted GPT</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="control-section">
+            <div class="section-heading">
+              <div><h3>Providers</h3><p>Live availability from the Miso runtime.</p></div>
+              <button id="refresh-status" class="quiet-button" type="button">Refresh</button>
             </div>
             <div id="providers" class="provider-list"></div>
           </section>
 
-          <section class="panel controls-panel">
-            <h2>Route</h2>
-            <label for="route-class">Request class</label>
-            <select id="route-class">
-              <option value="auto">Auto</option>
-              <option value="routine">Routine</option>
-              <option value="standard">Standard</option>
-              <option value="complex">Complex</option>
-            </select>
-            <label for="provider-override">Provider override</label>
-            <select id="provider-override">
-              <option value="">Automatic fallback</option>
-              <option value="pi-ollama">Pi Ollama</option>
-              <option value="lan-ollama">LAN Ollama</option>
-              <option value="hosted-gpt">Hosted GPT</option>
-            </select>
-          </section>
+          <details class="control-section disclosure">
+            <summary>
+              <span><strong>Dashboard access</strong><small>Token for protected network access</small></span>
+              <span aria-hidden="true">›</span>
+            </summary>
+            <div class="disclosure-body">
+              <label for="access-token">Dashboard token</label>
+              <input id="access-token" type="password" autocomplete="off" placeholder="Only needed when configured">
+              <button id="save-token" type="button">Save for this tab</button>
+            </div>
+          </details>
 
-          <section id="developer-panel" class="panel developer-panel">
-            <div class="panel-heading">
-              <h2>Developer mode</h2>
+          <details class="control-section disclosure developer-disclosure">
+            <summary>
+              <span><strong>Developer mode</strong><small id="developer-detail">Command execution is disabled.</small></span>
               <span id="developer-state" class="mini-state">Off</span>
+            </summary>
+            <div class="disclosure-body">
+              <div class="button-row">
+                <button id="enable-developer" class="warning-button" type="button">Enable 5 min</button>
+                <button id="disable-developer" type="button">Disable</button>
+              </div>
+              <label for="developer-command">Command argv (JSON)</label>
+              <input id="developer-command" value='["ls","-la"]' spellcheck="false">
+              <button id="run-developer" type="button">Run in configured scope</button>
+              <pre id="developer-output" class="command-output" aria-live="polite"></pre>
             </div>
-            <p id="developer-detail" class="muted">Command execution is disabled.</p>
-            <div class="button-row">
-              <button id="enable-developer" class="warning-button" type="button">Enable 5 min</button>
-              <button id="disable-developer" type="button">Disable</button>
-            </div>
-            <label for="developer-command">Command argv (JSON)</label>
-            <input id="developer-command" value='["ls","-la"]' spellcheck="false">
-            <button id="run-developer" type="button">Run in scope</button>
-            <pre id="developer-output" class="command-output" aria-live="polite"></pre>
-          </section>
-        </aside>
-
-        <section class="chat-panel" aria-label="Chat">
-          <div class="chat-heading">
-            <div>
-              <p class="eyebrow">Text-first assistant</p>
-              <h1>What can I take care of?</h1>
-            </div>
-            <button id="new-chat" class="text-button" type="button">New chat</button>
-          </div>
-          <div id="messages" class="messages" aria-live="polite">
-            <article class="message assistant welcome">
-              <span class="message-label">Miso</span>
-              <p>I’m ready locally. Try “Set a timer for five minutes” or search your saved memory.</p>
-            </article>
-          </div>
-          <div id="progress" class="progress-line" aria-live="polite"></div>
-          <form id="chat-form" class="composer">
-            <label class="sr-only" for="chat-input">Message Miso</label>
-            <textarea id="chat-input" rows="2" maxlength="8000" placeholder="Message Miso…" required></textarea>
-            <div class="composer-actions">
-              <button id="cancel-chat" class="text-button hidden" type="button">Cancel</button>
-              <button id="send-chat" class="send-button" type="submit">Send</button>
-            </div>
-          </form>
+          </details>
         </section>
+      </div>
+    </aside>
 
-        <aside class="inspector" aria-label="Inspector">
-          <div class="tabs" role="tablist">
-            <button class="tab active" data-tab="activity" type="button">Activity</button>
-            <button class="tab" data-tab="memory" type="button">Memory</button>
-          </div>
-          <section id="activity-view" class="inspector-view">
-            <div id="activity" class="activity-list"></div>
-          </section>
-          <section id="memory-view" class="inspector-view hidden">
-            <form id="memory-form" class="search-form">
-              <label class="sr-only" for="memory-query">Search memory</label>
-              <input id="memory-query" placeholder="Search conversations…" maxlength="500">
-              <button type="submit">Search</button>
-            </form>
-            <div id="memory-results" class="memory-results"></div>
-          </section>
-        </aside>
-      </main>
-    </div>
+    <template id="empty-state-template">
+      <section class="empty-state" aria-label="Start a conversation">
+        <div class="empty-mark" aria-hidden="true">み</div>
+        <h2>Fresh conversation, same local memory.</h2>
+        <p>Ask a question, set a timer, or update a shared household list.</p>
+        <div class="prompt-grid" aria-label="Example requests">
+          <button class="prompt-card" type="button" data-prompt="Set a timer for five minutes"><span class="prompt-icon" aria-hidden="true">◷</span><span><strong>Set a timer</strong><small>Five minutes</small></span></button>
+          <button class="prompt-card" type="button" data-prompt="Add coffee to the shopping list"><span class="prompt-icon" aria-hidden="true">＋</span><span><strong>Shopping list</strong><small>Add coffee</small></span></button>
+        </div>
+      </section>
+    </template>
+
     <script src="/app.js" defer></script>
   </body>
 </html>

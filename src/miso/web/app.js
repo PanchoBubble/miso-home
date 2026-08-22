@@ -3,6 +3,8 @@ const state = {
   conversationId: null,
   requestId: null,
   developerEnabled: false,
+  connected: false,
+  panelReturnFocus: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -42,41 +44,78 @@ async function api(path, options = {}) {
   });
   const payload = await response.json();
   if (!response.ok) {
-    if (response.status === 401) $("#access-panel").classList.remove("hidden");
+    if (response.status === 401) {
+      openPanel("system");
+      $(".disclosure").open = true;
+    }
     throw new Error(payload.error || `Request failed (${response.status})`);
   }
   return payload;
 }
 
 function providerLabel(name) {
-  return { "pi-ollama": "Pi Ollama", "lan-ollama": "LAN Ollama", "hosted-gpt": "Hosted GPT" }[name] || name;
+  return {
+    "pi-ollama": "Pi Ollama",
+    "lan-ollama": "LAN Ollama",
+    "hosted-gpt": "Hosted GPT",
+  }[name] || name;
+}
+
+function friendlyToolName(name) {
+  return {
+    timer_create: "Timer created",
+    timer_list: "Timers checked",
+    reminder_create: "Reminder created",
+    reminder_list: "Reminders checked",
+    shopping_add: "Shopping list updated",
+    shopping_list: "Shopping list checked",
+    shopping_complete: "Shopping item completed",
+    developer_command: "Developer command",
+  }[name] || name.replaceAll("_", " ");
+}
+
+function setConnected(connected, detail = "") {
+  state.connected = connected;
+  const status = $("#service-status");
+  status.classList.toggle("online", connected);
+  status.classList.toggle("offline", !connected);
+  $(".status-copy").textContent = connected ? detail || "Online" : detail || "Offline";
+  $("#connection-banner-copy").textContent = detail === "Access needed"
+    ? "Dashboard access is required. Enter the token in Controls to reconnect."
+    : "Miso is offline. Your draft is safe; reconnect to send it.";
+  $("#offline-banner").classList.toggle("hidden", connected);
+}
+
+function renderProviders(providers) {
+  const nodes = providers.map((provider) => {
+    const card = document.createElement("div");
+    card.className = "provider";
+
+    const dot = document.createElement("span");
+    dot.className = `provider-dot${provider.available ? " up" : ""}`;
+
+    const copy = document.createElement("div");
+    copy.className = "provider-copy";
+    const label = document.createElement("strong");
+    label.textContent = providerLabel(provider.name);
+    const detail = document.createElement("p");
+    const latency = Number.isFinite(provider.latency_ms) ? ` · ${provider.latency_ms} ms` : "";
+    detail.textContent = `${provider.model || "Not configured"} · ${provider.detail}${latency}`;
+    copy.append(label, detail);
+    card.append(dot, copy);
+    return card;
+  });
+  $("#providers").replaceChildren(...(nodes.length ? nodes : [emptyNode("No providers reported")]));
 }
 
 async function loadStatus() {
   try {
     const data = await api("/api/status");
-    const service = $("#service-status");
-    service.textContent = `Online · ${data.service.architecture}`;
-    service.classList.add("online");
-    $("#providers").replaceChildren(...data.providers.map((provider) => {
-      const card = document.createElement("div");
-      card.className = "provider";
-      const line = document.createElement("div");
-      line.className = "provider-line";
-      const label = document.createElement("strong");
-      label.textContent = providerLabel(provider.name);
-      const dot = document.createElement("span");
-      dot.className = `dot${provider.available ? " up" : ""}`;
-      line.append(label, dot);
-      const detail = document.createElement("small");
-      detail.textContent = `${provider.model || "not configured"} · ${provider.detail} · ${provider.latency_ms}ms`;
-      card.append(line, detail);
-      return card;
-    }));
+    setConnected(true, `Online · ${data.service.architecture}`);
+    renderProviders(data.providers);
     renderDeveloper(data.developer_mode);
   } catch (error) {
-    $("#service-status").textContent = error.message;
-    $("#service-status").classList.remove("online");
+    setConnected(false, error.message === "unauthorized" ? "Access needed" : "Offline");
   }
 }
 
@@ -90,27 +129,81 @@ function renderDeveloper(status) {
   $("#run-developer").disabled = !status.enabled;
 }
 
+function scrollConversation() {
+  requestAnimationFrame(() => {
+    const messages = $("#messages");
+    messages.scrollTo({ top: messages.scrollHeight, behavior: "smooth" });
+  });
+}
+
 function addMessage(role, text = "") {
   const article = document.createElement("article");
   article.className = `message ${role}`;
-  const label = document.createElement("span");
-  label.className = "message-label";
-  label.textContent = role === "user" ? "You" : "Miso";
+
+  const avatar = document.createElement("div");
+  avatar.className = "message-avatar";
+  avatar.setAttribute("aria-hidden", "true");
+  avatar.textContent = role === "user" ? "You" : "み";
+
+  const column = document.createElement("div");
+  column.className = "message-column";
+  const meta = document.createElement("div");
+  meta.className = "message-meta";
+  meta.textContent = role === "user" ? "You" : "Miso";
   const content = document.createElement("p");
+  content.className = "message-body";
   content.textContent = text;
-  article.append(label, content);
+  column.append(meta, content);
+  article.append(avatar, column);
   $("#messages").append(article);
-  article.scrollIntoView({ behavior: "smooth", block: "end" });
-  return content;
+  scrollConversation();
+  return { article, content, meta };
 }
 
 function addToolResult(result, provider) {
-  const card = document.createElement("div");
-  card.className = "tool-card";
-  const output = result.output ? JSON.stringify(result.output, null, 2) : result.error;
-  card.textContent = `${result.tool} · ${result.status} · ${provider || "unknown provider"}\n${output || ""}`;
+  const card = document.createElement("details");
+  card.className = `tool-card${result.ok ? "" : " failed"}`;
+
+  const summary = document.createElement("summary");
+  const summaryLeft = document.createElement("span");
+  summaryLeft.className = "tool-summary";
+  const icon = document.createElement("span");
+  icon.className = "tool-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = result.ok ? "✓" : "!";
+  const copy = document.createElement("span");
+  copy.className = "tool-copy";
+  const title = document.createElement("strong");
+  title.textContent = friendlyToolName(result.tool);
+  const detail = document.createElement("small");
+  detail.textContent = `${result.status} · ${providerLabel(provider || "local")}`;
+  copy.append(title, detail);
+  summaryLeft.append(icon, copy);
+  const chevron = document.createElement("span");
+  chevron.className = "tool-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "›";
+  summary.append(summaryLeft, chevron);
+
+  const output = document.createElement("pre");
+  output.className = "tool-output";
+  const payload = result.output || result.error || { status: result.status };
+  output.textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  card.append(summary, output);
   $("#messages").append(card);
-  card.scrollIntoView({ behavior: "smooth", block: "end" });
+  scrollConversation();
+}
+
+function showProgress(message, provider = "") {
+  $("#progress-copy").textContent = message || "Working…";
+  $("#progress-provider").textContent = provider ? providerLabel(provider) : "";
+  $("#turn-progress").classList.remove("hidden");
+}
+
+function hideProgress() {
+  $("#turn-progress").classList.add("hidden");
+  $("#progress-copy").textContent = "";
+  $("#progress-provider").textContent = "";
 }
 
 async function sendChat(event) {
@@ -119,13 +212,17 @@ async function sendChat(event) {
   const input = $("#chat-input");
   const text = input.value.trim();
   if (!text) return;
+
+  if ($(".empty-state")) $("#messages").replaceChildren();
   addMessage("user", text);
   input.value = "";
+  resizeComposer();
   const assistant = addMessage("assistant");
   state.requestId = createRequestId();
   $("#cancel-chat").classList.remove("hidden");
   $("#send-chat").disabled = true;
-  $("#progress").textContent = "Acknowledging…";
+  showProgress("Choosing the best local route…");
+
   const body = {
     text,
     request_id: state.requestId,
@@ -133,6 +230,8 @@ async function sendChat(event) {
     route_class: $("#route-class").value,
   };
   if ($("#provider-override").value) body.provider = $("#provider-override").value;
+
+  let selectedProvider = "";
   try {
     const response = await fetch("/api/chat", {
       method: "POST",
@@ -141,8 +240,13 @@ async function sendChat(event) {
     });
     if (!response.ok) {
       const error = await response.json();
+      if (response.status === 401) {
+        openPanel("system");
+        throw new Error("Access needed");
+      }
       throw new Error(error.error || `Chat failed (${response.status})`);
     }
+    setConnected(true, "Online");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let pending = "";
@@ -150,39 +254,59 @@ async function sendChat(event) {
       const { done, value } = await reader.read();
       pending += decoder.decode(value || new Uint8Array(), { stream: !done });
       const lines = pending.split("\n");
-      pending = lines.pop();
+      pending = lines.pop() || "";
+      if (done && pending.trim()) {
+        lines.push(pending);
+        pending = "";
+      }
       for (const line of lines) {
-        if (!line) continue;
+        if (!line.trim()) continue;
         const item = JSON.parse(line);
-        if (item.type === "progress") $("#progress").textContent = item.message;
-        if (item.type === "delta") assistant.textContent += item.text;
+        if (item.provider) selectedProvider = item.provider;
+        if (item.type === "progress") showProgress(item.message, item.provider);
+        if (item.type === "delta") assistant.content.textContent += item.text;
         if (item.type === "tool_result") addToolResult(item.result, item.provider);
         if (item.type === "complete") state.conversationId = item.conversation_id;
-        if (item.type === "cancelled") $("#progress").textContent = "Cancelled";
+        if (item.type === "cancelled") showProgress("Stopped");
         if (item.type === "error") throw new Error(item.error);
       }
       if (done) break;
     }
-    if (!assistant.textContent) assistant.textContent = "Tool request completed.";
-    $("#progress").textContent = "";
+    if (!assistant.content.textContent) assistant.content.textContent = "Done — I’ve completed that for you.";
+    assistant.meta.textContent = selectedProvider ? `Miso · ${providerLabel(selectedProvider)}` : "Miso";
     await loadActivity();
   } catch (error) {
-    assistant.textContent = `I couldn’t complete that request: ${error.message}`;
-    $("#progress").textContent = "";
+    assistant.article.classList.add("error");
+    assistant.content.textContent = `I couldn’t complete that request: ${error.message}`;
+    if (!navigator.onLine || error instanceof TypeError) {
+      setConnected(false, "Offline");
+    } else if (error.message === "Access needed") {
+      setConnected(false, "Access needed");
+    }
   } finally {
     state.requestId = null;
     $("#cancel-chat").classList.add("hidden");
     $("#send-chat").disabled = false;
+    hideProgress();
     input.focus();
   }
 }
 
 async function cancelChat() {
   if (!state.requestId) return;
-  await api("/api/chat/cancel", {
-    method: "POST",
-    body: JSON.stringify({ request_id: state.requestId }),
-  });
+  showProgress("Stopping…");
+  try {
+    await api("/api/chat/cancel", {
+      method: "POST",
+      body: JSON.stringify({ request_id: state.requestId }),
+    });
+  } catch (error) {
+    showProgress(`Could not stop: ${error.message}`);
+  }
+}
+
+function eventLabel(event) {
+  return String(event.event || event.type || "local event").replaceAll("_", " ");
 }
 
 async function loadActivity() {
@@ -191,16 +315,24 @@ async function loadActivity() {
     const nodes = data.events.map((event) => {
       const item = document.createElement("div");
       item.className = "activity-item";
+      const icon = document.createElement("span");
+      icon.className = "activity-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = event.tool ? "⌘" : "↗";
+      const copy = document.createElement("div");
+      copy.className = "activity-copy";
       const title = document.createElement("strong");
-      title.textContent = event.event.replaceAll("_", " ");
+      title.textContent = eventLabel(event);
       const detail = document.createElement("p");
       const provider = event.provider || event.selected_provider || event.tool || "local";
       const status = event.status || event.classification || "";
-      detail.textContent = `${provider} ${status} · ${new Date(event.timestamp).toLocaleTimeString()}`;
-      item.append(title, detail);
+      const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+      detail.textContent = [providerLabel(provider), status, time].filter(Boolean).join(" · ");
+      copy.append(title, detail);
+      item.append(icon, copy);
       return item;
     });
-    $("#activity").replaceChildren(...(nodes.length ? nodes : [emptyNode("No activity yet") ]));
+    $("#activity").replaceChildren(...(nodes.length ? nodes : [emptyNode("No activity yet")]));
   } catch (error) {
     $("#activity").replaceChildren(emptyNode(error.message));
   }
@@ -217,6 +349,7 @@ async function searchMemory(event) {
   event.preventDefault();
   const query = $("#memory-query").value.trim();
   if (!query) return;
+  $("#memory-results").replaceChildren(emptyNode("Searching local memory…"));
   try {
     const data = await api(`/api/memory?q=${encodeURIComponent(query)}`);
     const nodes = data.results.map((result) => {
@@ -229,7 +362,7 @@ async function searchMemory(event) {
       item.append(title, content);
       return item;
     });
-    $("#memory-results").replaceChildren(...(nodes.length ? nodes : [emptyNode("No matches") ]));
+    $("#memory-results").replaceChildren(...(nodes.length ? nodes : [emptyNode("No matches")]));
   } catch (error) {
     $("#memory-results").replaceChildren(emptyNode(error.message));
   }
@@ -264,39 +397,112 @@ async function runDeveloperCommand() {
 }
 
 function activateTab(name) {
-  $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === name));
-  $("#activity-view").classList.toggle("hidden", name !== "activity");
-  $("#memory-view").classList.toggle("hidden", name !== "memory");
+  $$(".panel-tab").forEach((tab) => {
+    const active = tab.dataset.tab === name;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  ["activity", "memory", "system"].forEach((view) => {
+    $(`#${view}-view`).classList.toggle("hidden", view !== name);
+  });
+  if (name === "activity") loadActivity();
+  if (name === "memory") requestAnimationFrame(() => $("#memory-query").focus());
+}
+
+function openPanel(name = "activity") {
+  state.panelReturnFocus = document.activeElement;
+  activateTab(name);
+  $("#side-panel").classList.add("open");
+  $("#side-panel").setAttribute("aria-hidden", "false");
+  $("#panel-scrim").classList.remove("hidden");
+  $("#panel-scrim").setAttribute("aria-hidden", "false");
+  document.body.classList.add("panel-open");
+  if (name !== "memory") requestAnimationFrame(() => $("#close-panel").focus());
+}
+
+function closePanel() {
+  $("#side-panel").classList.remove("open");
+  $("#side-panel").setAttribute("aria-hidden", "true");
+  $("#panel-scrim").classList.add("hidden");
+  $("#panel-scrim").setAttribute("aria-hidden", "true");
+  document.body.classList.remove("panel-open");
+  if (state.panelReturnFocus instanceof HTMLElement) state.panelReturnFocus.focus();
+  state.panelReturnFocus = null;
+}
+
+function updateRouteChip() {
+  const routeClass = $("#route-class").value;
+  const provider = $("#provider-override").value;
+  const label = provider
+    ? providerLabel(provider)
+    : routeClass === "auto"
+      ? "Automatic route"
+      : `${routeClass[0].toUpperCase()}${routeClass.slice(1)} route`;
+  $("#route-chip span:last-child").textContent = label;
+}
+
+function resizeComposer() {
+  const input = $("#chat-input");
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+}
+
+function resetConversation() {
+  if (state.requestId) return;
+  state.conversationId = null;
+  $("#messages").replaceChildren($("#empty-state-template").content.cloneNode(true));
+  hideProgress();
+  $("#chat-input").focus();
 }
 
 $("#chat-form").addEventListener("submit", sendChat);
+$("#chat-input").addEventListener("input", resizeComposer);
+$("#chat-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    $("#chat-form").requestSubmit();
+  }
+});
+$("#messages").addEventListener("click", (event) => {
+  const prompt = event.target.closest("[data-prompt]");
+  if (!prompt) return;
+  $("#chat-input").value = prompt.dataset.prompt;
+  resizeComposer();
+  $("#chat-form").requestSubmit();
+});
 $("#cancel-chat").addEventListener("click", cancelChat);
+$("#new-chat").addEventListener("click", resetConversation);
 $("#memory-form").addEventListener("submit", searchMemory);
 $("#refresh-status").addEventListener("click", loadStatus);
+$("#refresh-activity").addEventListener("click", loadActivity);
+$("#service-status").addEventListener("click", loadStatus);
+$("#retry-connection").addEventListener("click", loadStatus);
 $("#enable-developer").addEventListener("click", () => developerAction("enable"));
 $("#disable-developer").addEventListener("click", () => developerAction("disable"));
 $("#run-developer").addEventListener("click", runDeveloperCommand);
-$("#new-chat").addEventListener("click", () => {
-  state.conversationId = null;
-  $("#messages").replaceChildren();
-  addMessage("assistant", "New local conversation started.");
-});
-$("#settings-toggle").addEventListener("click", () => {
-  const panel = $("#access-panel");
-  panel.classList.toggle("hidden");
-  $("#settings-toggle").setAttribute("aria-expanded", String(!panel.classList.contains("hidden")));
+$("#route-class").addEventListener("change", updateRouteChip);
+$("#provider-override").addEventListener("change", updateRouteChip);
+$("#route-chip").addEventListener("click", () => openPanel("system"));
+$("#close-panel").addEventListener("click", closePanel);
+$("#panel-scrim").addEventListener("click", closePanel);
+$$("[data-open-panel]").forEach((button) => button.addEventListener("click", () => openPanel(button.dataset.openPanel)));
+$$(".panel-tab").forEach((tab) => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("#side-panel").classList.contains("open")) closePanel();
 });
 $("#save-token").addEventListener("click", () => {
   state.token = $("#access-token").value.trim();
   if (state.token) sessionStorage.setItem("miso-dashboard-token", state.token);
   else sessionStorage.removeItem("miso-dashboard-token");
-  $("#access-panel").classList.add("hidden");
   loadStatus();
   loadActivity();
 });
-$$('.tab').forEach((tab) => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
+window.addEventListener("online", loadStatus);
+window.addEventListener("offline", () => setConnected(false, "Offline"));
 
 $("#access-token").value = state.token;
+updateRouteChip();
+resizeComposer();
 loadStatus();
 loadActivity();
 setInterval(loadStatus, 15000);
