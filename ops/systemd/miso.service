@@ -1,0 +1,44 @@
+[Unit]
+Description=Miso local assistant runtime
+After=network.target
+
+[Service]
+Type=simple
+User=miso
+Group=miso
+WorkingDirectory=/opt/miso/app
+Environment=PYTHONPATH=/opt/miso/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=MISO_HOST=127.0.0.1
+Environment=MISO_PORT=8090
+Environment=MISO_DB_PATH=/var/lib/miso/db/miso.sqlite3
+Environment=MISO_STATE_DIR=/var/lib/miso/state
+Environment=MISO_MODEL_DIR=/var/lib/miso/models
+EnvironmentFile=-/etc/miso/miso.env
+ExecStartPre=/usr/bin/python3 -m miso --check-config
+ExecStart=/usr/bin/python3 -m miso
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+RuntimeDirectory=miso
+RuntimeDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/miso /run/miso
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
