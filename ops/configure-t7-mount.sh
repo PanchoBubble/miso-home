@@ -14,7 +14,9 @@ fail() {
 
 [[ "${EUID}" -eq 0 ]] || fail "run as root"
 [[ -f "${FSTAB}" ]] || fail "fstab not found: ${FSTAB}"
-[[ "$(findmnt -n -o UUID -T "${MOUNT_POINT}" 2>/dev/null || true)" == "${T7_UUID}" ]] \
+mounted_uuid="$(findmnt -rn -o UUID -T "${MOUNT_POINT}" 2>/dev/null \
+  | awk 'NF { uuid = $1 } END { print uuid }')"
+[[ "${mounted_uuid}" == "${T7_UUID}" ]] \
   || fail "expected T7 UUID ${T7_UUID} is not currently mounted at ${MOUNT_POINT}"
 
 tmp="$(mktemp /var/tmp/miso-fstab.XXXXXX)"

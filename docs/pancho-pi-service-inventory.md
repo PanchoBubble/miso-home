@@ -77,6 +77,21 @@ on the root filesystem. Volume `dmaga_media-downloads` is a local bind volume
 whose device is `/media/pancho/T7/dmaga/downloads`; its apparent Docker volume
 mount is therefore T7 data, not duplicate root-disk data.
 
+On 2026-08-22 the unused DMAGA project was isolated with `docker compose stop`.
+All nine containers remain present in the exited state and all named volumes are
+preserved. A restart test brought the same nine container IDs back up, after
+which the project was stopped again. The `services` project remained at ten
+running containers throughout; Immich, Nextcloud, Vaultwarden, and Homepage
+HTTP probes all returned 200 after both stop operations.
+
+With DMAGA stopped and no inventory scans running, a 25-second `vmstat` sample
+showed 96--99% idle CPU after the first cumulative row, zero swap activity,
+negligible block reads, and 11--18 KiB/s block writes. Host memory usage was
+about 2.0 GiB of 15 GiB, temperature was 59.3 C, and throttling remained
+`0x0`. A short post-start sample used about 4.17 GB and reached 65.9 C while
+DMAGA initialized; it was intentionally stopped again to leave those resources
+available for Miso.
+
 ## Backup and restore status
 
 `miso-existing-services-backup.timer` creates a daily AES-256-CBC/PBKDF2
@@ -96,11 +111,14 @@ recovery copy is in the local Git-ignored
 `.secrets/existing-services-backup.passphrase`; it must never be committed.
 
 Bulk Immich and Nextcloud media remains on the single T7 device. The configured
-`gdrive:` rclone remote has an expired OAuth grant, and the `pancho` cron still
-references the missing `/home/pancho/sync_takeout_to_juli_unlimited.sh`.
-Beads issue `miso-4bw` tracks interactive reauthorization and a non-destructive
-off-device media copy. Beads issue `miso-3vg` remains open until that coverage
-is restored.
+`gdrive:` rclone remote was reauthorized on 2026-08-22, but the selected account
+has only 7.515 GiB free and cannot hold the roughly 344 GiB external photo
+library. The obsolete `pancho` cron entry for the missing
+`/home/pancho/sync_takeout_to_juli_unlimited.sh` was removed. No upload was
+started and no remote content was changed or deleted. Beads issue `miso-4bw`
+remains open for selection of a sufficiently large off-device target and a
+non-destructive copy job. Beads issue `miso-3vg` remains open until that
+coverage is restored.
 
 ## Safe recovery commands
 

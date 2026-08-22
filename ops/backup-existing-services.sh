@@ -6,6 +6,7 @@ umask 077
 BACKUP_ROOT="${BACKUP_ROOT:-/media/pancho/T7/backups/existing-services}"
 KEY_FILE="${KEY_FILE:-/home/pancho/.config/miso-backup/backup.key}"
 T7_UUID="${T7_UUID:-081E-DA7A}"
+T7_ROOT="${T7_ROOT:-/media/pancho/T7}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
 LOCK_FILE="${LOCK_FILE:-/run/lock/miso-existing-services-backup.lock}"
 
@@ -34,8 +35,10 @@ done
 exec 9>"${LOCK_FILE}"
 flock -n 9 || fail "another backup is already running"
 
-mounted_uuid="$(findmnt -n -o UUID -T /media/pancho/T7 2>/dev/null || true)"
-[[ "${mounted_uuid}" == "${T7_UUID}" ]] || fail "T7 UUID ${T7_UUID} is not mounted at /media/pancho/T7"
+ls "${T7_ROOT}/." >/dev/null 2>&1 || fail "cannot access T7 mount at ${T7_ROOT}"
+mounted_uuid="$(findmnt -rn -o UUID -T "${T7_ROOT}" 2>/dev/null \
+  | awk 'NF { uuid = $1 } END { print uuid }')"
+[[ "${mounted_uuid}" == "${T7_UUID}" ]] || fail "T7 UUID ${T7_UUID} is not mounted at ${T7_ROOT}"
 [[ -r "${KEY_FILE}" ]] || fail "encryption key is not readable: ${KEY_FILE}"
 
 for container in "${IMMICH_DB_CONTAINER}" "${NEXTCLOUD_CONTAINER}" \
