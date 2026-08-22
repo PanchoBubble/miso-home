@@ -97,6 +97,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         response, javascript = self.request("GET", "/app.js")
         self.assertEqual(response.status, 200)
         self.assertIn(b"response.body.getReader", javascript)
+        self.assertIn(b"typeof secureCrypto.randomUUID", javascript)
+        self.assertIn(b"secureCrypto.getRandomValues", javascript)
 
         response, content = self.request("GET", "/api/status")
         payload = json.loads(content)
