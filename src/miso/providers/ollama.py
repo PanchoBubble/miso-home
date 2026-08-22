@@ -8,30 +8,34 @@ from typing import Iterator, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from miso.providers.base import ChatChunk, ChatRequest, ProviderHealth
-
-
-class ProviderError(RuntimeError):
-    pass
-
-
-class ProviderCancelled(ProviderError):
-    pass
-
-
-class ProviderProtocolError(ProviderError):
-    pass
+from miso.providers.base import (
+    ChatChunk,
+    ChatRequest,
+    ProviderCancelled,
+    ProviderError,
+    ProviderHealth,
+    ProviderProtocolError,
+)
+from miso.providers.tools import ollama_tools
 
 
 class OllamaProvider:
-    def __init__(self, base_url: str, model: str, timeout: float = 120) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = 120,
+        *,
+        provider_name: str = "pi-ollama",
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.provider_name = provider_name
 
     @property
     def name(self) -> str:
-        return "pi-ollama"
+        return self.provider_name
 
     def health(self) -> ProviderHealth:
         try:
@@ -53,7 +57,7 @@ class OllamaProvider:
             "stream": True,
         }
         if request.tools:
-            payload["tools"] = list(request.tools)
+            payload["tools"] = ollama_tools(request.tools)
         http_request = Request(
             f"{self.base_url}/api/chat",
             data=json.dumps(payload).encode("utf-8"),
@@ -88,3 +92,15 @@ class OllamaProvider:
             raise
         except (OSError, ValueError, HTTPError, URLError) as error:
             raise ProviderError(f"Ollama request failed: {type(error).__name__}") from error
+
+
+class LanOllamaProvider(OllamaProvider):
+    """Ollama adapter explicitly identified as a separate LAN escalation tier."""
+
+    def __init__(self, base_url: str, model: str, timeout: float = 120) -> None:
+        super().__init__(
+            base_url,
+            model,
+            timeout,
+            provider_name="lan-ollama",
+        )

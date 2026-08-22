@@ -4,7 +4,12 @@ from threading import Event
 import unittest
 from unittest.mock import patch
 
-from miso.providers import ChatRequest, OllamaProvider, ProviderCancelled
+from miso.providers import (
+    ChatRequest,
+    LanOllamaProvider,
+    OllamaProvider,
+    ProviderCancelled,
+)
 
 
 class FakeResponse(io.BytesIO):
@@ -48,15 +53,37 @@ class OllamaProviderTests(unittest.TestCase):
         )
         output = list(
             self.provider.stream(
-                ChatRequest(messages=({"role": "user", "content": "hola"},)), Event()
+                ChatRequest(
+                    messages=({"role": "user", "content": "hola"},),
+                    tools=(
+                        {
+                            "name": "timer_create",
+                            "description": "Create timer",
+                            "input_schema": {
+                                "type": "object",
+                                "additionalProperties": False,
+                            },
+                        },
+                    ),
+                ),
+                Event(),
             )
         )
         self.assertEqual(output[0].text, "Hola ")
         self.assertEqual(output[1].tool_call["name"], "timer_create")
         self.assertTrue(output[-1].done)
+        request = mocked_urlopen.call_args.args[0]
+        payload = json.loads(request.data)
+        function = payload["tools"][0]["function"]
+        self.assertEqual(function["name"], "timer_create")
+        self.assertEqual(function["parameters"]["type"], "object")
 
     def test_pre_cancelled_request_never_dispatches(self) -> None:
         cancel = Event()
         cancel.set()
         with self.assertRaises(ProviderCancelled):
             list(self.provider.stream(ChatRequest(messages=()), cancel))
+
+    def test_lan_provider_has_distinct_identity(self) -> None:
+        provider = LanOllamaProvider("http://192.168.0.50:11434", "qwen3:8b")
+        self.assertEqual(provider.name, "lan-ollama")

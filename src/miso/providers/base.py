@@ -7,6 +7,18 @@ from threading import Event
 from typing import Iterator, Mapping, Protocol, Sequence, runtime_checkable
 
 
+class ProviderError(RuntimeError):
+    """Bounded provider failure safe to expose to routing logic."""
+
+
+class ProviderCancelled(ProviderError):
+    """Provider request was cancelled by its caller."""
+
+
+class ProviderProtocolError(ProviderError):
+    """Provider returned an invalid or unsupported response."""
+
+
 @dataclass(frozen=True, slots=True)
 class ChatRequest:
     messages: Sequence[Mapping[str, str]]

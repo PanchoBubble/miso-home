@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import environ
 from pathlib import Path
 from typing import Mapping
@@ -23,6 +23,11 @@ class Settings:
     ollama_model: str
     provider_timeout_seconds: float
     log_level: str
+    lan_ollama_url: str | None = None
+    lan_ollama_model: str = "qwen3:8b"
+    openai_api_key: str | None = field(default=None, repr=False)
+    openai_model: str = "gpt-5-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -48,6 +53,13 @@ class Settings:
             ollama_model=source.get("MISO_OLLAMA_MODEL", "qwen3:0.6b"),
             provider_timeout_seconds=provider_timeout,
             log_level=source.get("MISO_LOG_LEVEL", "INFO").upper(),
+            lan_ollama_url=source.get("MISO_LAN_OLLAMA_URL", "").strip() or None,
+            lan_ollama_model=source.get("MISO_LAN_OLLAMA_MODEL", "qwen3:8b"),
+            openai_api_key=source.get("MISO_OPENAI_API_KEY", "").strip() or None,
+            openai_model=source.get("MISO_OPENAI_MODEL", "gpt-5-mini"),
+            openai_base_url=source.get(
+                "MISO_OPENAI_BASE_URL", "https://api.openai.com/v1"
+            ),
         )
         settings.validate()
         return settings
@@ -67,6 +79,16 @@ class Settings:
             raise ConfigError("MISO_OLLAMA_URL must be an HTTP URL")
         if not self.ollama_model.strip():
             raise ConfigError("MISO_OLLAMA_MODEL must not be empty")
+        if self.lan_ollama_url is not None and not self.lan_ollama_url.startswith(
+            ("http://", "https://")
+        ):
+            raise ConfigError("MISO_LAN_OLLAMA_URL must be an HTTP URL")
+        if not self.lan_ollama_model.strip():
+            raise ConfigError("MISO_LAN_OLLAMA_MODEL must not be empty")
+        if not self.openai_model.strip():
+            raise ConfigError("MISO_OPENAI_MODEL must not be empty")
+        if not self.openai_base_url.startswith("https://"):
+            raise ConfigError("MISO_OPENAI_BASE_URL must use HTTPS")
         if not 0 < self.provider_timeout_seconds <= 600:
             raise ConfigError("MISO_PROVIDER_TIMEOUT must be between 0 and 600 seconds")
         for name, path in (

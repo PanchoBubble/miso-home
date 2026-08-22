@@ -66,3 +66,14 @@ process restart), and emits durable audit events. Every mutation increments a
 revision. Shopping removals are retained as tombstones so operator views can
 inspect history. Tool results use stable object shapes suitable for both local
 models and the dashboard.
+
+## Optional model providers
+
+The Pi Ollama adapter remains the default local provider. A separate LAN Ollama
+tier can be configured with `MISO_LAN_OLLAMA_URL` and
+`MISO_LAN_OLLAMA_MODEL`. Hosted GPT uses the OpenAI Responses streaming API and
+is disabled unless `MISO_OPENAI_API_KEY` is present; its model can be selected
+with `MISO_OPENAI_MODEL`. Put these values in root-owned `/etc/miso/miso.env`
+(recommended mode `0600`), never in source control. Hosted requests set
+`store: false`, translate strict tool schemas to function definitions, and do
+not include credentials in request bodies or settings representations.
