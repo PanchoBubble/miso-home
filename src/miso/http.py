@@ -18,6 +18,7 @@ from miso.tools import (
     ToolRegistry,
     create_runtime_registry,
 )
+from miso.routing import ProviderRouter, create_router
 
 
 class MisoHTTPServer(ThreadingHTTPServer):
@@ -30,9 +31,11 @@ class MisoHTTPServer(ThreadingHTTPServer):
         request_handler: Type[BaseHTTPRequestHandler],
         tool_registry: ToolRegistry,
         scheduled_worker: ScheduledItemWorker,
+        router: ProviderRouter,
     ) -> None:
         self.tool_registry = tool_registry
         self.scheduled_worker = scheduled_worker
+        self.router = router
         super().__init__(server_address, request_handler)
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
@@ -97,4 +100,5 @@ def create_server(
         handler_type(time.monotonic()),
         registry,
         ScheduledItemWorker(HouseholdStore(settings.database_path), registry.audit_sink),
+        create_router(settings),
     )

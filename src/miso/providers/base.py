@@ -31,6 +31,9 @@ class ChatChunk:
     text: str = ""
     tool_call: Mapping[str, object] | None = None
     done: bool = False
+    progress: str | None = None
+    provider: str | None = None
+    route_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

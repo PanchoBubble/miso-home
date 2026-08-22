@@ -28,6 +28,8 @@ class Settings:
     openai_api_key: str | None = field(default=None, repr=False)
     openai_model: str = "gpt-5-mini"
     openai_base_url: str = "https://api.openai.com/v1"
+    routing_health_timeout_seconds: float = 2.0
+    routing_attempt_timeout_seconds: float = 45.0
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -40,6 +42,15 @@ class Settings:
             provider_timeout = float(source.get("MISO_PROVIDER_TIMEOUT", "120"))
         except ValueError as error:
             raise ConfigError("MISO_PROVIDER_TIMEOUT must be numeric") from error
+        try:
+            routing_health_timeout = float(
+                source.get("MISO_ROUTING_HEALTH_TIMEOUT", "2")
+            )
+            routing_attempt_timeout = float(
+                source.get("MISO_ROUTING_ATTEMPT_TIMEOUT", "45")
+            )
+        except ValueError as error:
+            raise ConfigError("MISO routing timeouts must be numeric") from error
 
         settings = cls(
             host=source.get("MISO_HOST", "127.0.0.1"),
@@ -60,6 +71,8 @@ class Settings:
             openai_base_url=source.get(
                 "MISO_OPENAI_BASE_URL", "https://api.openai.com/v1"
             ),
+            routing_health_timeout_seconds=routing_health_timeout,
+            routing_attempt_timeout_seconds=routing_attempt_timeout,
         )
         settings.validate()
         return settings
@@ -91,6 +104,10 @@ class Settings:
             raise ConfigError("MISO_OPENAI_BASE_URL must use HTTPS")
         if not 0 < self.provider_timeout_seconds <= 600:
             raise ConfigError("MISO_PROVIDER_TIMEOUT must be between 0 and 600 seconds")
+        if not 0 < self.routing_health_timeout_seconds <= 30:
+            raise ConfigError("MISO_ROUTING_HEALTH_TIMEOUT must be between 0 and 30")
+        if not 0 < self.routing_attempt_timeout_seconds <= 600:
+            raise ConfigError("MISO_ROUTING_ATTEMPT_TIMEOUT must be between 0 and 600")
         for name, path in (
             ("MISO_STATE_DIR", self.state_dir),
             ("MISO_MODEL_DIR", self.model_dir),

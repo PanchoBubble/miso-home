@@ -55,6 +55,7 @@ class OllamaProvider:
             "model": request.model or self.model,
             "messages": list(request.messages),
             "stream": True,
+            "think": False,
         }
         if request.tools:
             payload["tools"] = ollama_tools(request.tools)

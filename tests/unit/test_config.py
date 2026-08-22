@@ -26,6 +26,8 @@ class SettingsTests(unittest.TestCase):
                     "MISO_LAN_OLLAMA_MODEL": "qwen3:8b",
                     "MISO_OPENAI_API_KEY": "test-secret-key",
                     "MISO_OPENAI_MODEL": "gpt-5-mini",
+                    "MISO_ROUTING_HEALTH_TIMEOUT": "1.5",
+                    "MISO_ROUTING_ATTEMPT_TIMEOUT": "30",
                 }
             )
             settings.validate_runtime_paths()
@@ -35,6 +37,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.lan_ollama_model, "qwen3:8b")
             self.assertEqual(settings.openai_model, "gpt-5-mini")
             self.assertNotIn("test-secret-key", repr(settings))
+            self.assertEqual(settings.routing_health_timeout_seconds, 1.5)
+            self.assertEqual(settings.routing_attempt_timeout_seconds, 30)
 
     def test_rejects_relative_database_path(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be absolute"):
@@ -51,6 +55,10 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_insecure_hosted_provider_url(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must use HTTPS"):
             Settings.from_env({"MISO_OPENAI_BASE_URL": "http://api.example.test/v1"})
+
+    def test_rejects_invalid_routing_timeout(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "routing timeouts must be numeric"):
+            Settings.from_env({"MISO_ROUTING_ATTEMPT_TIMEOUT": "eventually"})
 
     def test_reports_missing_runtime_directories(self) -> None:
         settings = Settings(

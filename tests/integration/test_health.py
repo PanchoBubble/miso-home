@@ -7,6 +7,7 @@ import unittest
 
 from miso.config import Settings
 from miso.http import create_server
+from miso.providers import ChatRequest
 
 
 class HealthIntegrationTests(unittest.TestCase):
@@ -40,6 +41,12 @@ class HealthIntegrationTests(unittest.TestCase):
                 self.assertNotIn("database_path", payload)
                 self.assertIn("timer_create", server.tool_registry.names())
                 self.assertIn("shopping_add", server.tool_registry.names())
+                decision = server.router.plan(
+                    ChatRequest(
+                        messages=({"role": "user", "content": "Set a timer"},)
+                    )
+                )
+                self.assertEqual(decision.classification.value, "routine")
 
                 connection.request("GET", "/missing")
                 missing = connection.getresponse()

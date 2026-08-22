@@ -77,3 +77,13 @@ with `MISO_OPENAI_MODEL`. Put these values in root-owned `/etc/miso/miso.env`
 (recommended mode `0600`), never in source control. Hosted requests set
 `store: false`, translate strict tool schemas to function definitions, and do
 not include credentials in request bodies or settings representations.
+
+Routing classifies requests as routine, standard, or complex with deterministic
+bilingual markers. Routine and standard work prefer the Pi; complex work tries
+configured LAN Ollama, then hosted GPT, then the Pi. Health failures and
+pre-output timeouts fall through safely, while failures after visible output do
+not mix providers. Every decision, attempt latency, fallback reason, and final
+selection is written to `state_dir / "audit" / "routing.jsonl"`. Provider
+overrides are strict by default, and progress chunks are emitted before health
+checks or model loading. Household schemas are narrowed to the relevant tool
+family and omitted entirely from unrelated prompts.
