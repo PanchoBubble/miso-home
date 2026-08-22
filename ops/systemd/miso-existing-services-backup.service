@@ -1,0 +1,13 @@
+[Unit]
+Description=Encrypted backup of existing Pi services
+ConditionPathIsMountPoint=/media/pancho/T7
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/miso-backup-existing-services
+ExecStartPost=/usr/local/sbin/miso-verify-existing-services-backup --quick
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

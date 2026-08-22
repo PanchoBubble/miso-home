@@ -17,10 +17,12 @@ inventory.
 | Root disk | 234 GiB ext4, 66 GiB used, 157 GiB available |
 | T7 | `/dev/sda1`, exFAT, UUID `081E-DA7A`, mounted at `/media/pancho/T7`; 1.9 TiB total, 787 GiB used, 1.1 TiB available |
 
-The T7 is not declared in `/etc/fstab`. It is mounted with udisks-style options
-and ownership mapped to UID/GID 1000. Containers and `zurg-watcher.service`
-refer directly to `/media/pancho/T7`, so Docker can start before the real disk
-is available. Beads issue `miso-40i` tracks making this dependency boot-safe.
+The T7 is declared in `/etc/fstab` by UUID with a systemd automount, bounded
+device/mount timeouts, and ownership mapped to UID/GID 1000. Docker and
+`zurg-watcher.service` use `RequiresMountsFor=/media/pancho/T7`, so the Pi and
+SSH can boot without the disk while T7-dependent workloads fail closed. A
+2026-08-22 reboot test proved the T7 mounted before Docker and all 19 production
+containers recovered.
 
 ## Network and host services
 
@@ -77,17 +79,28 @@ mount is therefore T7 data, not duplicate root-disk data.
 
 ## Backup and restore status
 
-No scheduled application or database backup timer was found. The root crontab
-is empty. The `pancho` crontab runs
-`/home/pancho/sync_takeout_to_juli_unlimited.sh` daily at noon, but that script
-does not exist, so the image-import/sync job cannot run as configured.
+`miso-existing-services-backup.timer` creates a daily AES-256-CBC/PBKDF2
+encrypted archive on the T7, with 14-day retention. It contains an Immich
+PostgreSQL custom dump, a transactional Nextcloud MySQL dump, a Vaultwarden
+SQLite online backup plus non-database state, Nextcloud configuration and local
+extensions, and encrypted deployment source including environment files. A
+checksum and a decrypt/database-format check run after every backup.
 
-Only ad-hoc configuration backup filenames were found under the deployment
-tree; no usable backup set for Immich PostgreSQL/uploads, Nextcloud
-MySQL/html/data, Vaultwarden data, or Compose configuration was identified.
-Consequently, the services can be restarted from live state, but a disaster
-restore is not currently proven. Beads issue `miso-3vg` tracks consistent
-backups and restore testing.
+`miso-existing-services-restore-check.timer` performs a weekly full restore of
+the latest archive into isolated, networkless, temporary PostgreSQL and MySQL
+containers, checks their restored table sets, and checks Vaultwarden with
+SQLite integrity verification. The first full restore passed on 2026-08-22.
+
+The Pi key is `/home/pancho/.config/miso-backup/backup.key` (mode 0600). Its
+recovery copy is in the local Git-ignored
+`.secrets/existing-services-backup.passphrase`; it must never be committed.
+
+Bulk Immich and Nextcloud media remains on the single T7 device. The configured
+`gdrive:` rclone remote has an expired OAuth grant, and the `pancho` cron still
+references the missing `/home/pancho/sync_takeout_to_juli_unlimited.sh`.
+Beads issue `miso-4bw` tracks interactive reauthorization and a non-destructive
+off-device media copy. Beads issue `miso-3vg` remains open until that coverage
+is restored.
 
 ## Safe recovery commands
 
@@ -123,6 +136,14 @@ vcgencmd measure_temp
 vcgencmd get_throttled
 ```
 
+Create or verify an encrypted state backup:
+
+```bash
+sudo systemctl start miso-existing-services-backup.service
+sudo /usr/local/sbin/miso-verify-existing-services-backup --quick
+sudo /usr/local/sbin/miso-verify-existing-services-backup --full
+```
+
 Do not run `docker compose down -v`, `docker volume prune`, or
 `docker system prune --volumes`: those commands can remove unreconstructed
 service data.
@@ -131,10 +152,8 @@ service data.
 
 | Severity | Risk |
 | --- | --- |
-| Critical | No verified backup/restore path exists for the current databases, Vaultwarden state, and deployment source. |
-| High | T7 is not a persistent boot mount even though multiple restart-enabled containers and a system service depend on its path. |
-| High | Live PostgreSQL/MySQL/Vaultwarden state on the microSD has no observed consistent backup. |
-| High | The only scheduled image sync references a missing script. |
+| High | Bulk Immich/Nextcloud media is still single-device; the Google Drive OAuth grant is expired and the scheduled sync references a missing script. |
+| High | The encrypted state backups and bulk media currently share the T7, so T7 failure still requires an off-device copy. |
 | Medium | Deployment source is uncommitted, has no remote, and includes environment files and ad-hoc backup copies. |
 | Medium | Several images use mutable `latest` tags, weakening reproducibility. |
 | Medium | Ports 80, 2283, 3001, 3002, 8080, 8081, 8082, 8191, and 6881 bind on all host interfaces; tunnel/VPN/firewall policy should be verified before changing networking. |

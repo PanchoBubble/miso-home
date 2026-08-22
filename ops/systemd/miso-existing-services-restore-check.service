@@ -1,0 +1,12 @@
+[Unit]
+Description=Full restore check of the latest existing-services backup
+ConditionPathIsMountPoint=/media/pancho/T7
+After=docker.service miso-existing-services-backup.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/miso-verify-existing-services-backup --full
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
