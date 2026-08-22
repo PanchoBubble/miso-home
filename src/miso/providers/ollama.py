@@ -56,6 +56,7 @@ class OllamaProvider:
             "messages": list(request.messages),
             "stream": True,
             "think": False,
+            "options": {"temperature": 0, "seed": 0},
         }
         if request.tools:
             payload["tools"] = ollama_tools(request.tools)

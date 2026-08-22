@@ -16,6 +16,7 @@ class FakeProvider:
     def __init__(self, name="pi-ollama", available=True):
         self._name = name
         self.available = available
+        self.requests = []
 
     @property
     def name(self):
@@ -29,6 +30,7 @@ class FakeProvider:
         )
 
     def stream(self, request, _cancel):
+        self.requests.append(request)
         content = request.messages[-1]["content"]
         if "timer" in content.casefold():
             yield ChatChunk(
@@ -57,9 +59,10 @@ class DashboardIntegrationTests(unittest.TestCase):
             provider_timeout_seconds=120,
             log_level="INFO",
         )
+        self.pi_provider = FakeProvider()
         router = ProviderRouter(
             ProviderSet(
-                pi=FakeProvider(),
+                pi=self.pi_provider,
                 lan=None,
                 hosted=FakeProvider("hosted-gpt", available=False),
             ),
@@ -128,6 +131,11 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(tool["result"]["tool"], "timer_create")
         completed = next(item for item in events if item["type"] == "complete")
         self.assertTrue(completed["conversation_id"])
+        self.assertEqual(self.pi_provider.requests[-1].messages[0]["role"], "system")
+        system_prompt = self.pi_provider.requests[-1].messages[0]["content"]
+        self.assertIn("friendly local household assistant", system_prompt)
+        self.assertIn("live weather is not connected", system_prompt)
+        self.assertIn("reply 'pong'", system_prompt)
 
         response, content = self.request("GET", "/api/memory?q=timer")
         results = json.loads(content)["results"]

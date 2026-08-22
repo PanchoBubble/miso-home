@@ -75,6 +75,7 @@ class OllamaProviderTests(unittest.TestCase):
         request = mocked_urlopen.call_args.args[0]
         payload = json.loads(request.data)
         self.assertFalse(payload["think"])
+        self.assertEqual(payload["options"], {"temperature": 0, "seed": 0})
         function = payload["tools"][0]["function"]
         self.assertEqual(function["name"], "timer_create")
         self.assertEqual(function["parameters"]["type"], "object")

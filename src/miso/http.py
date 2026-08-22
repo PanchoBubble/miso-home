@@ -27,6 +27,17 @@ from miso.tools import (
     create_runtime_registry,
 )
 
+MISO_SYSTEM_PROMPT = (
+    "You are Miso, a friendly local household assistant. Answer ordinary questions "
+    "and conversation directly, naturally, and briefly. Your available actions are "
+    "exactly the tools included in the current request; use a tool when it matches "
+    "the user's request. You have no live weather, web, news, location, or sensor "
+    "data unless a matching tool is included. Never invent current information. If "
+    "asked about weather without a weather tool, say that live weather is not "
+    "connected yet. If the user sends 'ping' as a connectivity check, reply 'pong'. "
+    "Never describe ordinary harmless conversation as forbidden or not permitted."
+)
+
 WEB_ROOT = Path(__file__).with_name("web")
 MAX_BODY_BYTES = 65536
 
@@ -270,12 +281,15 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 payload={"request_id": request_id},
             )
             history = self.miso.memory_store.events(conversation_id, limit=40)
-            messages = tuple(
-                {"role": event.role, "content": event.content}
-                for event in history
-                if event.kind == "message"
-                and event.role in {"user", "assistant"}
-                and event.content
+            messages = (
+                {"role": "system", "content": MISO_SYSTEM_PROMPT},
+                *(
+                    {"role": event.role, "content": event.content}
+                    for event in history
+                    if event.kind == "message"
+                    and event.role in {"user", "assistant"}
+                    and event.content
+                ),
             )
             request = ChatRequest(messages=messages, tools=self.miso.tool_registry.schemas())
             self.send_response(HTTPStatus.OK)
