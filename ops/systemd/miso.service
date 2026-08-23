@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=miso
 Group=miso
+SupplementaryGroups=audio
 WorkingDirectory=/opt/miso/app
 Environment=PYTHONPATH=/opt/miso/app/src
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -26,7 +27,9 @@ RuntimeDirectoryMode=0750
 UMask=0027
 
 NoNewPrivileges=true
-PrivateDevices=true
+PrivateDevices=false
+DevicePolicy=closed
+DeviceAllow=char-sound rw
 PrivateTmp=true
 ProtectControlGroups=true
 ProtectHome=true

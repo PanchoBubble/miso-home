@@ -15,6 +15,7 @@ from typing import Type, cast
 from urllib.parse import parse_qs, urlsplit
 
 from miso import __version__
+from miso.audio import AudioManager
 from miso.config import Settings
 from miso.memory import MemoryStore
 from miso.providers import ChatRequest, ProviderCancelled
@@ -56,6 +57,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         scheduled_worker: ScheduledItemWorker,
         router: ProviderRouter,
         developer_shell: DeveloperShellController,
+        audio_manager: AudioManager,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -63,6 +65,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.scheduled_worker = scheduled_worker
         self.router = router
         self.developer_shell = developer_shell
+        self.audio_manager = audio_manager
         self.memory_store = MemoryStore(settings.database_path)
         self.started_at = started_at
         self._active_requests: dict[str, threading.Event] = {}
@@ -71,12 +74,15 @@ class MisoHTTPServer(ThreadingHTTPServer):
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
         self.scheduled_worker.start()
+        self.audio_manager.start()
         try:
             super().serve_forever(poll_interval)
         finally:
+            self.audio_manager.stop()
             self.scheduled_worker.stop()
 
     def server_close(self) -> None:
+        self.audio_manager.stop()
         self.scheduled_worker.stop()
         super().server_close()
 
@@ -208,6 +214,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         "complex": ["lan-ollama", "hosted-gpt", "pi-ollama"],
                     },
                     "tools": list(self.miso.tool_registry.names()),
+                    "audio": self.miso.audio_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
                 },
             )
@@ -511,6 +518,7 @@ def create_server(
     tool_registry: ToolRegistry | None = None,
     router: ProviderRouter | None = None,
     developer_shell: DeveloperShellController | None = None,
+    audio_manager: AudioManager | None = None,
 ) -> MisoHTTPServer:
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
@@ -522,6 +530,19 @@ def create_server(
     )
     if "developer_command" not in registry.names():
         registry.register(shell.tool_definition())
+    audio = audio_manager or AudioManager(
+        enabled=settings.audio_enabled,
+        capture_card=settings.audio_capture_card,
+        playback_card=settings.audio_playback_card,
+        device_index=settings.audio_device_index,
+        sample_rate=settings.audio_sample_rate,
+        channels=settings.audio_channels,
+        chunk_milliseconds=settings.audio_chunk_milliseconds,
+        buffer_milliseconds=settings.audio_buffer_milliseconds,
+        reconnect_seconds=settings.audio_reconnect_seconds,
+        silence_dbfs=settings.audio_silence_dbfs,
+        clipping_ratio=settings.audio_clipping_ratio,
+    )
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(),
@@ -532,5 +553,6 @@ def create_server(
         ),
         router=router or create_router(settings),
         developer_shell=shell,
+        audio_manager=audio,
         started_at=time.monotonic(),
     )

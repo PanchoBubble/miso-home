@@ -12,6 +12,15 @@ class ConfigError(ValueError):
     """Raised when Miso configuration is unsafe or invalid."""
 
 
+def _boolean(value: str, name: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name} must be true or false")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     host: str
@@ -33,6 +42,17 @@ class Settings:
     dashboard_token: str | None = field(default=None, repr=False)
     developer_root: Path | None = None
     developer_commands: tuple[str, ...] = ("python3", "git", "rg", "ls")
+    audio_enabled: bool = True
+    audio_capture_card: str | None = None
+    audio_playback_card: str | None = None
+    audio_device_index: int = 0
+    audio_sample_rate: int = 16_000
+    audio_channels: int = 1
+    audio_chunk_milliseconds: int = 20
+    audio_buffer_milliseconds: int = 1_000
+    audio_reconnect_seconds: float = 1.0
+    audio_silence_dbfs: float = -50.0
+    audio_clipping_ratio: float = 0.98
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -54,6 +74,27 @@ class Settings:
             )
         except ValueError as error:
             raise ConfigError("MISO routing timeouts must be numeric") from error
+        try:
+            audio_device_index = int(source.get("MISO_AUDIO_DEVICE_INDEX", "0"))
+            audio_sample_rate = int(source.get("MISO_AUDIO_SAMPLE_RATE", "16000"))
+            audio_channels = int(source.get("MISO_AUDIO_CHANNELS", "1"))
+            audio_chunk_milliseconds = int(
+                source.get("MISO_AUDIO_CHUNK_MILLISECONDS", "20")
+            )
+            audio_buffer_milliseconds = int(
+                source.get("MISO_AUDIO_BUFFER_MILLISECONDS", "1000")
+            )
+            audio_reconnect_seconds = float(
+                source.get("MISO_AUDIO_RECONNECT_SECONDS", "1")
+            )
+            audio_silence_dbfs = float(
+                source.get("MISO_AUDIO_SILENCE_DBFS", "-50")
+            )
+            audio_clipping_ratio = float(
+                source.get("MISO_AUDIO_CLIPPING_RATIO", "0.98")
+            )
+        except ValueError as error:
+            raise ConfigError("MISO audio numeric settings are invalid") from error
 
         settings = cls(
             host=source.get("MISO_HOST", "127.0.0.1"),
@@ -89,6 +130,23 @@ class Settings:
                 ).split(",")
                 if command.strip()
             ),
+            audio_enabled=_boolean(
+                source.get("MISO_AUDIO_ENABLED", "true"), "MISO_AUDIO_ENABLED"
+            ),
+            audio_capture_card=(
+                source.get("MISO_AUDIO_CAPTURE_CARD", "").strip() or None
+            ),
+            audio_playback_card=(
+                source.get("MISO_AUDIO_PLAYBACK_CARD", "").strip() or None
+            ),
+            audio_device_index=audio_device_index,
+            audio_sample_rate=audio_sample_rate,
+            audio_channels=audio_channels,
+            audio_chunk_milliseconds=audio_chunk_milliseconds,
+            audio_buffer_milliseconds=audio_buffer_milliseconds,
+            audio_reconnect_seconds=audio_reconnect_seconds,
+            audio_silence_dbfs=audio_silence_dbfs,
+            audio_clipping_ratio=audio_clipping_ratio,
         )
         settings.validate()
         return settings
@@ -134,6 +192,39 @@ class Settings:
             raise ConfigError("MISO_DEVELOPER_COMMANDS must not be empty")
         if any(Path(command).name != command for command in self.developer_commands):
             raise ConfigError("MISO_DEVELOPER_COMMANDS must contain command names")
+        for name, card_id in (
+            ("MISO_AUDIO_CAPTURE_CARD", self.audio_capture_card),
+            ("MISO_AUDIO_PLAYBACK_CARD", self.audio_playback_card),
+        ):
+            if card_id is not None and (
+                len(card_id) > 32
+                or not all(
+                    character.isalnum() or character in "_-" for character in card_id
+                )
+            ):
+                raise ConfigError(f"{name} must be a stable ALSA card ID")
+        if not 0 <= self.audio_device_index <= 255:
+            raise ConfigError("MISO_AUDIO_DEVICE_INDEX must be between 0 and 255")
+        if not 8_000 <= self.audio_sample_rate <= 192_000:
+            raise ConfigError("MISO_AUDIO_SAMPLE_RATE must be between 8000 and 192000")
+        if not 1 <= self.audio_channels <= 8:
+            raise ConfigError("MISO_AUDIO_CHANNELS must be between 1 and 8")
+        if not 5 <= self.audio_chunk_milliseconds <= 1_000:
+            raise ConfigError("MISO_AUDIO_CHUNK_MILLISECONDS must be between 5 and 1000")
+        if not (
+            self.audio_chunk_milliseconds
+            <= self.audio_buffer_milliseconds
+            <= 60_000
+        ):
+            raise ConfigError(
+                "MISO_AUDIO_BUFFER_MILLISECONDS must fit at least one chunk and be at most 60000"
+            )
+        if not 0.05 <= self.audio_reconnect_seconds <= 60:
+            raise ConfigError("MISO_AUDIO_RECONNECT_SECONDS must be between 0.05 and 60")
+        if not -120 <= self.audio_silence_dbfs <= 0:
+            raise ConfigError("MISO_AUDIO_SILENCE_DBFS must be between -120 and 0")
+        if not 0.5 <= self.audio_clipping_ratio <= 1:
+            raise ConfigError("MISO_AUDIO_CLIPPING_RATIO must be between 0.5 and 1")
         for name, path in (
             ("MISO_STATE_DIR", self.state_dir),
             ("MISO_MODEL_DIR", self.model_dir),

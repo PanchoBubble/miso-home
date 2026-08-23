@@ -11,12 +11,14 @@ fail() {
 }
 
 [[ "${EUID}" -eq 0 ]] || fail "run as root"
-for command in getent install python3 rsync systemctl; do
+for command in aplay arecord getent install python3 rsync systemctl usermod; do
   command -v "${command}" >/dev/null || fail "missing command: ${command}"
 done
 [[ -d "${SOURCE_ROOT}/src/miso" ]] || fail "Miso source not found under ${SOURCE_ROOT}"
 [[ -f "${UNIT_SOURCE}" ]] || fail "systemd unit not found: ${UNIT_SOURCE}"
 getent passwd miso >/dev/null || fail "miso service user is not configured"
+getent group audio >/dev/null || fail "audio group is not configured"
+usermod --append --groups audio miso
 
 install -d -o root -g root -m 0755 "${TARGET_ROOT}" "${TARGET_ROOT}/src"
 rsync -a --delete --exclude '__pycache__/' \

@@ -8,6 +8,8 @@ hardware integration are later phases.
 ## Local development
 
 Python 3.11 or newer is the only runtime dependency for the initial scaffold.
+Audio streaming additionally uses the `arecord` and `aplay` commands from
+`alsa-utils` on Linux; no Python audio package is required.
 
 ```bash
 make test
@@ -102,3 +104,39 @@ that token in session storage only. Developer mode is visibly disabled by
 default, expires after at most 15 minutes, and runs only allowlisted argv (never
 shell text) beneath `MISO_DEVELOPER_ROOT`. The default Pi scope is read-only
 `/opt/miso/app`; override it deliberately in `/etc/miso/miso.env` if needed.
+
+## Linux audio
+
+Miso discovers PCM endpoints from `/proc/asound` and opens them through ALSA's
+`arecord` and `aplay`. It addresses hardware with stable card IDs such as
+`plughw:CARD=Device,DEV=0`, so Linux card-number changes after reboot or USB
+reconnection do not change the configured identity. The installer adds the
+service account to the `audio` group and grants the systemd unit access only to
+sound devices.
+
+Capture and playback use bounded raw S16_LE queues. `/api/status` reports the
+resolved device, connection/reconnection state, buffer overruns, playback
+underruns, peak and RMS levels, clipping, and consecutive silent chunks. A lost
+device is rediscovered and reopened without restarting Miso.
+
+The defaults are mono 16 kHz with 20 ms chunks and one second of buffering.
+Set these optional values in `/etc/miso/miso.env`:
+
+```text
+MISO_AUDIO_ENABLED=true
+MISO_AUDIO_CAPTURE_CARD=Device
+MISO_AUDIO_PLAYBACK_CARD=Device
+MISO_AUDIO_DEVICE_INDEX=0
+MISO_AUDIO_SAMPLE_RATE=16000
+MISO_AUDIO_CHANNELS=1
+MISO_AUDIO_CHUNK_MILLISECONDS=20
+MISO_AUDIO_BUFFER_MILLISECONDS=1000
+MISO_AUDIO_RECONNECT_SECONDS=1
+MISO_AUDIO_SILENCE_DBFS=-50
+MISO_AUDIO_CLIPPING_RATIO=0.98
+```
+
+Leave either card ID empty to select the first compatible PCM. Find stable IDs
+in brackets in `/proc/asound/cards`; do not configure volatile numeric names
+such as `hw:2`. Audio can remain enabled while hardware is absent: status will
+show `unavailable`, and the worker will attach when the device appears.

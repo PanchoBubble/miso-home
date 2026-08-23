@@ -28,6 +28,9 @@ class SettingsTests(unittest.TestCase):
                     "MISO_OPENAI_MODEL": "gpt-5-mini",
                     "MISO_ROUTING_HEALTH_TIMEOUT": "1.5",
                     "MISO_ROUTING_ATTEMPT_TIMEOUT": "30",
+                    "MISO_AUDIO_CAPTURE_CARD": "MisoUSB",
+                    "MISO_AUDIO_PLAYBACK_CARD": "USB_Speaker",
+                    "MISO_AUDIO_BUFFER_MILLISECONDS": "800",
                 }
             )
             settings.validate_runtime_paths()
@@ -39,6 +42,9 @@ class SettingsTests(unittest.TestCase):
             self.assertNotIn("test-secret-key", repr(settings))
             self.assertEqual(settings.routing_health_timeout_seconds, 1.5)
             self.assertEqual(settings.routing_attempt_timeout_seconds, 30)
+            self.assertEqual(settings.audio_capture_card, "MisoUSB")
+            self.assertEqual(settings.audio_playback_card, "USB_Speaker")
+            self.assertEqual(settings.audio_buffer_milliseconds, 800)
 
     def test_rejects_relative_database_path(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be absolute"):
@@ -74,6 +80,21 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_relative_developer_scope(self) -> None:
         with self.assertRaisesRegex(ConfigError, "DEVELOPER_ROOT must be absolute"):
             Settings.from_env({"MISO_DEVELOPER_ROOT": "relative"})
+
+    def test_rejects_volatile_or_invalid_audio_configuration(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "stable ALSA card ID"):
+            Settings.from_env({"MISO_AUDIO_CAPTURE_CARD": "hw:2"})
+        with self.assertRaisesRegex(ConfigError, "audio numeric settings"):
+            Settings.from_env({"MISO_AUDIO_SAMPLE_RATE": "telephone"})
+        with self.assertRaisesRegex(ConfigError, "must be true or false"):
+            Settings.from_env({"MISO_AUDIO_ENABLED": "sometimes"})
+        with self.assertRaisesRegex(ConfigError, "fit at least one chunk"):
+            Settings.from_env(
+                {
+                    "MISO_AUDIO_CHUNK_MILLISECONDS": "40",
+                    "MISO_AUDIO_BUFFER_MILLISECONDS": "20",
+                }
+            )
 
     def test_reports_missing_runtime_directories(self) -> None:
         settings = Settings(
