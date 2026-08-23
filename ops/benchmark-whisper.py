@@ -128,7 +128,11 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
         monolingual_wer = statistics.fmean(
             attempt["wer"] for attempt in monolingual_attempts
         )
-        mixed_wer = statistics.fmean(attempt["wer"] for attempt in mixed_attempts)
+        mixed_wer = (
+            statistics.fmean(attempt["wer"] for attempt in mixed_attempts)
+            if mixed_attempts
+            else None
+        )
         language_accuracy = statistics.fmean(
             attempt["language"] == case["expected_language"]
             for case in model_cases
@@ -141,7 +145,9 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
                 "model_bytes": model.stat().st_size,
                 "summary": {
                     "monolingual_mean_wer": round(monolingual_wer, 4),
-                    "mixed_mean_wer": round(mixed_wer, 4),
+                    "mixed_mean_wer": (
+                        None if mixed_wer is None else round(mixed_wer, 4)
+                    ),
                     "language_accuracy": round(language_accuracy, 4),
                     "median_latency_milliseconds": round(statistics.median(latencies)),
                     "p95_latency_milliseconds": p95_latency,
@@ -153,7 +159,10 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
                     ),
                     "passes": (
                         monolingual_wer <= arguments.monolingual_wer_target
-                        and mixed_wer <= arguments.mixed_wer_target
+                        and (
+                            mixed_wer is None
+                            or mixed_wer <= arguments.mixed_wer_target
+                        )
                         and language_accuracy == 1
                         and p95_latency <= arguments.latency_target_ms
                     ),

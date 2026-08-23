@@ -91,6 +91,30 @@ class BufferAndLevelTests(unittest.TestCase):
         self.assertEqual(loud["clipped_chunks"], 1)
         self.assertEqual(loud["consecutive_silent_chunks"], 0)
 
+    def test_stream_backpressure_is_cancellable_without_dropping_pcm(self) -> None:
+        buffer = BoundedPCMBuffer(1)
+        buffer.put(b"playing")
+        cancelled = threading.Event()
+        outcome: list[Exception] = []
+
+        def producer() -> None:
+            try:
+                buffer.put_wait(b"queued", timeout=1, cancel_event=cancelled)
+            except Exception as error:
+                outcome.append(error)
+
+        thread = threading.Thread(target=producer)
+        thread.start()
+        time.sleep(0.02)
+        cancelled.set()
+        buffer.wake()
+        thread.join(timeout=0.2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(outcome[0], InterruptedError)
+        self.assertEqual(buffer.get(), b"playing")
+        self.assertEqual(buffer.snapshot()["overruns"], 0)
+
 
 class FakeCapture:
     def __init__(self, chunks: list[bytes | Exception]) -> None:

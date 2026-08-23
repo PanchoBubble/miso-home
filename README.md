@@ -184,3 +184,42 @@ MISO_STT_VAD_PRE_ROLL_MILLISECONDS=200
 `MISO_STT_PROMPT` can override the short bilingual command vocabulary bias.
 Energy gating is deliberately replaceable so the wake/VAD phase can supply a
 stronger speech decision without changing utterance or transcription contracts.
+
+## Offline English-Spanish speech synthesis
+
+Install the pinned Piper runtime and selected voices, then deploy Miso:
+
+```bash
+sudo ops/install-piper.sh
+sudo ops/install-miso-runtime.sh
+```
+
+Miso pre-warms isolated English and Spanish voice workers, sends text over stdin
+instead of process arguments, streams bounded S16_LE chunks to ALSA, and exposes
+immediate cancellation and volume control through the internal speech contract.
+Authenticated operator probes can use `POST /api/speech` with `text`, `language`
+(`en` or `es`), and optional `volume`, then `POST /api/speech/cancel` with the
+returned `request_id`. Status includes voice availability and timing diagnostics
+but not spoken text.
+
+The Raspberry Pi benchmark passed the one-second first-audio budget at 483 ms
+p95, synthesized at 0.121 median real-time factor, and observed deployed API
+cancellation in 49–62 ms. See `docs/miso-speech-benchmark.md` for the full results,
+round-trip intelligibility proxy, and physical-speaker limitation.
+
+The optional TTS values are:
+
+```text
+MISO_TTS_ENABLED=true
+MISO_TTS_EXECUTABLE=/opt/miso/piper/bin/python
+MISO_TTS_ENGLISH_VOICE=en_GB-cori-medium
+MISO_TTS_ENGLISH_MODEL=/var/lib/miso/models/piper/en_GB-cori-medium.onnx
+MISO_TTS_ENGLISH_CONFIG=/var/lib/miso/models/piper/en_GB-cori-medium.onnx.json
+MISO_TTS_SPANISH_VOICE=es_ES-davefx-medium
+MISO_TTS_SPANISH_MODEL=/var/lib/miso/models/piper/es_ES-davefx-medium.onnx
+MISO_TTS_SPANISH_CONFIG=/var/lib/miso/models/piper/es_ES-davefx-medium.onnx.json
+MISO_AUDIO_PLAYBACK_SAMPLE_RATE=22050
+MISO_TTS_VOLUME=1.0
+MISO_TTS_CHUNK_BYTES=4096
+MISO_TTS_TIMEOUT_SECONDS=60
+```

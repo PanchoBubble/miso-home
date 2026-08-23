@@ -36,6 +36,10 @@ class SettingsTests(unittest.TestCase):
                     "MISO_STT_MODEL": str(root / "models" / "whisper.bin"),
                     "MISO_STT_THREADS": "3",
                     "MISO_STT_VAD_THRESHOLD_DBFS": "-36",
+                    "MISO_TTS_ENABLED": "true",
+                    "MISO_TTS_EXECUTABLE": "/opt/piper/bin/python",
+                    "MISO_TTS_ENGLISH_VOICE": "custom-en",
+                    "MISO_TTS_VOLUME": "0.8",
                 }
             )
             settings.validate_runtime_paths()
@@ -54,6 +58,10 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.stt_threads, 3)
             self.assertEqual(settings.stt_vad_threshold_dbfs, -36)
             self.assertEqual(settings.stt_model, root / "models" / "whisper.bin")
+            self.assertTrue(settings.tts_enabled)
+            self.assertEqual(settings.tts_english_voice, "custom-en")
+            self.assertEqual(settings.tts_volume, 0.8)
+            self.assertEqual(settings.audio_playback_sample_rate, 22_050)
 
     def test_rejects_relative_database_path(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be absolute"):
@@ -127,6 +135,14 @@ class SettingsTests(unittest.TestCase):
             Settings.from_env({"MISO_STT_THREADS": "0"})
         with self.assertRaisesRegex(ConfigError, "STT_VAD_THRESHOLD_DBFS"):
             Settings.from_env({"MISO_STT_VAD_THRESHOLD_DBFS": "4"})
+
+    def test_rejects_invalid_tts_configuration(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "TTS_EXECUTABLE must be absolute"):
+            Settings.from_env({"MISO_TTS_EXECUTABLE": "python"})
+        with self.assertRaisesRegex(ConfigError, "TTS_VOLUME must be between"):
+            Settings.from_env({"MISO_TTS_VOLUME": "3"})
+        with self.assertRaisesRegex(ConfigError, "TTS_CHUNK_BYTES"):
+            Settings.from_env({"MISO_TTS_CHUNK_BYTES": "513"})
 
 
 if __name__ == "__main__":

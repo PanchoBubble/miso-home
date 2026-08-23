@@ -160,11 +160,51 @@ class BoundedPCMBuffer:
             self._chunks.append(value)
             self._condition.notify()
 
+    def put_wait(
+        self,
+        chunk: bytes,
+        timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
+        """Add without dropping audio, applying bounded producer backpressure."""
+
+        if not chunk:
+            return True
+        value = bytes(chunk)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._condition:
+            while len(self._chunks) >= self.capacity:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError("audio playback was cancelled")
+                remaining = (
+                    None if deadline is None else deadline - time.monotonic()
+                )
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._condition.wait(
+                    0.01 if remaining is None else min(0.01, remaining)
+                )
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("audio playback was cancelled")
+            self._chunks.append(value)
+            self._condition.notify_all()
+            return True
+
     def get(self, timeout: float | None = None) -> bytes | None:
         with self._condition:
             if not self._chunks:
                 self._condition.wait(timeout)
-            return self._chunks.popleft() if self._chunks else None
+            value = self._chunks.popleft() if self._chunks else None
+            if value is not None:
+                self._condition.notify_all()
+            return value
+
+    def clear(self) -> int:
+        with self._condition:
+            removed = len(self._chunks)
+            self._chunks.clear()
+            self._condition.notify_all()
+            return removed
 
     def wake(self) -> None:
         with self._condition:
@@ -290,6 +330,18 @@ class _SubprocessPlayback:
         self.process.stdin.write(chunk)
 
     def close(self) -> None:
+        if self.process.stdin is not None:
+            try:
+                self.process.stdin.close()
+            except (OSError, ValueError):
+                pass
+        if self.process.poll() is None:
+            try:
+                self.process.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                self.cancel()
+
+    def cancel(self) -> None:
         _close_process(self.process)
 
 
@@ -298,7 +350,7 @@ def _close_process(process: subprocess.Popen[bytes]) -> None:
         if stream is not None:
             try:
                 stream.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
     if process.poll() is None:
         process.terminate()
@@ -430,11 +482,15 @@ class _AudioEndpoint:
         with self._handle_lock:
             self._handle = handle
 
-    def _close_handle(self) -> None:
+    def _close_handle(self, *, cancel: bool = False) -> None:
         with self._handle_lock:
             handle, self._handle = self._handle, None
         if handle is not None:
-            handle.close()
+            cancel_method = getattr(handle, "cancel", None)
+            if cancel and cancel_method is not None:
+                cancel_method()
+            else:
+                handle.close()
 
     def start(self, target: object, name: str) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -446,7 +502,7 @@ class _AudioEndpoint:
     def stop(self, buffer: BoundedPCMBuffer) -> None:
         self.stop_event.set()
         buffer.wake()
-        self._close_handle()
+        self._close_handle(cancel=True)
         if self._thread is not None:
             self._thread.join(timeout=2)
 
@@ -523,18 +579,39 @@ class _PlaybackEndpoint(_AudioEndpoint):
         self.meter = meter
         self.reconnect_seconds = reconnect_seconds
         self.state = _EndpointState("idle")
+        self._interrupt_lock = threading.Lock()
+        self._interrupt_serial = 0
 
     def start_playback(self) -> None:
         self.start(self._run, "miso-audio-playback")
 
+    def interrupt(self) -> None:
+        with self._interrupt_lock:
+            self._interrupt_serial += 1
+        self.buffer.clear()
+        self.buffer.wake()
+        self._close_handle(cancel=True)
+
+    def _current_interrupt_serial(self) -> int:
+        with self._interrupt_lock:
+            return self._interrupt_serial
+
     def _run(self) -> None:
         pending: bytes | None = None
+        pending_interrupt_serial = 0
         while not self.stop_event.is_set():
             if pending is None:
                 pending = self.buffer.get(timeout=0.25)
                 if pending is None:
                     continue
+                pending_interrupt_serial = self._current_interrupt_serial()
+            if pending_interrupt_serial != self._current_interrupt_serial():
+                pending = None
+                self.state.idle()
+                continue
             handle: PlaybackHandle | None = None
+            interrupt_serial = pending_interrupt_serial
+            drained = False
             try:
                 device = select_audio_device(
                     self.backend.devices(), self.selector, direction="playback"
@@ -556,14 +633,21 @@ class _PlaybackEndpoint(_AudioEndpoint):
                     )
                     if pending is None:
                         self.state.underrun()
-                self.state.idle()
-            except (OSError, subprocess.SubprocessError) as error:
+                self.state.set_state("draining")
+                drained = True
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
                 if not self.stop_event.is_set():
-                    self.state.disconnected(error)
-                    self.stop_event.wait(self.reconnect_seconds)
+                    if interrupt_serial != self._current_interrupt_serial():
+                        pending = None
+                        self.state.idle()
+                    else:
+                        self.state.disconnected(error)
+                        self.stop_event.wait(self.reconnect_seconds)
             finally:
                 if handle is not None:
                     self._close_handle()
+                if drained:
+                    self.state.idle()
         self.state.set_state("stopped")
 
 
@@ -584,11 +668,18 @@ class AudioManager:
         reconnect_seconds: float,
         silence_dbfs: float,
         clipping_ratio: float,
+        playback_sample_rate: int | None = None,
         backend: AudioBackend | None = None,
     ) -> None:
         self.enabled = enabled
         self.backend = backend or ALSABackend()
         self.audio_format = AudioFormat(sample_rate, channels, 2, chunk_milliseconds)
+        self.playback_format = AudioFormat(
+            playback_sample_rate or sample_rate,
+            channels,
+            2,
+            chunk_milliseconds,
+        )
         capacity = max(1, math.ceil(buffer_milliseconds / chunk_milliseconds))
         self.capture_buffer = BoundedPCMBuffer(capacity)
         self.playback_buffer = BoundedPCMBuffer(capacity)
@@ -607,7 +698,7 @@ class AudioManager:
         self.playback = _PlaybackEndpoint(
             self.backend,
             self.playback_selector,
-            self.audio_format,
+            self.playback_format,
             self.playback_buffer,
             self.playback_meter,
             reconnect_seconds,
@@ -628,9 +719,39 @@ class AudioManager:
     def play(self, pcm: bytes) -> None:
         if not self.enabled:
             raise RuntimeError("audio is disabled")
-        if len(pcm) % (self.audio_format.channels * self.audio_format.sample_width):
+        if len(pcm) % (
+            self.playback_format.channels * self.playback_format.sample_width
+        ):
             raise ValueError("PCM payload does not contain complete frames")
         self.playback_buffer.put(pcm)
+
+    def play_stream(
+        self,
+        pcm: bytes,
+        timeout: float = 1.0,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        if not self.enabled:
+            raise RuntimeError("audio is disabled")
+        if len(pcm) % (
+            self.playback_format.channels * self.playback_format.sample_width
+        ):
+            raise ValueError("PCM payload does not contain complete frames")
+        if not self.playback_buffer.put_wait(pcm, timeout, cancel_event):
+            raise TimeoutError("audio playback buffer remained full")
+
+    def cancel_playback(self) -> None:
+        self.playback.interrupt()
+
+    def wait_playback(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            queued = self.playback_buffer.snapshot()["queued_chunks"]
+            state = self.playback.state.snapshot()["state"]
+            if queued == 0 and state in {"idle", "stopped"}:
+                return True
+            time.sleep(0.01)
+        return False
 
     def status(self) -> dict[str, object]:
         devices = self.backend.devices() if self.enabled else ()
@@ -659,6 +780,12 @@ class AudioManager:
                 "levels": self.capture_meter.snapshot(),
             },
             "playback": {
+                "format": {
+                    "encoding": "S16_LE",
+                    "sample_rate": self.playback_format.sample_rate,
+                    "channels": self.playback_format.channels,
+                    "chunk_milliseconds": self.playback_format.chunk_milliseconds,
+                },
                 "configured_card": self.playback_selector.configured,
                 "available_device": (
                     None if playback_device is None else playback_device.public_dict()

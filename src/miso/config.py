@@ -47,6 +47,7 @@ class Settings:
     audio_playback_card: str | None = None
     audio_device_index: int = 0
     audio_sample_rate: int = 16_000
+    audio_playback_sample_rate: int = 22_050
     audio_channels: int = 1
     audio_chunk_milliseconds: int = 20
     audio_buffer_milliseconds: int = 1_000
@@ -68,6 +69,26 @@ class Settings:
     stt_vad_end_silence_milliseconds: int = 600
     stt_vad_maximum_utterance_milliseconds: int = 15_000
     stt_vad_pre_roll_milliseconds: int = 200
+    tts_enabled: bool = False
+    tts_executable: Path = Path("/opt/miso/piper/bin/python")
+    tts_english_voice: str = "en_GB-cori-medium"
+    tts_english_model: Path = Path(
+        "/var/lib/miso/models/piper/en_GB-cori-medium.onnx"
+    )
+    tts_english_config: Path = Path(
+        "/var/lib/miso/models/piper/en_GB-cori-medium.onnx.json"
+    )
+    tts_spanish_voice: str = "es_ES-davefx-medium"
+    tts_spanish_model: Path = Path(
+        "/var/lib/miso/models/piper/es_ES-davefx-medium.onnx"
+    )
+    tts_spanish_config: Path = Path(
+        "/var/lib/miso/models/piper/es_ES-davefx-medium.onnx.json"
+    )
+    tts_volume: float = 1.0
+    tts_chunk_bytes: int = 4_096
+    tts_timeout_seconds: float = 60.0
+    tts_result_capacity: int = 16
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -93,6 +114,9 @@ class Settings:
         try:
             audio_device_index = int(source.get("MISO_AUDIO_DEVICE_INDEX", "0"))
             audio_sample_rate = int(source.get("MISO_AUDIO_SAMPLE_RATE", "16000"))
+            audio_playback_sample_rate = int(
+                source.get("MISO_AUDIO_PLAYBACK_SAMPLE_RATE", "22050")
+            )
             audio_channels = int(source.get("MISO_AUDIO_CHANNELS", "1"))
             audio_chunk_milliseconds = int(
                 source.get("MISO_AUDIO_CHUNK_MILLISECONDS", "20")
@@ -127,6 +151,10 @@ class Settings:
             stt_vad_pre_roll_milliseconds = int(
                 source.get("MISO_STT_VAD_PRE_ROLL_MILLISECONDS", "200")
             )
+            tts_volume = float(source.get("MISO_TTS_VOLUME", "1"))
+            tts_chunk_bytes = int(source.get("MISO_TTS_CHUNK_BYTES", "4096"))
+            tts_timeout_seconds = float(source.get("MISO_TTS_TIMEOUT_SECONDS", "60"))
+            tts_result_capacity = int(source.get("MISO_TTS_RESULT_CAPACITY", "16"))
         except ValueError as error:
             raise ConfigError("MISO audio numeric settings are invalid") from error
 
@@ -175,6 +203,7 @@ class Settings:
             ),
             audio_device_index=audio_device_index,
             audio_sample_rate=audio_sample_rate,
+            audio_playback_sample_rate=audio_playback_sample_rate,
             audio_channels=audio_channels,
             audio_chunk_milliseconds=audio_chunk_milliseconds,
             audio_buffer_milliseconds=audio_buffer_milliseconds,
@@ -210,6 +239,46 @@ class Settings:
                 stt_vad_maximum_utterance_milliseconds
             ),
             stt_vad_pre_roll_milliseconds=stt_vad_pre_roll_milliseconds,
+            tts_enabled=_boolean(
+                source.get("MISO_TTS_ENABLED", "false"), "MISO_TTS_ENABLED"
+            ),
+            tts_executable=Path(
+                source.get("MISO_TTS_EXECUTABLE", "/opt/miso/piper/bin/python")
+            ),
+            tts_english_voice=source.get(
+                "MISO_TTS_ENGLISH_VOICE", "en_GB-cori-medium"
+            ).strip(),
+            tts_english_model=Path(
+                source.get(
+                    "MISO_TTS_ENGLISH_MODEL",
+                    str(model_dir / "piper" / "en_GB-cori-medium.onnx"),
+                )
+            ),
+            tts_english_config=Path(
+                source.get(
+                    "MISO_TTS_ENGLISH_CONFIG",
+                    str(model_dir / "piper" / "en_GB-cori-medium.onnx.json"),
+                )
+            ),
+            tts_spanish_voice=source.get(
+                "MISO_TTS_SPANISH_VOICE", "es_ES-davefx-medium"
+            ).strip(),
+            tts_spanish_model=Path(
+                source.get(
+                    "MISO_TTS_SPANISH_MODEL",
+                    str(model_dir / "piper" / "es_ES-davefx-medium.onnx"),
+                )
+            ),
+            tts_spanish_config=Path(
+                source.get(
+                    "MISO_TTS_SPANISH_CONFIG",
+                    str(model_dir / "piper" / "es_ES-davefx-medium.onnx.json"),
+                )
+            ),
+            tts_volume=tts_volume,
+            tts_chunk_bytes=tts_chunk_bytes,
+            tts_timeout_seconds=tts_timeout_seconds,
+            tts_result_capacity=tts_result_capacity,
         )
         settings.validate()
         return settings
@@ -270,6 +339,10 @@ class Settings:
             raise ConfigError("MISO_AUDIO_DEVICE_INDEX must be between 0 and 255")
         if not 8_000 <= self.audio_sample_rate <= 192_000:
             raise ConfigError("MISO_AUDIO_SAMPLE_RATE must be between 8000 and 192000")
+        if not 8_000 <= self.audio_playback_sample_rate <= 192_000:
+            raise ConfigError(
+                "MISO_AUDIO_PLAYBACK_SAMPLE_RATE must be between 8000 and 192000"
+            )
         if not 1 <= self.audio_channels <= 8:
             raise ConfigError("MISO_AUDIO_CHANNELS must be between 1 and 8")
         if not 5 <= self.audio_chunk_milliseconds <= 1_000:
@@ -324,6 +397,25 @@ class Settings:
             raise ConfigError(
                 "MISO_STT_VAD_PRE_ROLL_MILLISECONDS must be between 0 and 5000"
             )
+        for name, path in (
+            ("MISO_TTS_EXECUTABLE", self.tts_executable),
+            ("MISO_TTS_ENGLISH_MODEL", self.tts_english_model),
+            ("MISO_TTS_ENGLISH_CONFIG", self.tts_english_config),
+            ("MISO_TTS_SPANISH_MODEL", self.tts_spanish_model),
+            ("MISO_TTS_SPANISH_CONFIG", self.tts_spanish_config),
+        ):
+            if not path.is_absolute():
+                raise ConfigError(f"{name} must be absolute")
+        if not self.tts_english_voice or not self.tts_spanish_voice:
+            raise ConfigError("MISO TTS voice names must not be empty")
+        if not 0 <= self.tts_volume <= 2:
+            raise ConfigError("MISO_TTS_VOLUME must be between 0 and 2")
+        if not 256 <= self.tts_chunk_bytes <= 1_048_576 or self.tts_chunk_bytes % 2:
+            raise ConfigError("MISO_TTS_CHUNK_BYTES must be even and between 256 and 1048576")
+        if not 1 <= self.tts_timeout_seconds <= 600:
+            raise ConfigError("MISO_TTS_TIMEOUT_SECONDS must be between 1 and 600")
+        if not 1 <= self.tts_result_capacity <= 1_000:
+            raise ConfigError("MISO_TTS_RESULT_CAPACITY must be between 1 and 1000")
         for name, path in (
             ("MISO_STATE_DIR", self.state_dir),
             ("MISO_MODEL_DIR", self.model_dir),

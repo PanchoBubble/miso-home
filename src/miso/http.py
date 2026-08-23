@@ -20,6 +20,7 @@ from miso.config import Settings
 from miso.memory import MemoryStore
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError, create_router
+from miso.speech import PiperBackend, PiperVoice, SpeechError, SpeechManager
 from miso.transcription import (
     EnergySpeechDetector,
     TranscriptionManager,
@@ -65,6 +66,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         developer_shell: DeveloperShellController,
         audio_manager: AudioManager,
         transcription_manager: TranscriptionManager,
+        speech_manager: SpeechManager,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -74,6 +76,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.developer_shell = developer_shell
         self.audio_manager = audio_manager
         self.transcription_manager = transcription_manager
+        self.speech_manager = speech_manager
         self.memory_store = MemoryStore(settings.database_path)
         self.started_at = started_at
         self._active_requests: dict[str, threading.Event] = {}
@@ -84,14 +87,17 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.scheduled_worker.start()
         self.audio_manager.start()
         self.transcription_manager.start()
+        self.speech_manager.start()
         try:
             super().serve_forever(poll_interval)
         finally:
+            self.speech_manager.stop()
             self.transcription_manager.stop()
             self.audio_manager.stop()
             self.scheduled_worker.stop()
 
     def server_close(self) -> None:
+        self.speech_manager.stop()
         self.transcription_manager.stop()
         self.audio_manager.stop()
         self.scheduled_worker.stop()
@@ -192,6 +198,17 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 self._developer(payload)
             elif parsed.path == "/api/developer/command":
                 self._developer_command(payload)
+            elif parsed.path == "/api/speech":
+                self._speech(payload)
+            elif parsed.path == "/api/speech/cancel":
+                request_id = payload.get("request_id")
+                if request_id is not None and not isinstance(request_id, str):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_id"})
+                else:
+                    self._json(
+                        HTTPStatus.OK,
+                        {"cancelled": self.miso.speech_manager.cancel(request_id)},
+                    )
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -227,9 +244,29 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     "tools": list(self.miso.tool_registry.names()),
                     "audio": self.miso.audio_manager.status(),
                     "transcription": self.miso.transcription_manager.status(),
+                    "speech": self.miso.speech_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
                 },
             )
+
+        def _speech(self, payload: dict[str, object]) -> None:
+            text = payload.get("text")
+            language = payload.get("language")
+            volume = payload.get("volume")
+            if not isinstance(text, str) or not isinstance(language, str):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_speech_request"})
+                return
+            if volume is not None and not isinstance(volume, (int, float)):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_volume"})
+                return
+            try:
+                request_id = self.miso.speech_manager.speak(
+                    text, language, volume=None if volume is None else float(volume)
+                )
+            except SpeechError as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+            self._json(HTTPStatus.ACCEPTED, {"request_id": request_id})
 
         def _memory(self, query: str) -> None:
             if len(query) > 500:
@@ -532,6 +569,7 @@ def create_server(
     developer_shell: DeveloperShellController | None = None,
     audio_manager: AudioManager | None = None,
     transcription_manager: TranscriptionManager | None = None,
+    speech_manager: SpeechManager | None = None,
 ) -> MisoHTTPServer:
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
@@ -549,6 +587,7 @@ def create_server(
         playback_card=settings.audio_playback_card,
         device_index=settings.audio_device_index,
         sample_rate=settings.audio_sample_rate,
+        playback_sample_rate=settings.audio_playback_sample_rate,
         channels=settings.audio_channels,
         chunk_milliseconds=settings.audio_chunk_milliseconds,
         buffer_milliseconds=settings.audio_buffer_milliseconds,
@@ -581,6 +620,33 @@ def create_server(
         ),
         result_capacity=settings.stt_result_capacity,
     )
+    speech = speech_manager or SpeechManager(
+        enabled=settings.tts_enabled,
+        backend=PiperBackend(
+            settings.tts_executable,
+            (
+                PiperVoice(
+                    "en",
+                    settings.tts_english_voice,
+                    settings.tts_english_model,
+                    settings.tts_english_config,
+                    settings.audio_playback_sample_rate,
+                ),
+                PiperVoice(
+                    "es",
+                    settings.tts_spanish_voice,
+                    settings.tts_spanish_model,
+                    settings.tts_spanish_config,
+                    settings.audio_playback_sample_rate,
+                ),
+            ),
+            chunk_bytes=settings.tts_chunk_bytes,
+            timeout_seconds=settings.tts_timeout_seconds,
+        ),
+        audio=audio,
+        default_volume=settings.tts_volume,
+        result_capacity=settings.tts_result_capacity,
+    )
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(),
@@ -593,5 +659,6 @@ def create_server(
         developer_shell=shell,
         audio_manager=audio,
         transcription_manager=transcription,
+        speech_manager=speech,
         started_at=time.monotonic(),
     )
