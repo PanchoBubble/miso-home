@@ -58,10 +58,10 @@ class Settings:
     wake_phrase: str = "Miso"
     wake_executable: Path = Path("/opt/miso/openwakeword/bin/python")
     wake_model: Path = Path("/var/lib/miso/models/openwakeword/miso.onnx")
-    wake_threshold: float = 0.5
+    wake_threshold: float = 0.999
     wake_vad_threshold: float = 0.5
-    wake_energy_threshold_dbfs: float = -45.0
-    wake_activation_frames: int = 2
+    wake_energy_threshold_dbfs: float = -60.0
+    wake_activation_frames: int = 1
     wake_cooldown_seconds: float = 2.0
     wake_result_capacity: int = 16
     stt_enabled: bool = False
@@ -143,15 +143,15 @@ class Settings:
             audio_clipping_ratio = float(
                 source.get("MISO_AUDIO_CLIPPING_RATIO", "0.98")
             )
-            wake_threshold = float(source.get("MISO_WAKE_THRESHOLD", "0.5"))
+            wake_threshold = float(source.get("MISO_WAKE_THRESHOLD", "0.999"))
             wake_vad_threshold = float(
                 source.get("MISO_WAKE_VAD_THRESHOLD", "0.5")
             )
             wake_energy_threshold_dbfs = float(
-                source.get("MISO_WAKE_ENERGY_THRESHOLD_DBFS", "-45")
+                source.get("MISO_WAKE_ENERGY_THRESHOLD_DBFS", "-60")
             )
             wake_activation_frames = int(
-                source.get("MISO_WAKE_ACTIVATION_FRAMES", "2")
+                source.get("MISO_WAKE_ACTIVATION_FRAMES", "1")
             )
             wake_cooldown_seconds = float(
                 source.get("MISO_WAKE_COOLDOWN_SECONDS", "2")

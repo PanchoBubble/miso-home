@@ -1,0 +1,628 @@
+{
+  "acceptance_passed": true,
+  "feature_shape": [
+    16,
+    96
+  ],
+  "heldout": {
+    "confusable_negative_samples": 2000,
+    "general_negative_frames": 96254,
+    "general_negative_hours": 2.139,
+    "positive_samples": 2000,
+    "voices": [
+      "Eddy (English (UK))",
+      "Eddy (English (US))",
+      "Grandma (English (UK))",
+      "Grandpa (English (US))",
+      "Sandy (English (UK))",
+      "Shelley (English (US))",
+      "Eddy (Spanish (Spain))",
+      "Eddy (Spanish (Mexico))",
+      "Grandma (Spanish (Spain))",
+      "Grandpa (Spanish (Mexico))",
+      "Sandy (Spanish (Spain))",
+      "Shelley (Spanish (Mexico))"
+    ]
+  },
+  "model": "miso.onnx",
+  "onnx_sklearn_maximum_delta": 5.960464477539063e-08,
+  "openwakeword_version": "0.6.0",
+  "seed": 20260823,
+  "selected": {
+    "activation_frames": 1,
+    "confusable_false_positive_rate": 0.0005,
+    "false_activations_per_hour": 0.4675,
+    "general_false_activations": 1,
+    "general_negative_hours": 2.139,
+    "language_recall": {
+      "en": 0.9629,
+      "es": 0.9472
+    },
+    "recall": 0.955,
+    "threshold": 0.999
+  },
+  "sha256": "f7d67c3d67911e65ff51a10967661b56b1aead161efe3816646a5190aa2ba59f",
+  "threshold_candidates": [
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0215,
+      "false_activations_per_hour": 45.3488,
+      "general_false_activations": 97,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 1.0,
+        "es": 1.0
+      },
+      "recall": 1.0,
+      "threshold": 0.1
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.019,
+      "false_activations_per_hour": 38.8036,
+      "general_false_activations": 83,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 1.0
+      },
+      "recall": 0.9995,
+      "threshold": 0.125
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.018,
+      "false_activations_per_hour": 35.0635,
+      "general_false_activations": 75,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.15
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.017,
+      "false_activations_per_hour": 32.7259,
+      "general_false_activations": 70,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.175
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0165,
+      "false_activations_per_hour": 29.4533,
+      "general_false_activations": 63,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.2
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.016,
+      "false_activations_per_hour": 28.0508,
+      "general_false_activations": 60,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.225
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0155,
+      "false_activations_per_hour": 26.1807,
+      "general_false_activations": 56,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.25
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0145,
+      "false_activations_per_hour": 24.7782,
+      "general_false_activations": 53,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.275
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0125,
+      "false_activations_per_hour": 23.8432,
+      "general_false_activations": 51,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.3
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0115,
+      "false_activations_per_hour": 21.9731,
+      "general_false_activations": 47,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.325
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.011,
+      "false_activations_per_hour": 21.5056,
+      "general_false_activations": 46,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.999
+      },
+      "recall": 0.999,
+      "threshold": 0.35
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.011,
+      "false_activations_per_hour": 20.5706,
+      "general_false_activations": 44,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.375
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0105,
+      "false_activations_per_hour": 18.7005,
+      "general_false_activations": 40,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.4
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.01,
+      "false_activations_per_hour": 18.7005,
+      "general_false_activations": 40,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.425
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.01,
+      "false_activations_per_hour": 18.233,
+      "general_false_activations": 39,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.45
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0095,
+      "false_activations_per_hour": 18.233,
+      "general_false_activations": 39,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.475
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.008,
+      "false_activations_per_hour": 17.298,
+      "general_false_activations": 37,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.5
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.008,
+      "false_activations_per_hour": 16.8305,
+      "general_false_activations": 36,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.525
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0075,
+      "false_activations_per_hour": 15.8954,
+      "general_false_activations": 34,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.55
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.007,
+      "false_activations_per_hour": 15.4279,
+      "general_false_activations": 33,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.575
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0065,
+      "false_activations_per_hour": 14.4929,
+      "general_false_activations": 31,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.6
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.006,
+      "false_activations_per_hour": 13.5579,
+      "general_false_activations": 29,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.998
+      },
+      "recall": 0.9985,
+      "threshold": 0.625
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.006,
+      "false_activations_per_hour": 12.6229,
+      "general_false_activations": 27,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.997
+      },
+      "recall": 0.998,
+      "threshold": 0.65
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.006,
+      "false_activations_per_hour": 12.6229,
+      "general_false_activations": 27,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.997
+      },
+      "recall": 0.998,
+      "threshold": 0.675
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0055,
+      "false_activations_per_hour": 11.6878,
+      "general_false_activations": 25,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.997
+      },
+      "recall": 0.998,
+      "threshold": 0.7
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0055,
+      "false_activations_per_hour": 11.2203,
+      "general_false_activations": 24,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.997
+      },
+      "recall": 0.998,
+      "threshold": 0.725
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0055,
+      "false_activations_per_hour": 10.2853,
+      "general_false_activations": 22,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.996
+      },
+      "recall": 0.9975,
+      "threshold": 0.75
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.005,
+      "false_activations_per_hour": 10.2853,
+      "general_false_activations": 22,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.996
+      },
+      "recall": 0.9975,
+      "threshold": 0.775
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0045,
+      "false_activations_per_hour": 9.8178,
+      "general_false_activations": 21,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.995
+      },
+      "recall": 0.997,
+      "threshold": 0.8
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.004,
+      "false_activations_per_hour": 9.3503,
+      "general_false_activations": 20,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.995
+      },
+      "recall": 0.997,
+      "threshold": 0.825
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.003,
+      "false_activations_per_hour": 8.8827,
+      "general_false_activations": 19,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.999,
+        "es": 0.994
+      },
+      "recall": 0.9965,
+      "threshold": 0.85
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.003,
+      "false_activations_per_hour": 8.4152,
+      "general_false_activations": 18,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.998,
+        "es": 0.994
+      },
+      "recall": 0.996,
+      "threshold": 0.875
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0025,
+      "false_activations_per_hour": 7.9477,
+      "general_false_activations": 17,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.998,
+        "es": 0.993
+      },
+      "recall": 0.9955,
+      "threshold": 0.9
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0025,
+      "false_activations_per_hour": 7.9477,
+      "general_false_activations": 17,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.997,
+        "es": 0.992
+      },
+      "recall": 0.9945,
+      "threshold": 0.925
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0025,
+      "false_activations_per_hour": 6.5452,
+      "general_false_activations": 14,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.996,
+        "es": 0.989
+      },
+      "recall": 0.9925,
+      "threshold": 0.95
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0025,
+      "false_activations_per_hour": 5.1426,
+      "general_false_activations": 11,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.995,
+        "es": 0.988
+      },
+      "recall": 0.9915,
+      "threshold": 0.96
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.002,
+      "false_activations_per_hour": 4.2076,
+      "general_false_activations": 9,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.992,
+        "es": 0.987
+      },
+      "recall": 0.9895,
+      "threshold": 0.97
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0015,
+      "false_activations_per_hour": 3.2726,
+      "general_false_activations": 7,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.992,
+        "es": 0.985
+      },
+      "recall": 0.9885,
+      "threshold": 0.98
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0015,
+      "false_activations_per_hour": 2.8051,
+      "general_false_activations": 6,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.991,
+        "es": 0.9771
+      },
+      "recall": 0.984,
+      "threshold": 0.99
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.001,
+      "false_activations_per_hour": 2.3376,
+      "general_false_activations": 5,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.986,
+        "es": 0.9681
+      },
+      "recall": 0.977,
+      "threshold": 0.995
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.001,
+      "false_activations_per_hour": 1.8701,
+      "general_false_activations": 4,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.9729,
+        "es": 0.9561
+      },
+      "recall": 0.9645,
+      "threshold": 0.998
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0005,
+      "false_activations_per_hour": 0.4675,
+      "general_false_activations": 1,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.9629,
+        "es": 0.9472
+      },
+      "recall": 0.955,
+      "threshold": 0.999
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0005,
+      "false_activations_per_hour": 0.4675,
+      "general_false_activations": 1,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.9448,
+        "es": 0.9302
+      },
+      "recall": 0.9375,
+      "threshold": 1.0
+    },
+    {
+      "activation_frames": 1,
+      "confusable_false_positive_rate": 0.0005,
+      "false_activations_per_hour": 0.4675,
+      "general_false_activations": 1,
+      "general_negative_hours": 2.139,
+      "language_recall": {
+        "en": 0.9007,
+        "es": 0.8883
+      },
+      "recall": 0.8945,
+      "threshold": 1.0
+    }
+  ],
+  "training": {
+    "confusable_base_clips": 672,
+    "confusable_negative_samples": 10000,
+    "general_negative_samples": 20000,
+    "iterations": 22,
+    "loss": 0.000113,
+    "positive_base_clips": 224,
+    "positive_samples": 20000
+  }
+}

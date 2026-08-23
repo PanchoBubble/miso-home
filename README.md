@@ -152,13 +152,16 @@ Repeated activations are suppressed by a cooldown. `/api/status` reports model
 availability, thresholds, bounded wake events, activation count, failures, and
 the highest observed score without exposing model paths or captured audio.
 
-After training or obtaining a `Miso` ONNX model, install it by explicit
-checksum, then deploy the runtime:
+The repository includes the reproducibly trained `Miso` model and a pinned
+checksum. Install it, then deploy the runtime:
 
 ```bash
-sudo ops/install-openwakeword.sh /path/to/miso.onnx MODEL_SHA256
+sudo ops/install-openwakeword.sh
 sudo ops/install-miso-runtime.sh
 ```
+
+To install a different compatible model, pass its path and SHA-256 explicitly:
+`sudo ops/install-openwakeword.sh /path/to/miso.onnx MODEL_SHA256`.
 
 Wake inference is entirely offline; network access is used only by the
 installer to create the pinned environment and fetch openWakeWord's shared
@@ -169,10 +172,10 @@ MISO_WAKE_ENABLED=true
 MISO_WAKE_PHRASE=Miso
 MISO_WAKE_EXECUTABLE=/opt/miso/openwakeword/bin/python
 MISO_WAKE_MODEL=/var/lib/miso/models/openwakeword/miso.onnx
-MISO_WAKE_THRESHOLD=0.5
+MISO_WAKE_THRESHOLD=0.999
 MISO_WAKE_VAD_THRESHOLD=0.5
-MISO_WAKE_ENERGY_THRESHOLD_DBFS=-45
-MISO_WAKE_ACTIVATION_FRAMES=2
+MISO_WAKE_ENERGY_THRESHOLD_DBFS=-60
+MISO_WAKE_ACTIVATION_FRAMES=1
 MISO_WAKE_COOLDOWN_SECONDS=2
 ```
 

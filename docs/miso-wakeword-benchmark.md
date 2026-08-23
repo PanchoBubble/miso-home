@@ -22,19 +22,36 @@ requires human speech captured through the deployment microphone.
 
 ## Model training
 
-Train `Miso` as a single target phrase with openWakeWord 0.6.0. Use at least
-20,000 augmented positive examples across English and Spanish TTS voices and
-the upstream large negative feature set. Include confusable negatives such as
-`Milo`, `Mia`, `missile`, `missing`, `mismo`, `misa`, `piso`, `quiso`, `hizo`,
-`aviso`, and `permiso`. Keep a held-out set that was not used for augmentation
-or threshold selection.
+`ops/train-wakeword.py` reproducibly trains `Miso` as a single target phrase
+with openWakeWord 0.6.0. It uses 20,000 augmented positive examples across
+English and Spanish TTS voices, 10,000 confusable negatives, and 20,000 windows
+from the upstream large negative feature set. Confusables include `Milo`,
+`Mia`, `missile`, `missing`, `mismo`, `misa`, `piso`, `quiso`, `hizo`, `aviso`,
+and `permiso`. Voice identities and the final 20% of the general-negative
+timeline are held out from training.
 
-The exported ONNX file is configuration, not application code. Install it with
-its recorded checksum:
+The generator currently requires macOS `say`, FFmpeg at
+`/opt/homebrew/bin/ffmpeg`, Python 3.11, `openwakeword==0.6.0`, `onnx==1.18.0`,
+and scikit-learn. Download openWakeWord's
+[`validation_set_features.npy`](https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy),
+then run:
 
 ```bash
-sha256sum /path/to/miso.onnx
-sudo ops/install-openwakeword.sh /path/to/miso.onnx MODEL_SHA256
+python ops/train-wakeword.py \
+  --output-directory .local/wake-training/run \
+  --negative-features .local/wake-training/validation_set_features.npy
+```
+
+The fixed seed, disjoint voice sets, augmentation parameters, selected
+threshold, complete threshold matrix, and ONNX/sklearn parity check are written
+to `metrics.json`. A run exits nonzero unless it finds at least 80% aggregate
+and per-language recall with no more than 0.5 false activations per hour.
+
+The accepted model is committed at `models/openwakeword/miso.onnx`. Install it
+with its pinned checksum:
+
+```bash
+sudo ops/install-openwakeword.sh
 sudo ops/install-miso-runtime.sh
 ```
 
@@ -79,7 +96,7 @@ its own location:
 Run a threshold matrix and retain each JSON result with the model checksum:
 
 ```bash
-for threshold in 0.35 0.45 0.55 0.65; do
+for threshold in 0.99 0.995 0.9975 0.999; do
   PYTHONPATH=src /opt/miso/openwakeword/bin/python \
     ops/benchmark-wakeword.py \
     --manifest /path/to/manifest.json \
@@ -92,6 +109,31 @@ done
 Tune `MISO_WAKE_THRESHOLD`, `MISO_WAKE_VAD_THRESHOLD`,
 `MISO_WAKE_ENERGY_THRESHOLD_DBFS`, and `MISO_WAKE_ACTIVATION_FRAMES` from those
 results. Do not select a threshold against the training clips.
+
+## Synthetic model-selection result
+
+The 2026-08-23 fixed-seed run produced model SHA-256
+`f7d67c3d67911e65ff51a10967661b56b1aead161efe3816646a5190aa2ba59f`.
+At threshold `0.999` with one activation frame, the disjoint
+synthetic holdout measured:
+
+- 95.5% aggregate recall across 2,000 positive examples;
+- 96.29% English recall and 94.72% Spanish recall;
+- 0.05% false-positive rate across 2,000 confusable examples; and
+- one activation in 2.139 hours of held-out general-negative audio features,
+  or 0.4675 activations/hour.
+
+Replaying 500 independently augmented two-second clips through the actual
+isolated streaming worker with Silero VAD `0.5` and an energy floor of `-60`
+dBFS measured 96.8% recall in both English and Spanish. A two-frame debounce or
+the former `-45` dBFS energy floor suppressed valid trailing score peaks, so the
+deployed policy uses one frame and relies on the stricter model threshold plus
+both speech gates.
+
+The full machine-readable result is in
+`benchmarks/openwakeword/training-metrics.json`. These measurements select a
+software candidate; they do not replace the physical-microphone acceptance
+described below.
 
 ## Current hardware gate
 

@@ -4,10 +4,18 @@ set -Eeuo pipefail
 OPENWAKEWORD_VERSION="0.6.0"
 INSTALL_ROOT="/opt/miso/openwakeword"
 MODEL_ROOT="/var/lib/miso/models/openwakeword"
-ENV_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/systemd/miso-wake.env"
-MODEL_SOURCE="${1:-}"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_ROOT}/.." && pwd)"
+ENV_SOURCE="${SCRIPT_ROOT}/systemd/miso-wake.env"
+BUNDLED_MODEL="${PROJECT_ROOT}/models/openwakeword/miso.onnx"
+BUNDLED_MODEL_SHA256="f7d67c3d67911e65ff51a10967661b56b1aead161efe3816646a5190aa2ba59f"
+MODEL_SOURCE="${1:-${BUNDLED_MODEL}}"
 MODEL_SHA256="${2:-}"
 MODEL_DATA_SHA256="${3:-}"
+
+if [[ -z "${MODEL_SHA256}" && "${MODEL_SOURCE}" == "${BUNDLED_MODEL}" ]]; then
+  MODEL_SHA256="${BUNDLED_MODEL_SHA256}"
+fi
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -16,8 +24,9 @@ fail() {
 
 [[ "${EUID}" -eq 0 ]] || fail "run as root"
 [[ -n "${MODEL_SOURCE}" && -f "${MODEL_SOURCE}" ]] \
-  || fail "usage: $0 /path/to/miso.onnx MODEL_SHA256 [MODEL_DATA_SHA256]"
-[[ "${MODEL_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]] || fail "a model SHA-256 is required"
+  || fail "wake model not found: ${MODEL_SOURCE}"
+[[ "${MODEL_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]] \
+  || fail "usage: $0 [/path/to/miso.onnx MODEL_SHA256 [MODEL_DATA_SHA256]]"
 [[ -f "${ENV_SOURCE}" ]] || fail "wake environment file not found: ${ENV_SOURCE}"
 for command in getent install python3 sha256sum systemctl; do
   command -v "${command}" >/dev/null || fail "missing command: ${command}"
