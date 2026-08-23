@@ -20,6 +20,12 @@ from miso.config import Settings
 from miso.memory import MemoryStore
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError, create_router
+from miso.transcription import (
+    EnergySpeechDetector,
+    TranscriptionManager,
+    UtteranceAssembler,
+    WhisperCppTranscriber,
+)
 from miso.tools import (
     DeveloperShellController,
     HouseholdStore,
@@ -58,6 +64,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         router: ProviderRouter,
         developer_shell: DeveloperShellController,
         audio_manager: AudioManager,
+        transcription_manager: TranscriptionManager,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -66,6 +73,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.router = router
         self.developer_shell = developer_shell
         self.audio_manager = audio_manager
+        self.transcription_manager = transcription_manager
         self.memory_store = MemoryStore(settings.database_path)
         self.started_at = started_at
         self._active_requests: dict[str, threading.Event] = {}
@@ -75,13 +83,16 @@ class MisoHTTPServer(ThreadingHTTPServer):
     def serve_forever(self, poll_interval: float = 0.5) -> None:
         self.scheduled_worker.start()
         self.audio_manager.start()
+        self.transcription_manager.start()
         try:
             super().serve_forever(poll_interval)
         finally:
+            self.transcription_manager.stop()
             self.audio_manager.stop()
             self.scheduled_worker.stop()
 
     def server_close(self) -> None:
+        self.transcription_manager.stop()
         self.audio_manager.stop()
         self.scheduled_worker.stop()
         super().server_close()
@@ -215,6 +226,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     },
                     "tools": list(self.miso.tool_registry.names()),
                     "audio": self.miso.audio_manager.status(),
+                    "transcription": self.miso.transcription_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
                 },
             )
@@ -519,6 +531,7 @@ def create_server(
     router: ProviderRouter | None = None,
     developer_shell: DeveloperShellController | None = None,
     audio_manager: AudioManager | None = None,
+    transcription_manager: TranscriptionManager | None = None,
 ) -> MisoHTTPServer:
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
@@ -543,6 +556,31 @@ def create_server(
         silence_dbfs=settings.audio_silence_dbfs,
         clipping_ratio=settings.audio_clipping_ratio,
     )
+    transcription = transcription_manager or TranscriptionManager(
+        enabled=settings.stt_enabled,
+        audio=audio,
+        transcriber=WhisperCppTranscriber(
+            settings.stt_executable,
+            settings.stt_model,
+            threads=settings.stt_threads,
+            timeout_seconds=settings.stt_timeout_seconds,
+            work_directory=Path("/run/miso"),
+            prompt=settings.stt_prompt,
+        ),
+        detector=EnergySpeechDetector(settings.stt_vad_threshold_dbfs),
+        assembler=UtteranceAssembler(
+            audio.audio_format,
+            minimum_speech_milliseconds=(
+                settings.stt_vad_minimum_speech_milliseconds
+            ),
+            end_silence_milliseconds=settings.stt_vad_end_silence_milliseconds,
+            maximum_utterance_milliseconds=(
+                settings.stt_vad_maximum_utterance_milliseconds
+            ),
+            pre_roll_milliseconds=settings.stt_vad_pre_roll_milliseconds,
+        ),
+        result_capacity=settings.stt_result_capacity,
+    )
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(),
@@ -554,5 +592,6 @@ def create_server(
         router=router or create_router(settings),
         developer_shell=shell,
         audio_manager=audio,
+        transcription_manager=transcription,
         started_at=time.monotonic(),
     )

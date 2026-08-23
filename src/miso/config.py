@@ -53,10 +53,26 @@ class Settings:
     audio_reconnect_seconds: float = 1.0
     audio_silence_dbfs: float = -50.0
     audio_clipping_ratio: float = 0.98
+    stt_enabled: bool = False
+    stt_executable: Path = Path("/usr/local/bin/whisper-cli")
+    stt_model: Path = Path("/var/lib/miso/models/whisper/ggml-tiny.bin")
+    stt_threads: int = 4
+    stt_timeout_seconds: float = 45.0
+    stt_prompt: str = (
+        "Miso. English and Spanish home assistant commands. "
+        "Timer, shopping list, lights. Temporizador, lista de compras, luces."
+    )
+    stt_result_capacity: int = 16
+    stt_vad_threshold_dbfs: float = -38.0
+    stt_vad_minimum_speech_milliseconds: int = 250
+    stt_vad_end_silence_milliseconds: int = 600
+    stt_vad_maximum_utterance_milliseconds: int = 15_000
+    stt_vad_pre_roll_milliseconds: int = 200
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
         source = environ if values is None else values
+        model_dir = Path(source.get("MISO_MODEL_DIR", "/var/lib/miso/models"))
         try:
             port = int(source.get("MISO_PORT", "8090"))
         except ValueError as error:
@@ -93,6 +109,24 @@ class Settings:
             audio_clipping_ratio = float(
                 source.get("MISO_AUDIO_CLIPPING_RATIO", "0.98")
             )
+            stt_threads = int(source.get("MISO_STT_THREADS", "4"))
+            stt_timeout_seconds = float(source.get("MISO_STT_TIMEOUT_SECONDS", "45"))
+            stt_result_capacity = int(source.get("MISO_STT_RESULT_CAPACITY", "16"))
+            stt_vad_threshold_dbfs = float(
+                source.get("MISO_STT_VAD_THRESHOLD_DBFS", "-38")
+            )
+            stt_vad_minimum_speech_milliseconds = int(
+                source.get("MISO_STT_VAD_MINIMUM_SPEECH_MILLISECONDS", "250")
+            )
+            stt_vad_end_silence_milliseconds = int(
+                source.get("MISO_STT_VAD_END_SILENCE_MILLISECONDS", "600")
+            )
+            stt_vad_maximum_utterance_milliseconds = int(
+                source.get("MISO_STT_VAD_MAXIMUM_UTTERANCE_MILLISECONDS", "15000")
+            )
+            stt_vad_pre_roll_milliseconds = int(
+                source.get("MISO_STT_VAD_PRE_ROLL_MILLISECONDS", "200")
+            )
         except ValueError as error:
             raise ConfigError("MISO audio numeric settings are invalid") from error
 
@@ -103,7 +137,7 @@ class Settings:
                 source.get("MISO_DB_PATH", "/var/lib/miso/db/miso.sqlite3")
             ),
             state_dir=Path(source.get("MISO_STATE_DIR", "/var/lib/miso/state")),
-            model_dir=Path(source.get("MISO_MODEL_DIR", "/var/lib/miso/models")),
+            model_dir=model_dir,
             ollama_url=source.get("MISO_OLLAMA_URL", "http://127.0.0.1:11434"),
             ollama_model=source.get("MISO_OLLAMA_MODEL", "qwen3:0.6b"),
             provider_timeout_seconds=provider_timeout,
@@ -147,6 +181,35 @@ class Settings:
             audio_reconnect_seconds=audio_reconnect_seconds,
             audio_silence_dbfs=audio_silence_dbfs,
             audio_clipping_ratio=audio_clipping_ratio,
+            stt_enabled=_boolean(
+                source.get("MISO_STT_ENABLED", "false"), "MISO_STT_ENABLED"
+            ),
+            stt_executable=Path(
+                source.get("MISO_STT_EXECUTABLE", "/usr/local/bin/whisper-cli")
+            ),
+            stt_model=Path(
+                source.get(
+                    "MISO_STT_MODEL",
+                    str(model_dir / "whisper" / "ggml-tiny.bin"),
+                )
+            ),
+            stt_threads=stt_threads,
+            stt_timeout_seconds=stt_timeout_seconds,
+            stt_prompt=source.get(
+                "MISO_STT_PROMPT",
+                "Miso. English and Spanish home assistant commands. "
+                "Timer, shopping list, lights. Temporizador, lista de compras, luces.",
+            ).strip(),
+            stt_result_capacity=stt_result_capacity,
+            stt_vad_threshold_dbfs=stt_vad_threshold_dbfs,
+            stt_vad_minimum_speech_milliseconds=(
+                stt_vad_minimum_speech_milliseconds
+            ),
+            stt_vad_end_silence_milliseconds=stt_vad_end_silence_milliseconds,
+            stt_vad_maximum_utterance_milliseconds=(
+                stt_vad_maximum_utterance_milliseconds
+            ),
+            stt_vad_pre_roll_milliseconds=stt_vad_pre_roll_milliseconds,
         )
         settings.validate()
         return settings
@@ -225,6 +288,42 @@ class Settings:
             raise ConfigError("MISO_AUDIO_SILENCE_DBFS must be between -120 and 0")
         if not 0.5 <= self.audio_clipping_ratio <= 1:
             raise ConfigError("MISO_AUDIO_CLIPPING_RATIO must be between 0.5 and 1")
+        for name, path in (
+            ("MISO_STT_EXECUTABLE", self.stt_executable),
+            ("MISO_STT_MODEL", self.stt_model),
+        ):
+            if not path.is_absolute():
+                raise ConfigError(f"{name} must be absolute")
+        if not 1 <= self.stt_threads <= 32:
+            raise ConfigError("MISO_STT_THREADS must be between 1 and 32")
+        if not 1 <= self.stt_timeout_seconds <= 600:
+            raise ConfigError("MISO_STT_TIMEOUT_SECONDS must be between 1 and 600")
+        if len(self.stt_prompt) > 500:
+            raise ConfigError("MISO_STT_PROMPT must be at most 500 characters")
+        if not 1 <= self.stt_result_capacity <= 1_000:
+            raise ConfigError("MISO_STT_RESULT_CAPACITY must be between 1 and 1000")
+        if not -120 <= self.stt_vad_threshold_dbfs <= 0:
+            raise ConfigError("MISO_STT_VAD_THRESHOLD_DBFS must be between -120 and 0")
+        if not 20 <= self.stt_vad_minimum_speech_milliseconds <= 10_000:
+            raise ConfigError(
+                "MISO_STT_VAD_MINIMUM_SPEECH_MILLISECONDS must be between 20 and 10000"
+            )
+        if not 20 <= self.stt_vad_end_silence_milliseconds <= 10_000:
+            raise ConfigError(
+                "MISO_STT_VAD_END_SILENCE_MILLISECONDS must be between 20 and 10000"
+            )
+        if not (
+            self.stt_vad_minimum_speech_milliseconds
+            <= self.stt_vad_maximum_utterance_milliseconds
+            <= 120_000
+        ):
+            raise ConfigError(
+                "MISO_STT_VAD_MAXIMUM_UTTERANCE_MILLISECONDS must fit minimum speech and be at most 120000"
+            )
+        if not 0 <= self.stt_vad_pre_roll_milliseconds <= 5_000:
+            raise ConfigError(
+                "MISO_STT_VAD_PRE_ROLL_MILLISECONDS must be between 0 and 5000"
+            )
         for name, path in (
             ("MISO_STATE_DIR", self.state_dir),
             ("MISO_MODEL_DIR", self.model_dir),

@@ -140,3 +140,47 @@ Leave either card ID empty to select the first compatible PCM. Find stable IDs
 in brackets in `/proc/asound/cards`; do not configure volatile numeric names
 such as `hw:2`. Audio can remain enabled while hardware is absent: status will
 show `unavailable`, and the worker will attach when the device appears.
+
+## Offline English-Spanish transcription
+
+Install the pinned whisper.cpp build and selected multilingual model on the Pi,
+then deploy the runtime:
+
+```bash
+sudo ops/install-whisper-cpp.sh
+sudo ops/install-miso-runtime.sh
+```
+
+The installer verifies the model checksum, installs a static `whisper-cli`, and
+enables STT through `/etc/miso/miso-stt.env`. Captured S16_LE chunks pass through
+a replaceable VAD gate and a bounded utterance assembler with pre-roll, minimum
+speech, end-silence, and maximum-duration limits. Completed utterances are
+transcribed entirely offline. Results include English, Spanish, or mixed
+classification, the model's dominant acoustic language probability, segment
+and token timestamps, token-derived confidence, inference latency, and
+real-time factor. `/api/status` exposes only bounded diagnostics, not transcript
+text.
+
+The production default is the multilingual F16 `tiny` model. On the Raspberry
+Pi 5 it beat the quantized and larger candidates on interactive latency and
+passed the documented bilingual command targets. See
+`docs/miso-transcription-benchmark.md` for the full benchmark and limitations.
+
+The optional STT values are:
+
+```text
+MISO_STT_ENABLED=true
+MISO_STT_EXECUTABLE=/usr/local/bin/whisper-cli
+MISO_STT_MODEL=/var/lib/miso/models/whisper/ggml-tiny.bin
+MISO_STT_THREADS=4
+MISO_STT_TIMEOUT_SECONDS=45
+MISO_STT_VAD_THRESHOLD_DBFS=-38
+MISO_STT_VAD_MINIMUM_SPEECH_MILLISECONDS=250
+MISO_STT_VAD_END_SILENCE_MILLISECONDS=600
+MISO_STT_VAD_MAXIMUM_UTTERANCE_MILLISECONDS=15000
+MISO_STT_VAD_PRE_ROLL_MILLISECONDS=200
+```
+
+`MISO_STT_PROMPT` can override the short bilingual command vocabulary bias.
+Energy gating is deliberately replaceable so the wake/VAD phase can supply a
+stronger speech decision without changing utterance or transcription contracts.

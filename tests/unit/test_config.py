@@ -31,6 +31,11 @@ class SettingsTests(unittest.TestCase):
                     "MISO_AUDIO_CAPTURE_CARD": "MisoUSB",
                     "MISO_AUDIO_PLAYBACK_CARD": "USB_Speaker",
                     "MISO_AUDIO_BUFFER_MILLISECONDS": "800",
+                    "MISO_STT_ENABLED": "true",
+                    "MISO_STT_EXECUTABLE": "/opt/whisper/whisper-cli",
+                    "MISO_STT_MODEL": str(root / "models" / "whisper.bin"),
+                    "MISO_STT_THREADS": "3",
+                    "MISO_STT_VAD_THRESHOLD_DBFS": "-36",
                 }
             )
             settings.validate_runtime_paths()
@@ -45,6 +50,10 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.audio_capture_card, "MisoUSB")
             self.assertEqual(settings.audio_playback_card, "USB_Speaker")
             self.assertEqual(settings.audio_buffer_milliseconds, 800)
+            self.assertTrue(settings.stt_enabled)
+            self.assertEqual(settings.stt_threads, 3)
+            self.assertEqual(settings.stt_vad_threshold_dbfs, -36)
+            self.assertEqual(settings.stt_model, root / "models" / "whisper.bin")
 
     def test_rejects_relative_database_path(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be absolute"):
@@ -110,6 +119,14 @@ class SettingsTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConfigError, "required directories are missing"):
             settings.validate_runtime_paths()
+
+    def test_rejects_invalid_stt_configuration(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "STT_EXECUTABLE must be absolute"):
+            Settings.from_env({"MISO_STT_EXECUTABLE": "whisper-cli"})
+        with self.assertRaisesRegex(ConfigError, "STT_THREADS must be between"):
+            Settings.from_env({"MISO_STT_THREADS": "0"})
+        with self.assertRaisesRegex(ConfigError, "STT_VAD_THRESHOLD_DBFS"):
+            Settings.from_env({"MISO_STT_VAD_THRESHOLD_DBFS": "4"})
 
 
 if __name__ == "__main__":

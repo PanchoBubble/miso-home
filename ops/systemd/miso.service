@@ -16,6 +16,7 @@ Environment=MISO_DB_PATH=/var/lib/miso/db/miso.sqlite3
 Environment=MISO_STATE_DIR=/var/lib/miso/state
 Environment=MISO_MODEL_DIR=/var/lib/miso/models
 Environment=MISO_DEVELOPER_ROOT=/opt/miso/app
+EnvironmentFile=-/etc/miso/miso-stt.env
 EnvironmentFile=-/etc/miso/miso.env
 ExecStartPre=/usr/bin/python3 -m miso --check-config
 ExecStart=/usr/bin/python3 -m miso

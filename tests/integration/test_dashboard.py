@@ -116,6 +116,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn("capture", payload["audio"])
         self.assertIn("levels", payload["audio"]["capture"])
         self.assertIn("device_losses", payload["audio"]["capture"])
+        self.assertFalse(payload["transcription"]["enabled"])
+        self.assertEqual(payload["transcription"]["state"], "disabled")
         encoded = content.decode()
         self.assertNotIn(str(self.settings.database_path), encoded)
         self.assertNotIn("ollama_url", encoded)
