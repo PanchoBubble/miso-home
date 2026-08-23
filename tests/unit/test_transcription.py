@@ -211,11 +211,17 @@ class TranscriptionManagerTests(unittest.TestCase):
         )
         manager.start()
         result = manager.get_result(timeout=1)
+        started = manager.get_activity(timeout=1)
+        ended = manager.get_activity(timeout=1)
         manager.stop()
 
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.text, "enciende la luz")
+        self.assertIsNotNone(started)
+        self.assertIsNotNone(ended)
+        assert started is not None and ended is not None
+        self.assertEqual((started.kind, ended.kind), ("started", "ended"))
         status = manager.status()
         self.assertEqual(status["processed"], 1)
         self.assertNotIn("enciende", json.dumps(status))

@@ -265,3 +265,30 @@ MISO_TTS_VOLUME=1.0
 MISO_TTS_CHUNK_BYTES=4096
 MISO_TTS_TIMEOUT_SECONDS=60
 ```
+
+## Offline conversational turns
+
+When wake detection, transcription, and speech synthesis are enabled, Miso
+coordinates them through an explicit conversational state machine. A wake starts
+an acknowledgement and listening window; a completed utterance is routed through
+the same provider and allowlisted-tool boundary as dashboard chat, then spoken in
+the detected English or Spanish language. The conversation remains open for a
+follow-up, gives one bilingual check-back cue, and closes with a goodbye after the
+second timeout. Explicit goodbye phrases close it immediately.
+
+VAD speech-onset events are separate from completed transcripts. This lets new
+speech cancel provider work, tool work, synthesis, and ALSA playback promptly,
+then route the interrupting utterance as the next turn. Invalid state transitions
+are rejected, and bounded provider, tool, or speech errors clear the active
+conversation and return safely to idle. `/api/status` exposes the current state,
+turn/interruption/timeout/error counts, and the latest transition without
+transcript or spoken-response text.
+
+The optional conversation values are:
+
+```text
+MISO_CONVERSATION_ENABLED=true
+MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS=8
+MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS=5
+MISO_CONVERSATION_ACKNOWLEDGEMENT=Yes?
+```

@@ -42,6 +42,18 @@ class Utterance:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeechActivity:
+    """A VAD edge used to interrupt conversational output before STT finishes."""
+
+    kind: str
+    occurred_at: float
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"started", "ended"}:
+            raise ValueError("speech activity kind must be started or ended")
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptionToken:
     text: str
     confidence: float
@@ -138,6 +150,10 @@ class UtteranceAssembler:
         self._speech_milliseconds = 0
         self._silence_milliseconds = 0
         self._duration_milliseconds = 0
+
+    @property
+    def active(self) -> bool:
+        return self._active
 
     def feed(self, pcm: bytes, *, speech: bool) -> Utterance | None:
         if not pcm:
@@ -424,6 +440,7 @@ class TranscriptionManager:
         self.detector = detector
         self.assembler = assembler
         self._results: deque[TranscriptionResult] = deque(maxlen=result_capacity)
+        self._activity: deque[SpeechActivity] = deque(maxlen=result_capacity * 2)
         self._condition = threading.Condition()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -454,6 +471,12 @@ class TranscriptionManager:
                 self._condition.wait(timeout)
             return self._results.popleft() if self._results else None
 
+    def get_activity(self, timeout: float | None = None) -> SpeechActivity | None:
+        with self._condition:
+            if not self._activity:
+                self._condition.wait(timeout)
+            return self._activity.popleft() if self._activity else None
+
     def status(self) -> dict[str, object]:
         with self._state_lock:
             state = self._state
@@ -462,6 +485,7 @@ class TranscriptionManager:
             failures = self._failures
         with self._condition:
             queued = len(self._results)
+            queued_activity = len(self._activity)
             latest = self._results[-1] if self._results else None
         latest_summary = None
         if latest is not None:
@@ -483,6 +507,7 @@ class TranscriptionManager:
             "processed": processed,
             "failures": failures,
             "queued_results": queued,
+            "queued_activity": queued_activity,
             "last_error": error,
             "latest": latest_summary,
         }
@@ -502,9 +527,17 @@ class TranscriptionManager:
             chunk = self.audio.read_capture(timeout=0.25)
             if chunk is None:
                 continue
+            was_active = self.assembler.active
             utterance = self.assembler.feed(
                 chunk, speech=self.detector.is_speech(chunk)
             )
+            is_active = self.assembler.active
+            if is_active != was_active:
+                with self._condition:
+                    self._activity.append(
+                        SpeechActivity("started" if is_active else "ended", time.time())
+                    )
+                    self._condition.notify_all()
             if utterance is None:
                 continue
             self._set_state("transcribing")

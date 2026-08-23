@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from miso import __version__
 from miso.audio import AudioManager
 from miso.config import Settings
+from miso.conversation import ConversationManager
 from miso.memory import MemoryStore
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError, create_router
@@ -69,6 +70,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         transcription_manager: TranscriptionManager,
         speech_manager: SpeechManager,
         wake_manager: WakeWordManager,
+        conversation_manager: ConversationManager,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -80,6 +82,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.transcription_manager = transcription_manager
         self.speech_manager = speech_manager
         self.wake_manager = wake_manager
+        self.conversation_manager = conversation_manager
         self.memory_store = MemoryStore(settings.database_path)
         self.started_at = started_at
         self._active_requests: dict[str, threading.Event] = {}
@@ -92,9 +95,11 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.wake_manager.start()
         self.transcription_manager.start()
         self.speech_manager.start()
+        self.conversation_manager.start()
         try:
             super().serve_forever(poll_interval)
         finally:
+            self.conversation_manager.stop()
             self.speech_manager.stop()
             self.transcription_manager.stop()
             self.wake_manager.stop()
@@ -102,6 +107,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
             self.scheduled_worker.stop()
 
     def server_close(self) -> None:
+        self.conversation_manager.stop()
         self.speech_manager.stop()
         self.transcription_manager.stop()
         self.wake_manager.stop()
@@ -252,6 +258,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     "wake": self.miso.wake_manager.status(),
                     "transcription": self.miso.transcription_manager.status(),
                     "speech": self.miso.speech_manager.status(),
+                    "conversation": self.miso.conversation_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
                 },
             )
@@ -578,6 +585,7 @@ def create_server(
     transcription_manager: TranscriptionManager | None = None,
     speech_manager: SpeechManager | None = None,
     wake_manager: WakeWordManager | None = None,
+    conversation_manager: ConversationManager | None = None,
 ) -> MisoHTTPServer:
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
@@ -670,6 +678,22 @@ def create_server(
         default_volume=settings.tts_volume,
         result_capacity=settings.tts_result_capacity,
     )
+    memory = MemoryStore(settings.database_path)
+    conversation = conversation_manager or ConversationManager(
+        enabled=settings.conversation_enabled,
+        wake=wake,
+        transcription=transcription,
+        router=router or create_router(settings),
+        tools=registry,
+        speech=speech,
+        memory=memory,
+        audit_sink=registry.audit_sink,
+        system_prompt=MISO_SYSTEM_PROMPT,
+        wake_phrase=settings.wake_phrase,
+        listen_timeout_seconds=settings.conversation_listen_timeout_seconds,
+        checkback_timeout_seconds=settings.conversation_checkback_timeout_seconds,
+        acknowledgement=settings.conversation_acknowledgement,
+    )
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(),
@@ -678,11 +702,12 @@ def create_server(
         scheduled_worker=ScheduledItemWorker(
             HouseholdStore(settings.database_path), registry.audit_sink
         ),
-        router=router or create_router(settings),
+        router=conversation.router,
         developer_shell=shell,
         audio_manager=audio,
         transcription_manager=transcription,
         speech_manager=speech,
         wake_manager=wake,
+        conversation_manager=conversation,
         started_at=time.monotonic(),
     )

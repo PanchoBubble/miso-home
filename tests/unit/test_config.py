@@ -54,6 +54,9 @@ class SettingsTests(unittest.TestCase):
                     "MISO_TTS_EXECUTABLE": "/opt/piper/bin/python",
                     "MISO_TTS_ENGLISH_VOICE": "custom-en",
                     "MISO_TTS_VOLUME": "0.8",
+                    "MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS": "12",
+                    "MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS": "4",
+                    "MISO_CONVERSATION_ACKNOWLEDGEMENT": "Ready?",
                 }
             )
             settings.validate_runtime_paths()
@@ -82,6 +85,9 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(settings.tts_enabled)
             self.assertEqual(settings.tts_english_voice, "custom-en")
             self.assertEqual(settings.tts_volume, 0.8)
+            self.assertEqual(settings.conversation_listen_timeout_seconds, 12)
+            self.assertEqual(settings.conversation_checkback_timeout_seconds, 4)
+            self.assertEqual(settings.conversation_acknowledgement, "Ready?")
             self.assertEqual(settings.audio_playback_sample_rate, 22_050)
 
     def test_rejects_relative_database_path(self) -> None:
@@ -174,6 +180,12 @@ class SettingsTests(unittest.TestCase):
             Settings.from_env({"MISO_TTS_VOLUME": "3"})
         with self.assertRaisesRegex(ConfigError, "TTS_CHUNK_BYTES"):
             Settings.from_env({"MISO_TTS_CHUNK_BYTES": "513"})
+
+    def test_rejects_invalid_conversation_configuration(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "LISTEN_TIMEOUT_SECONDS"):
+            Settings.from_env({"MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS": "0"})
+        with self.assertRaisesRegex(ConfigError, "ACKNOWLEDGEMENT"):
+            Settings.from_env({"MISO_CONVERSATION_ACKNOWLEDGEMENT": ""})
 
 
 if __name__ == "__main__":

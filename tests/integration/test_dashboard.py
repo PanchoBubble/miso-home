@@ -122,6 +122,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["transcription"]["state"], "disabled")
         self.assertFalse(payload["speech"]["enabled"])
         self.assertEqual(payload["speech"]["state"], "disabled")
+        self.assertFalse(payload["conversation"]["enabled"])
+        self.assertEqual(payload["conversation"]["state"], "disabled")
         encoded = content.decode()
         self.assertNotIn(str(self.settings.database_path), encoded)
         self.assertNotIn("ollama_url", encoded)

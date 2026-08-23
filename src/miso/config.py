@@ -99,6 +99,10 @@ class Settings:
     tts_chunk_bytes: int = 4_096
     tts_timeout_seconds: float = 60.0
     tts_result_capacity: int = 16
+    conversation_enabled: bool = True
+    conversation_listen_timeout_seconds: float = 8.0
+    conversation_checkback_timeout_seconds: float = 5.0
+    conversation_acknowledgement: str = "Yes?"
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -181,6 +185,12 @@ class Settings:
             tts_chunk_bytes = int(source.get("MISO_TTS_CHUNK_BYTES", "4096"))
             tts_timeout_seconds = float(source.get("MISO_TTS_TIMEOUT_SECONDS", "60"))
             tts_result_capacity = int(source.get("MISO_TTS_RESULT_CAPACITY", "16"))
+            conversation_listen_timeout_seconds = float(
+                source.get("MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS", "8")
+            )
+            conversation_checkback_timeout_seconds = float(
+                source.get("MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS", "5")
+            )
         except ValueError as error:
             raise ConfigError("MISO audio numeric settings are invalid") from error
 
@@ -326,6 +336,19 @@ class Settings:
             tts_chunk_bytes=tts_chunk_bytes,
             tts_timeout_seconds=tts_timeout_seconds,
             tts_result_capacity=tts_result_capacity,
+            conversation_enabled=_boolean(
+                source.get("MISO_CONVERSATION_ENABLED", "true"),
+                "MISO_CONVERSATION_ENABLED",
+            ),
+            conversation_listen_timeout_seconds=(
+                conversation_listen_timeout_seconds
+            ),
+            conversation_checkback_timeout_seconds=(
+                conversation_checkback_timeout_seconds
+            ),
+            conversation_acknowledgement=source.get(
+                "MISO_CONVERSATION_ACKNOWLEDGEMENT", "Yes?"
+            ).strip(),
         )
         settings.validate()
         return settings
@@ -489,6 +512,18 @@ class Settings:
             raise ConfigError("MISO_TTS_TIMEOUT_SECONDS must be between 1 and 600")
         if not 1 <= self.tts_result_capacity <= 1_000:
             raise ConfigError("MISO_TTS_RESULT_CAPACITY must be between 1 and 1000")
+        if not 1 <= self.conversation_listen_timeout_seconds <= 120:
+            raise ConfigError(
+                "MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS must be between 1 and 120"
+            )
+        if not 1 <= self.conversation_checkback_timeout_seconds <= 120:
+            raise ConfigError(
+                "MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS must be between 1 and 120"
+            )
+        if not 1 <= len(self.conversation_acknowledgement) <= 100:
+            raise ConfigError(
+                "MISO_CONVERSATION_ACKNOWLEDGEMENT must contain 1 to 100 characters"
+            )
         for name, path in (
             ("MISO_STATE_DIR", self.state_dir),
             ("MISO_MODEL_DIR", self.model_dir),
