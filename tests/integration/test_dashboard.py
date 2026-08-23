@@ -116,6 +116,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn("capture", payload["audio"])
         self.assertIn("levels", payload["audio"]["capture"])
         self.assertIn("device_losses", payload["audio"]["capture"])
+        self.assertFalse(payload["wake"]["enabled"])
+        self.assertEqual(payload["wake"]["state"], "disabled")
         self.assertFalse(payload["transcription"]["enabled"])
         self.assertEqual(payload["transcription"]["state"], "disabled")
         self.assertFalse(payload["speech"]["enabled"])

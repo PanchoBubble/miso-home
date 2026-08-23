@@ -231,6 +231,33 @@ class AudioManagerTests(unittest.TestCase):
             manager.play(pcm(1, -1))
         self.assertFalse(manager.status()["enabled"])
 
+    def test_capture_subscribers_receive_an_independent_bounded_stream(self) -> None:
+        manager = AudioManager(
+            enabled=False,
+            capture_card=None,
+            playback_card=None,
+            device_index=0,
+            sample_rate=16_000,
+            channels=1,
+            chunk_milliseconds=20,
+            buffer_milliseconds=40,
+            reconnect_seconds=1,
+            silence_dbfs=-50,
+            clipping_ratio=0.98,
+            backend=RecoveringBackend(),
+        )
+        subscriber = manager.subscribe_capture(capacity=1)
+        manager._publish_capture(b"first")
+        manager._publish_capture(b"second")
+
+        self.assertEqual(manager.read_capture(), b"first")
+        self.assertEqual(manager.read_capture(), b"second")
+        self.assertEqual(subscriber.get(), b"second")
+        self.assertEqual(subscriber.snapshot()["overruns"], 1)
+        manager.unsubscribe_capture(subscriber)
+        manager._publish_capture(b"third")
+        self.assertIsNone(subscriber.get(timeout=0))
+
 
 if __name__ == "__main__":
     unittest.main()

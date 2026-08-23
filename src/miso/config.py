@@ -54,6 +54,16 @@ class Settings:
     audio_reconnect_seconds: float = 1.0
     audio_silence_dbfs: float = -50.0
     audio_clipping_ratio: float = 0.98
+    wake_enabled: bool = False
+    wake_phrase: str = "Miso"
+    wake_executable: Path = Path("/opt/miso/openwakeword/bin/python")
+    wake_model: Path = Path("/var/lib/miso/models/openwakeword/miso.onnx")
+    wake_threshold: float = 0.5
+    wake_vad_threshold: float = 0.5
+    wake_energy_threshold_dbfs: float = -45.0
+    wake_activation_frames: int = 2
+    wake_cooldown_seconds: float = 2.0
+    wake_result_capacity: int = 16
     stt_enabled: bool = False
     stt_executable: Path = Path("/usr/local/bin/whisper-cli")
     stt_model: Path = Path("/var/lib/miso/models/whisper/ggml-tiny.bin")
@@ -133,6 +143,22 @@ class Settings:
             audio_clipping_ratio = float(
                 source.get("MISO_AUDIO_CLIPPING_RATIO", "0.98")
             )
+            wake_threshold = float(source.get("MISO_WAKE_THRESHOLD", "0.5"))
+            wake_vad_threshold = float(
+                source.get("MISO_WAKE_VAD_THRESHOLD", "0.5")
+            )
+            wake_energy_threshold_dbfs = float(
+                source.get("MISO_WAKE_ENERGY_THRESHOLD_DBFS", "-45")
+            )
+            wake_activation_frames = int(
+                source.get("MISO_WAKE_ACTIVATION_FRAMES", "2")
+            )
+            wake_cooldown_seconds = float(
+                source.get("MISO_WAKE_COOLDOWN_SECONDS", "2")
+            )
+            wake_result_capacity = int(
+                source.get("MISO_WAKE_RESULT_CAPACITY", "16")
+            )
             stt_threads = int(source.get("MISO_STT_THREADS", "4"))
             stt_timeout_seconds = float(source.get("MISO_STT_TIMEOUT_SECONDS", "45"))
             stt_result_capacity = int(source.get("MISO_STT_RESULT_CAPACITY", "16"))
@@ -210,6 +236,27 @@ class Settings:
             audio_reconnect_seconds=audio_reconnect_seconds,
             audio_silence_dbfs=audio_silence_dbfs,
             audio_clipping_ratio=audio_clipping_ratio,
+            wake_enabled=_boolean(
+                source.get("MISO_WAKE_ENABLED", "false"), "MISO_WAKE_ENABLED"
+            ),
+            wake_phrase=source.get("MISO_WAKE_PHRASE", "Miso").strip(),
+            wake_executable=Path(
+                source.get(
+                    "MISO_WAKE_EXECUTABLE", "/opt/miso/openwakeword/bin/python"
+                )
+            ),
+            wake_model=Path(
+                source.get(
+                    "MISO_WAKE_MODEL",
+                    str(model_dir / "openwakeword" / "miso.onnx"),
+                )
+            ),
+            wake_threshold=wake_threshold,
+            wake_vad_threshold=wake_vad_threshold,
+            wake_energy_threshold_dbfs=wake_energy_threshold_dbfs,
+            wake_activation_frames=wake_activation_frames,
+            wake_cooldown_seconds=wake_cooldown_seconds,
+            wake_result_capacity=wake_result_capacity,
             stt_enabled=_boolean(
                 source.get("MISO_STT_ENABLED", "false"), "MISO_STT_ENABLED"
             ),
@@ -361,6 +408,32 @@ class Settings:
             raise ConfigError("MISO_AUDIO_SILENCE_DBFS must be between -120 and 0")
         if not 0.5 <= self.audio_clipping_ratio <= 1:
             raise ConfigError("MISO_AUDIO_CLIPPING_RATIO must be between 0.5 and 1")
+        for name, path in (
+            ("MISO_WAKE_EXECUTABLE", self.wake_executable),
+            ("MISO_WAKE_MODEL", self.wake_model),
+        ):
+            if not path.is_absolute():
+                raise ConfigError(f"{name} must be absolute")
+        if not self.wake_phrase or len(self.wake_phrase) > 80:
+            raise ConfigError("MISO_WAKE_PHRASE must contain 1 to 80 characters")
+        if not 0 < self.wake_threshold <= 1:
+            raise ConfigError("MISO_WAKE_THRESHOLD must be between 0 and 1")
+        if not 0 <= self.wake_vad_threshold <= 1:
+            raise ConfigError("MISO_WAKE_VAD_THRESHOLD must be between 0 and 1")
+        if not -120 <= self.wake_energy_threshold_dbfs <= 0:
+            raise ConfigError(
+                "MISO_WAKE_ENERGY_THRESHOLD_DBFS must be between -120 and 0"
+            )
+        if not 1 <= self.wake_activation_frames <= 20:
+            raise ConfigError("MISO_WAKE_ACTIVATION_FRAMES must be between 1 and 20")
+        if not 0 <= self.wake_cooldown_seconds <= 60:
+            raise ConfigError("MISO_WAKE_COOLDOWN_SECONDS must be between 0 and 60")
+        if not 1 <= self.wake_result_capacity <= 1_000:
+            raise ConfigError("MISO_WAKE_RESULT_CAPACITY must be between 1 and 1000")
+        if self.wake_enabled and (
+            self.audio_sample_rate != 16_000 or self.audio_channels != 1
+        ):
+            raise ConfigError("openWakeWord requires mono MISO_AUDIO_SAMPLE_RATE=16000")
         for name, path in (
             ("MISO_STT_EXECUTABLE", self.stt_executable),
             ("MISO_STT_MODEL", self.stt_model),

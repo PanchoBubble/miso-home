@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from array import array
+from collections.abc import Callable
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -513,7 +514,7 @@ class _CaptureEndpoint(_AudioEndpoint):
         backend: AudioBackend,
         selector: AudioSelector,
         audio_format: AudioFormat,
-        buffer: BoundedPCMBuffer,
+        publish: Callable[[bytes], None],
         meter: PCMLevelMeter,
         reconnect_seconds: float,
     ) -> None:
@@ -521,7 +522,7 @@ class _CaptureEndpoint(_AudioEndpoint):
         self.backend = backend
         self.selector = selector
         self.audio_format = audio_format
-        self.buffer = buffer
+        self.publish = publish
         self.meter = meter
         self.reconnect_seconds = reconnect_seconds
         self.state = _EndpointState("searching")
@@ -550,7 +551,7 @@ class _CaptureEndpoint(_AudioEndpoint):
                     if not chunk:
                         raise OSError("capture stream ended")
                     self.meter.observe(chunk)
-                    self.buffer.put(chunk)
+                    self.publish(chunk)
             except (OSError, subprocess.SubprocessError) as error:
                 if not self.stop_event.is_set():
                     self.state.disconnected(error)
@@ -682,6 +683,8 @@ class AudioManager:
         )
         capacity = max(1, math.ceil(buffer_milliseconds / chunk_milliseconds))
         self.capture_buffer = BoundedPCMBuffer(capacity)
+        self._capture_subscribers: set[BoundedPCMBuffer] = set()
+        self._capture_subscribers_lock = threading.Lock()
         self.playback_buffer = BoundedPCMBuffer(capacity)
         self.capture_meter = PCMLevelMeter(silence_dbfs, clipping_ratio)
         self.playback_meter = PCMLevelMeter(silence_dbfs, clipping_ratio)
@@ -691,7 +694,7 @@ class AudioManager:
             self.backend,
             self.capture_selector,
             self.audio_format,
-            self.capture_buffer,
+            self._publish_capture,
             self.capture_meter,
             reconnect_seconds,
         )
@@ -715,6 +718,26 @@ class AudioManager:
 
     def read_capture(self, timeout: float | None = None) -> bytes | None:
         return self.capture_buffer.get(timeout)
+
+    def subscribe_capture(self, capacity: int | None = None) -> BoundedPCMBuffer:
+        """Create an independent bounded tap on the live capture stream."""
+
+        subscriber = BoundedPCMBuffer(capacity or self.capture_buffer.capacity)
+        with self._capture_subscribers_lock:
+            self._capture_subscribers.add(subscriber)
+        return subscriber
+
+    def unsubscribe_capture(self, subscriber: BoundedPCMBuffer) -> None:
+        with self._capture_subscribers_lock:
+            self._capture_subscribers.discard(subscriber)
+        subscriber.wake()
+
+    def _publish_capture(self, chunk: bytes) -> None:
+        self.capture_buffer.put(chunk)
+        with self._capture_subscribers_lock:
+            subscribers = tuple(self._capture_subscribers)
+        for subscriber in subscribers:
+            subscriber.put(chunk)
 
     def play(self, pcm: bytes) -> None:
         if not self.enabled:

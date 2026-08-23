@@ -27,6 +27,7 @@ from miso.transcription import (
     UtteranceAssembler,
     WhisperCppTranscriber,
 )
+from miso.wake import OpenWakeWordModel, WakeWordManager
 from miso.tools import (
     DeveloperShellController,
     HouseholdStore,
@@ -67,6 +68,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         audio_manager: AudioManager,
         transcription_manager: TranscriptionManager,
         speech_manager: SpeechManager,
+        wake_manager: WakeWordManager,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -77,6 +79,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.audio_manager = audio_manager
         self.transcription_manager = transcription_manager
         self.speech_manager = speech_manager
+        self.wake_manager = wake_manager
         self.memory_store = MemoryStore(settings.database_path)
         self.started_at = started_at
         self._active_requests: dict[str, threading.Event] = {}
@@ -86,6 +89,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
     def serve_forever(self, poll_interval: float = 0.5) -> None:
         self.scheduled_worker.start()
         self.audio_manager.start()
+        self.wake_manager.start()
         self.transcription_manager.start()
         self.speech_manager.start()
         try:
@@ -93,12 +97,14 @@ class MisoHTTPServer(ThreadingHTTPServer):
         finally:
             self.speech_manager.stop()
             self.transcription_manager.stop()
+            self.wake_manager.stop()
             self.audio_manager.stop()
             self.scheduled_worker.stop()
 
     def server_close(self) -> None:
         self.speech_manager.stop()
         self.transcription_manager.stop()
+        self.wake_manager.stop()
         self.audio_manager.stop()
         self.scheduled_worker.stop()
         super().server_close()
@@ -243,6 +249,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     },
                     "tools": list(self.miso.tool_registry.names()),
                     "audio": self.miso.audio_manager.status(),
+                    "wake": self.miso.wake_manager.status(),
                     "transcription": self.miso.transcription_manager.status(),
                     "speech": self.miso.speech_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
@@ -570,6 +577,7 @@ def create_server(
     audio_manager: AudioManager | None = None,
     transcription_manager: TranscriptionManager | None = None,
     speech_manager: SpeechManager | None = None,
+    wake_manager: WakeWordManager | None = None,
 ) -> MisoHTTPServer:
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
@@ -594,6 +602,21 @@ def create_server(
         reconnect_seconds=settings.audio_reconnect_seconds,
         silence_dbfs=settings.audio_silence_dbfs,
         clipping_ratio=settings.audio_clipping_ratio,
+    )
+    wake = wake_manager or WakeWordManager(
+        enabled=settings.wake_enabled,
+        audio=audio,
+        model=OpenWakeWordModel(
+            settings.wake_executable,
+            settings.wake_model,
+            vad_threshold=settings.wake_vad_threshold,
+        ),
+        phrase=settings.wake_phrase,
+        threshold=settings.wake_threshold,
+        energy_threshold_dbfs=settings.wake_energy_threshold_dbfs,
+        activation_frames=settings.wake_activation_frames,
+        cooldown_seconds=settings.wake_cooldown_seconds,
+        result_capacity=settings.wake_result_capacity,
     )
     transcription = transcription_manager or TranscriptionManager(
         enabled=settings.stt_enabled,
@@ -660,5 +683,6 @@ def create_server(
         audio_manager=audio,
         transcription_manager=transcription,
         speech_manager=speech,
+        wake_manager=wake,
         started_at=time.monotonic(),
     )

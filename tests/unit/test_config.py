@@ -31,6 +31,13 @@ class SettingsTests(unittest.TestCase):
                     "MISO_AUDIO_CAPTURE_CARD": "MisoUSB",
                     "MISO_AUDIO_PLAYBACK_CARD": "USB_Speaker",
                     "MISO_AUDIO_BUFFER_MILLISECONDS": "800",
+                    "MISO_WAKE_ENABLED": "true",
+                    "MISO_WAKE_PHRASE": "Hola Miso",
+                    "MISO_WAKE_MODEL": str(root / "models" / "hola-miso.onnx"),
+                    "MISO_WAKE_THRESHOLD": "0.62",
+                    "MISO_WAKE_VAD_THRESHOLD": "0.55",
+                    "MISO_WAKE_ENERGY_THRESHOLD_DBFS": "-42",
+                    "MISO_WAKE_ACTIVATION_FRAMES": "3",
                     "MISO_STT_ENABLED": "true",
                     "MISO_STT_EXECUTABLE": "/opt/whisper/whisper-cli",
                     "MISO_STT_MODEL": str(root / "models" / "whisper.bin"),
@@ -54,6 +61,13 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.audio_capture_card, "MisoUSB")
             self.assertEqual(settings.audio_playback_card, "USB_Speaker")
             self.assertEqual(settings.audio_buffer_milliseconds, 800)
+            self.assertTrue(settings.wake_enabled)
+            self.assertEqual(settings.wake_phrase, "Hola Miso")
+            self.assertEqual(settings.wake_model, root / "models" / "hola-miso.onnx")
+            self.assertEqual(settings.wake_threshold, 0.62)
+            self.assertEqual(settings.wake_vad_threshold, 0.55)
+            self.assertEqual(settings.wake_energy_threshold_dbfs, -42)
+            self.assertEqual(settings.wake_activation_frames, 3)
             self.assertTrue(settings.stt_enabled)
             self.assertEqual(settings.stt_threads, 3)
             self.assertEqual(settings.stt_vad_threshold_dbfs, -36)
@@ -135,6 +149,16 @@ class SettingsTests(unittest.TestCase):
             Settings.from_env({"MISO_STT_THREADS": "0"})
         with self.assertRaisesRegex(ConfigError, "STT_VAD_THRESHOLD_DBFS"):
             Settings.from_env({"MISO_STT_VAD_THRESHOLD_DBFS": "4"})
+
+    def test_rejects_invalid_wake_configuration(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "WAKE_MODEL must be absolute"):
+            Settings.from_env({"MISO_WAKE_MODEL": "miso.onnx"})
+        with self.assertRaisesRegex(ConfigError, "WAKE_THRESHOLD"):
+            Settings.from_env({"MISO_WAKE_THRESHOLD": "0"})
+        with self.assertRaisesRegex(ConfigError, "requires mono"):
+            Settings.from_env(
+                {"MISO_WAKE_ENABLED": "true", "MISO_AUDIO_CHANNELS": "2"}
+            )
 
     def test_rejects_invalid_tts_configuration(self) -> None:
         with self.assertRaisesRegex(ConfigError, "TTS_EXECUTABLE must be absolute"):

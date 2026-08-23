@@ -141,6 +141,45 @@ in brackets in `/proc/asound/cards`; do not configure volatile numeric names
 such as `hw:2`. Audio can remain enabled while hardware is absent: status will
 show `unavailable`, and the worker will attach when the device appears.
 
+## Offline Miso wake word
+
+Miso runs a configurable custom openWakeWord ONNX model in an isolated pinned
+Python environment. Captured audio is fanned out to independent bounded taps,
+so wake detection and transcription receive the same PCM without competing for
+chunks. A wake activation must pass the bundled local Silero VAD, an RMS energy
+gate, the model score threshold, and the configured consecutive-frame count.
+Repeated activations are suppressed by a cooldown. `/api/status` reports model
+availability, thresholds, bounded wake events, activation count, failures, and
+the highest observed score without exposing model paths or captured audio.
+
+After training or obtaining a `Miso` ONNX model, install it by explicit
+checksum, then deploy the runtime:
+
+```bash
+sudo ops/install-openwakeword.sh /path/to/miso.onnx MODEL_SHA256
+sudo ops/install-miso-runtime.sh
+```
+
+Wake inference is entirely offline; network access is used only by the
+installer to create the pinned environment and fetch openWakeWord's shared
+feature/VAD assets. The optional settings are:
+
+```text
+MISO_WAKE_ENABLED=true
+MISO_WAKE_PHRASE=Miso
+MISO_WAKE_EXECUTABLE=/opt/miso/openwakeword/bin/python
+MISO_WAKE_MODEL=/var/lib/miso/models/openwakeword/miso.onnx
+MISO_WAKE_THRESHOLD=0.5
+MISO_WAKE_VAD_THRESHOLD=0.5
+MISO_WAKE_ENERGY_THRESHOLD_DBFS=-45
+MISO_WAKE_ACTIVATION_FRAMES=2
+MISO_WAKE_COOLDOWN_SECONDS=2
+```
+
+See `docs/miso-wakeword-benchmark.md` for bilingual training guidance, the
+labeled-WAV manifest, repeatable false-activation/miss scoring, tuning targets,
+and the outstanding physical-microphone acceptance gate.
+
 ## Offline English-Spanish transcription
 
 Install the pinned whisper.cpp build and selected multilingual model on the Pi,
