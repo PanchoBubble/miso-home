@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Mapping
 
+from miso.identity import Actor, VOICE_ACTOR
 from miso.tools.audit import AuditSink, InMemoryAuditLog, audit_event, redact
 from miso.tools.schema import SchemaError, validate_instance, validate_tool_schema
 
@@ -31,6 +32,7 @@ class ToolContext:
     invocation_id: str
     deadline: float
     cancel_event: threading.Event
+    actor: Actor = VOICE_ACTOR
     caller_cancel_event: threading.Event | None = None
 
     def cancelled(self) -> bool:
@@ -151,6 +153,7 @@ class ToolRegistry:
         *,
         cancel_event: threading.Event | None = None,
         timeout_seconds: float | None = None,
+        actor: Actor = VOICE_ACTOR,
     ) -> ToolResult:
         invocation_id = str(uuid.uuid4())
         started = time.monotonic()
@@ -165,6 +168,8 @@ class ToolRegistry:
                 invocation_id=invocation_id,
                 tool=name,
                 arguments=safe_arguments,
+                actor=actor.actor_id,
+                actor_source=actor.source,
             )
         )
 
@@ -174,6 +179,7 @@ class ToolRegistry:
                 name,
                 ToolStatus.REJECTED,
                 started,
+                actor,
                 error="tool is not allowlisted",
             )
         try:
@@ -184,6 +190,7 @@ class ToolRegistry:
                 name,
                 ToolStatus.REJECTED,
                 started,
+                actor,
                 error=str(error),
             )
 
@@ -194,6 +201,7 @@ class ToolRegistry:
                 name,
                 ToolStatus.CANCELLED,
                 started,
+                actor,
                 error="tool invocation was cancelled before execution",
             )
 
@@ -204,6 +212,7 @@ class ToolRegistry:
                 name,
                 ToolStatus.REJECTED,
                 started,
+                actor,
                 error=f"timeout must be between 0 and {definition.timeout_seconds:g} seconds",
             )
 
@@ -212,6 +221,7 @@ class ToolRegistry:
             invocation_id=invocation_id,
             deadline=started + timeout,
             cancel_event=internal_cancel,
+            actor=actor,
             caller_cancel_event=caller_cancel,
         )
         outcomes: queue.Queue[tuple[ToolStatus, Mapping[str, object] | None, str | None]] = (
@@ -252,6 +262,7 @@ class ToolRegistry:
                     name,
                     ToolStatus.CANCELLED,
                     started,
+                    actor,
                     error="tool invocation was cancelled",
                 )
             if remaining <= 0:
@@ -261,6 +272,7 @@ class ToolRegistry:
                     name,
                     ToolStatus.TIMEOUT,
                     started,
+                    actor,
                     error="tool invocation deadline exceeded",
                 )
             try:
@@ -270,6 +282,7 @@ class ToolRegistry:
                     name,
                     status,
                     started,
+                    actor,
                     output=output,
                     error=error,
                 )
@@ -282,6 +295,7 @@ class ToolRegistry:
         name: str,
         status: ToolStatus,
         started: float,
+        actor: Actor,
         *,
         output: Mapping[str, object] | None = None,
         error: str | None = None,
@@ -303,6 +317,8 @@ class ToolRegistry:
                 status=status.value,
                 duration_ms=duration_ms,
                 error=error,
+                actor=actor.actor_id,
+                actor_source=actor.source,
             )
         )
         return result

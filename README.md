@@ -105,6 +105,24 @@ default, expires after at most 15 minutes, and runs only allowlisted argv (never
 shell text) beneath `MISO_DEVELOPER_ROOT`. The default Pi scope is read-only
 `/opt/miso/app`; override it deliberately in `/etc/miso/miso.env` if needed.
 
+## Household identity and sharing
+
+Every request is attributed to an origin-controlled actor. Local dashboard and
+bearer-token requests use the normalized `MISO_DASHBOARD_EMAIL` (default
+`local@miso.invalid`); future authenticated household identities must appear in
+the comma-separated `MISO_HOUSEHOLD_ALLOWED_EMAILS` allowlist. Unidentified
+speech always uses `household:voice`, while background work uses `miso:system`.
+Names in prompts or transcripts never select an identity.
+
+SQLite enforces one common visibility model for conversations, memory,
+timers/reminders, and shopping lists: shared records are available to the
+household, while private records are available only to their owning web email.
+Voice cannot own private data. Dashboard conversations and scheduled items are
+private by default; voice equivalents and the current shopping tools are
+shared. Tool and routing audits carry the actor identity. See
+[`docs/miso-household-identity.md`](docs/miso-household-identity.md) for the
+authorization matrix and migration behavior.
+
 ## Linux audio
 
 Miso discovers PCM endpoints from `/proc/asound` and opens them through ALSA's

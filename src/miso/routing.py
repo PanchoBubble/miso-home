@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Callable
 
 from miso.config import Settings
+from miso.identity import Actor, VOICE_ACTOR
 from miso.providers import (
     ChatChunk,
     ChatRequest,
@@ -44,6 +45,8 @@ class RouteDecision:
     reason: str
     selected_tools: tuple[str, ...]
     manual_override: str | None = None
+    actor_id: str = VOICE_ACTOR.actor_id
+    actor_source: str = VOICE_ACTOR.source
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -53,6 +56,8 @@ class RouteDecision:
             "reason": self.reason,
             "selected_tools": list(self.selected_tools),
             "manual_override": self.manual_override,
+            "actor": self.actor_id,
+            "actor_source": self.actor_source,
         }
 
 
@@ -190,6 +195,7 @@ class ProviderRouter:
         route_class: RouteClass | str = RouteClass.AUTO,
         manual_override: str | None = None,
         override_fallback: bool = False,
+        actor: Actor = VOICE_ACTOR,
     ) -> RouteDecision:
         try:
             requested_class = RouteClass(route_class)
@@ -224,6 +230,8 @@ class ProviderRouter:
             reason=reason,
             selected_tools=selected_tools,
             manual_override=manual_override,
+            actor_id=actor.actor_id,
+            actor_source=actor.source,
         )
 
     def stream(
@@ -234,6 +242,7 @@ class ProviderRouter:
         route_class: RouteClass | str = RouteClass.AUTO,
         manual_override: str | None = None,
         override_fallback: bool = False,
+        actor: Actor = VOICE_ACTOR,
     ):
         started = time.monotonic()
         decision = self.plan(
@@ -241,6 +250,7 @@ class ProviderRouter:
             route_class=route_class,
             manual_override=manual_override,
             override_fallback=override_fallback,
+            actor=actor,
         )
         self.audit_sink.record(audit_event("routing_decision", **decision.as_dict()))
         yield self._progress(
@@ -493,6 +503,8 @@ class ProviderRouter:
                 status=status,
                 latency_ms=max(0, round((time.monotonic() - started) * 1000)),
                 reason=reason,
+                actor=decision.actor_id,
+                actor_source=decision.actor_source,
             )
         )
 
@@ -513,6 +525,8 @@ class ProviderRouter:
                 selected_provider=provider,
                 latency_ms=max(0, round((time.monotonic() - started) * 1000)),
                 failures=list(failures),
+                actor=decision.actor_id,
+                actor_source=decision.actor_source,
             )
         )
 

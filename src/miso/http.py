@@ -18,6 +18,12 @@ from miso import __version__
 from miso.audio import AudioManager
 from miso.config import Settings
 from miso.conversation import ConversationManager
+from miso.identity import (
+    Actor,
+    HouseholdIdentityPolicy,
+    SYSTEM_ACTOR,
+    VOICE_ACTOR,
+)
 from miso.memory import MemoryStore
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError, create_router
@@ -71,6 +77,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         speech_manager: SpeechManager,
         wake_manager: WakeWordManager,
         conversation_manager: ConversationManager,
+        identity_policy: HouseholdIdentityPolicy,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -84,8 +91,10 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.wake_manager = wake_manager
         self.conversation_manager = conversation_manager
         self.memory_store = MemoryStore(settings.database_path)
+        self.identity_policy = identity_policy
+        self.memory_store.provision_household_members(identity_policy.allowed_emails)
         self.started_at = started_at
-        self._active_requests: dict[str, threading.Event] = {}
+        self._active_requests: dict[str, tuple[threading.Event, str]] = {}
         self._active_lock = threading.Lock()
         super().__init__(server_address, request_handler)
 
@@ -115,23 +124,25 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.scheduled_worker.stop()
         super().server_close()
 
-    def register_request(self, request_id: str, cancel: threading.Event) -> bool:
+    def register_request(
+        self, request_id: str, cancel: threading.Event, actor: Actor
+    ) -> bool:
         with self._active_lock:
             if request_id in self._active_requests:
                 return False
-            self._active_requests[request_id] = cancel
+            self._active_requests[request_id] = (cancel, actor.actor_id)
             return True
 
     def unregister_request(self, request_id: str) -> None:
         with self._active_lock:
             self._active_requests.pop(request_id, None)
 
-    def cancel_request(self, request_id: str) -> bool:
+    def cancel_request(self, request_id: str, actor: Actor) -> bool:
         with self._active_lock:
-            cancel = self._active_requests.get(request_id)
-        if cancel is None:
+            active = self._active_requests.get(request_id)
+        if active is None or active[1] != actor.actor_id:
             return False
-        cancel.set()
+        active[0].set()
         return True
 
 
@@ -170,6 +181,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/status":
                 self._status()
+            elif parsed.path == "/api/identity":
+                self._identity()
             elif parsed.path == "/api/memory":
                 query = parse_qs(parsed.query).get("q", [""])[0]
                 self._memory(query)
@@ -204,7 +217,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 else:
                     self._json(
                         HTTPStatus.OK,
-                        {"cancelled": self.miso.cancel_request(request_id)},
+                        {"cancelled": self.miso.cancel_request(request_id, self._actor())},
                     )
             elif parsed.path == "/api/developer":
                 self._developer(payload)
@@ -227,14 +240,31 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
         def _authorized(self) -> bool:
             expected = self.miso.settings.dashboard_token
             if expected is None:
+                self._request_actor = self.miso.identity_policy.local_actor
                 return True
             provided = self.headers.get("Authorization", "")
             if provided.startswith("Bearer ") and hmac.compare_digest(
                 provided[7:], expected
             ):
+                self._request_actor = self.miso.identity_policy.local_actor
                 return True
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
+
+        def _actor(self) -> Actor:
+            actor = getattr(self, "_request_actor", None)
+            if not isinstance(actor, Actor):
+                raise RuntimeError("request identity was not resolved")
+            return actor
+
+        def _identity(self) -> None:
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "actor": self._actor().public_dict(),
+                    "voice_actor": VOICE_ACTOR.public_dict(),
+                },
+            )
 
         def _status(self) -> None:
             self._json(
@@ -287,7 +317,9 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "query_too_long"})
                 return
             try:
-                results = self.miso.memory_store.search(query, limit=30)
+                results = self.miso.memory_store.search(
+                    query, limit=30, actor=self._actor()
+                )
             except Exception:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search"})
                 return
@@ -311,6 +343,17 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             audit_root = self.miso.settings.state_dir / "audit"
             events = _jsonl_tail(audit_root / "tools.jsonl", limit)
             events.extend(_jsonl_tail(audit_root / "routing.jsonl", limit))
+            events = [
+                event
+                for event in events
+                if event.get("actor", VOICE_ACTOR.actor_id)
+                == self._actor().actor_id
+                or (
+                    event.get("visibility", "shared") == "shared"
+                    and event.get("actor", VOICE_ACTOR.actor_id)
+                    in {VOICE_ACTOR.actor_id, SYSTEM_ACTOR.actor_id}
+                )
+            ]
             events.sort(key=lambda item: str(item.get("timestamp", "")), reverse=True)
             self._json(HTTPStatus.OK, {"events": events[:limit]})
 
@@ -320,14 +363,19 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_text"})
                 return
             conversation_id = payload.get("conversation_id")
+            actor = self._actor()
             if conversation_id is not None and (
                 not isinstance(conversation_id, str)
-                or not self.miso.memory_store.conversation_exists(conversation_id)
+                or not self.miso.memory_store.conversation_exists(
+                    conversation_id, actor=actor
+                )
             ):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "conversation_not_found"})
                 return
             if conversation_id is None:
-                conversation_id = self.miso.memory_store.create_conversation()
+                conversation_id = self.miso.memory_store.create_conversation(
+                    actor=actor, visibility="private"
+                )
             request_id = payload.get("request_id") or str(uuid.uuid4())
             if not isinstance(request_id, str) or not 1 <= len(request_id) <= 64:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request_id"})
@@ -340,7 +388,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_routing"})
                 return
             cancel = threading.Event()
-            if not self.miso.register_request(request_id, cancel):
+            if not self.miso.register_request(request_id, cancel, actor):
                 self._json(HTTPStatus.CONFLICT, {"error": "request_already_active"})
                 return
             self.miso.memory_store.append_event(
@@ -349,8 +397,11 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 role="user",
                 content=text.strip(),
                 payload={"request_id": request_id},
+                actor=actor,
             )
-            history = self.miso.memory_store.events(conversation_id, limit=40)
+            history = self.miso.memory_store.events(
+                conversation_id, limit=40, actor=actor
+            )
             messages = (
                 {"role": "system", "content": MISO_SYSTEM_PROMPT},
                 *(
@@ -374,6 +425,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     cancel,
                     route_class=route_class,
                     manual_override=override,
+                    actor=actor,
                 )
                 for chunk in stream:
                     if chunk.progress:
@@ -401,7 +453,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         if not isinstance(name, str) or not isinstance(arguments, dict):
                             raise RoutingError("provider returned invalid tool call")
                         result = self.miso.tool_registry.invoke(
-                            name, arguments, cancel_event=cancel
+                            name, arguments, cancel_event=cancel, actor=actor
                         )
                         encoded_result = result.as_dict()
                         self.miso.memory_store.append_event(
@@ -410,6 +462,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                             role="assistant",
                             content=name,
                             payload=encoded_result,
+                            actor=actor,
                         )
                         self._ndjson(
                             {
@@ -427,6 +480,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         role="assistant",
                         content=combined,
                         payload={"request_id": request_id},
+                        actor=actor,
                     )
                 self._ndjson(
                     {
@@ -459,11 +513,11 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         raise ValueError("duration_seconds must be an integer")
                     status = self.miso.developer_shell.enable(
                         duration,
-                        approved_by=f"dashboard:{self.client_address[0]}",
+                        approved_by=self._actor().actor_id,
                     )
                 elif action == "disable":
                     status = self.miso.developer_shell.disable(
-                        actor=f"dashboard:{self.client_address[0]}"
+                        actor=self._actor().actor_id
                     )
                 else:
                     raise ValueError("action must be enable or disable")
@@ -478,7 +532,9 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             arguments: dict[str, object] = {"command": command}
             if cwd is not None:
                 arguments["cwd"] = cwd
-            result = self.miso.tool_registry.invoke("developer_command", arguments)
+            result = self.miso.tool_registry.invoke(
+                "developer_command", arguments, actor=self._actor()
+            )
             status = HTTPStatus.OK if result.ok else HTTPStatus.BAD_REQUEST
             self._json(status, {"result": result.as_dict()})
 
@@ -587,6 +643,9 @@ def create_server(
     wake_manager: WakeWordManager | None = None,
     conversation_manager: ConversationManager | None = None,
 ) -> MisoHTTPServer:
+    identity_policy = HouseholdIdentityPolicy(
+        settings.household_allowed_emails, settings.dashboard_email
+    )
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
     )
@@ -679,6 +738,7 @@ def create_server(
         result_capacity=settings.tts_result_capacity,
     )
     memory = MemoryStore(settings.database_path)
+    memory.migrate()
     conversation = conversation_manager or ConversationManager(
         enabled=settings.conversation_enabled,
         wake=wake,
@@ -709,5 +769,6 @@ def create_server(
         speech_manager=speech,
         wake_manager=wake,
         conversation_manager=conversation,
+        identity_policy=identity_policy,
         started_at=time.monotonic(),
     )

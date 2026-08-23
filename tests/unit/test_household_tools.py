@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from threading import Event
 import unittest
 
+from miso.identity import VOICE_ACTOR, web_actor
 from miso.memory import MemoryStore
 from miso.tools import (
     HouseholdStore,
@@ -117,10 +118,11 @@ class HouseholdToolTests(unittest.TestCase):
                 "list_name": "Groceries",
                 "name": "Coffee",
                 "quantity": 2,
-                "added_by": "juan",
             },
         )["item"]
         self.assertTrue(created["shared"])
+        self.assertEqual(created["added_by"], VOICE_ACTOR.actor_id)
+        self.assertEqual(created["actor_id"], VOICE_ACTOR.actor_id)
         self.assertEqual(created["revision"], 1)
 
         restarted = self.new_registry()
@@ -192,6 +194,30 @@ class HouseholdToolTests(unittest.TestCase):
             self.assertEqual(event["scheduled_item_id"], timer["id"])
         finally:
             worker.stop()
+
+    def test_private_scheduled_items_and_lists_enforce_owner_in_store(self) -> None:
+        store = HouseholdStore(self.path, now=lambda: self.clock[0])
+        juan = web_actor("juan@example.com")
+        ana = web_actor("ana@example.com")
+        MemoryStore(self.path).provision_household_members((juan.email, ana.email))
+        timer = store.create_scheduled(
+            "timer",
+            "Juan only",
+            self.clock[0] + timedelta(minutes=5),
+            actor=juan,
+        )
+        self.assertEqual(timer["visibility"], "private")
+        self.assertEqual(store.list_scheduled("timer", actor=ana), [])
+        with self.assertRaisesRegex(Exception, "not found"):
+            store.cancel_scheduled(timer["id"], "timer", actor=ana)
+
+        item = store.add_shopping_item(
+            "Juan private", "Coffee", 1, actor=juan, shared=False
+        )
+        self.assertFalse(item["shared"])
+        self.assertEqual(store.list_shopping_items("Juan private", actor=ana), [])
+        with self.assertRaisesRegex(Exception, "not found"):
+            store.remove_shopping_item(item["id"], actor=ana)
 
 
 if __name__ == "__main__":

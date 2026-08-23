@@ -7,6 +7,8 @@ from os import environ
 from pathlib import Path
 from typing import Mapping
 
+from miso.identity import IdentityError, normalize_email
+
 
 class ConfigError(ValueError):
     """Raised when Miso configuration is unsafe or invalid."""
@@ -19,6 +21,21 @@ def _boolean(value: str, name: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ConfigError(f"{name} must be true or false")
+
+
+def _email(value: str, name: str) -> str:
+    try:
+        return normalize_email(value)
+    except IdentityError as error:
+        raise ConfigError(f"{name} must be a valid email address") from error
+
+
+def _email_list(value: str, name: str) -> tuple[str, ...]:
+    emails = [item.strip() for item in value.split(",") if item.strip()]
+    normalized = tuple(_email(email, name) for email in emails)
+    if len(normalized) != len(set(normalized)):
+        raise ConfigError(f"{name} must not contain duplicate email addresses")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +57,8 @@ class Settings:
     routing_health_timeout_seconds: float = 2.0
     routing_attempt_timeout_seconds: float = 45.0
     dashboard_token: str | None = field(default=None, repr=False)
+    dashboard_email: str = "local@miso.invalid"
+    household_allowed_emails: tuple[str, ...] = ()
     developer_root: Path | None = None
     developer_commands: tuple[str, ...] = ("python3", "git", "rg", "ls")
     audio_enabled: bool = True
@@ -216,6 +235,14 @@ class Settings:
             routing_health_timeout_seconds=routing_health_timeout,
             routing_attempt_timeout_seconds=routing_attempt_timeout,
             dashboard_token=source.get("MISO_DASHBOARD_TOKEN", "").strip() or None,
+            dashboard_email=_email(
+                source.get("MISO_DASHBOARD_EMAIL", "local@miso.invalid"),
+                "MISO_DASHBOARD_EMAIL",
+            ),
+            household_allowed_emails=_email_list(
+                source.get("MISO_HOUSEHOLD_ALLOWED_EMAILS", ""),
+                "MISO_HOUSEHOLD_ALLOWED_EMAILS",
+            ),
             developer_root=(
                 Path(source["MISO_DEVELOPER_ROOT"])
                 if source.get("MISO_DEVELOPER_ROOT")
@@ -388,6 +415,15 @@ class Settings:
             raise ConfigError("MISO_DASHBOARD_TOKEN is required for a non-loopback host")
         if self.dashboard_token is not None and len(self.dashboard_token) < 32:
             raise ConfigError("MISO_DASHBOARD_TOKEN must contain at least 32 characters")
+        if self.dashboard_email != _email(self.dashboard_email, "MISO_DASHBOARD_EMAIL"):
+            raise ConfigError("MISO_DASHBOARD_EMAIL must be a normalized email address")
+        if any(
+            email != _email(email, "MISO_HOUSEHOLD_ALLOWED_EMAILS")
+            for email in self.household_allowed_emails
+        ):
+            raise ConfigError(
+                "MISO_HOUSEHOLD_ALLOWED_EMAILS must contain normalized email addresses"
+            )
         if self.developer_root is not None and not self.developer_root.is_absolute():
             raise ConfigError("MISO_DEVELOPER_ROOT must be absolute")
         if not self.developer_commands:

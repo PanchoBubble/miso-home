@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Protocol
 
 from miso.memory import MemoryStore
+from miso.identity import VOICE_ACTOR
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError
 from miso.speech import SpeechManager, SpeechResult
@@ -302,7 +303,12 @@ class ConversationManager:
         self._state = target
         self._transitions.append(transition)
         self.audit_sink.record(
-            audit_event("conversation_transition", **transition.as_dict())
+            audit_event(
+                "conversation_transition",
+                **transition.as_dict(),
+                actor=VOICE_ACTOR.actor_id,
+                actor_source=VOICE_ACTOR.source,
+            )
         )
 
     def _run(self) -> None:
@@ -340,7 +346,9 @@ class ConversationManager:
         with self._lock:
             if self._state is not ConversationState.IDLE:
                 return
-            self._conversation_id = self.memory.create_conversation()
+            self._conversation_id = self.memory.create_conversation(
+                actor=VOICE_ACTOR, visibility="shared"
+            )
             self._language = "en"
             self._checked_back = False
             self._deadline = None
@@ -495,8 +503,11 @@ class ConversationManager:
                     "language": language,
                     "confidence": transcription.confidence,
                 },
+                actor=VOICE_ACTOR,
             )
-            history = self.memory.events(conversation_id, limit=40)
+            history = self.memory.events(
+                conversation_id, limit=40, actor=VOICE_ACTOR
+            )
             request = ChatRequest(
                 messages=(
                     {"role": "system", "content": self.system_prompt},
@@ -512,7 +523,7 @@ class ConversationManager:
             )
             response: list[str] = []
             used_tool = False
-            for chunk in self.router.stream(request, cancel):
+            for chunk in self.router.stream(request, cancel, actor=VOICE_ACTOR):
                 if cancel.is_set() or not self._is_current(generation):
                     raise ProviderCancelled("voice turn was interrupted")
                 if chunk.text:
@@ -525,13 +536,16 @@ class ConversationManager:
                     self._transition_current(
                         generation, ConversationState.USING_TOOL, "tool requested"
                     )
-                    result = self.tools.invoke(name, arguments, cancel_event=cancel)
+                    result = self.tools.invoke(
+                        name, arguments, cancel_event=cancel, actor=VOICE_ACTOR
+                    )
                     self.memory.append_event(
                         conversation_id,
                         kind="tool",
                         role="assistant",
                         content=name,
                         payload=result.as_dict(),
+                        actor=VOICE_ACTOR,
                     )
                     used_tool = True
                     if not result.ok and not cancel.is_set():
@@ -550,6 +564,7 @@ class ConversationManager:
                 role="assistant",
                 content=spoken,
                 payload={"source": "voice", "used_tool": used_tool},
+                actor=VOICE_ACTOR,
             )
             self._transition_current(
                 generation, ConversationState.SPEAKING, "response ready"

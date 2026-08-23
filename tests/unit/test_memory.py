@@ -3,7 +3,8 @@ from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
 
-from miso.memory import MemoryStore, SCHEMA_VERSION
+from miso.identity import VOICE_ACTOR, web_actor
+from miso.memory import MIGRATION_1, MIGRATION_2, MemoryStore, SCHEMA_VERSION
 
 
 class MemoryStoreTests(unittest.TestCase):
@@ -24,6 +25,28 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(version, SCHEMA_VERSION)
         self.assertEqual(journal, "wal")
         self.assertEqual(self.store.integrity_check(), "ok")
+
+    def test_v2_database_migrates_existing_records_to_shared_voice_identity(self) -> None:
+        legacy_path = Path(self.temporary.name) / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript(
+            f"{MIGRATION_1}\n{MIGRATION_2}\nPRAGMA user_version = 2;"
+        )
+        connection.execute(
+            "INSERT INTO conversations(id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("legacy", "2026-08-22T00:00:00+00:00", "2026-08-22T00:00:00+00:00"),
+        )
+        connection.commit()
+        connection.close()
+
+        legacy = MemoryStore(legacy_path)
+        legacy.migrate()
+        with legacy.connect() as migrated:
+            row = migrated.execute(
+                "SELECT visibility, owner_email, created_by FROM conversations"
+            ).fetchone()
+        self.assertEqual(tuple(row), ("shared", None, VOICE_ACTOR.actor_id))
+        self.assertEqual(legacy.integrity_check(), "ok")
 
     def test_searches_english_and_spanish_events_and_memories(self) -> None:
         conversation = self.store.create_conversation("household")
@@ -95,6 +118,59 @@ class MemoryStoreTests(unittest.TestCase):
         events = self.store.events(conversation)
         self.assertEqual([event.event_id for event in events], [first, second])
         self.assertEqual(events[1].payload, {"ok": True})
+
+    def test_private_records_are_visible_only_to_the_owning_web_member(self) -> None:
+        juan = web_actor("juan@example.com")
+        ana = web_actor("ana@example.com")
+        self.store.provision_household_members((juan.email, ana.email))
+        private = self.store.create_conversation(
+            actor=juan, visibility="private"
+        )
+        event = self.store.append_event(
+            private,
+            kind="message",
+            role="user",
+            content="Juan's private calendar note",
+            actor=juan,
+        )
+        self.store.add_memory(
+            "Juan's private passport reminder",
+            actor=juan,
+            visibility="private",
+        )
+
+        self.assertTrue(self.store.conversation_exists(private, actor=juan))
+        self.assertFalse(self.store.conversation_exists(private, actor=ana))
+        self.assertFalse(self.store.conversation_exists(private, actor=VOICE_ACTOR))
+        self.assertTrue(self.store.search("passport", actor=juan))
+        self.assertFalse(self.store.search("passport", actor=ana))
+        with self.assertRaises(PermissionError):
+            self.store.events(private, actor=ana)
+        self.assertFalse(self.store.delete_event(event, actor=ana))
+        self.assertTrue(self.store.delete_event(event, actor=juan))
+
+    def test_shared_voice_records_are_explicitly_attributed_and_web_visible(self) -> None:
+        member = web_actor("member@example.com")
+        self.store.provision_household_members((member.email,))
+        conversation = self.store.create_conversation(actor=VOICE_ACTOR)
+        self.store.append_event(
+            conversation,
+            kind="message",
+            content="voice household note",
+            actor=VOICE_ACTOR,
+        )
+        self.assertTrue(self.store.conversation_exists(conversation, actor=member))
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT created_by, visibility FROM conversations WHERE id = ?",
+                (conversation,),
+            ).fetchone()
+            event = connection.execute(
+                "SELECT actor_id, actor_source FROM events WHERE conversation_id = ?",
+                (conversation,),
+            ).fetchone()
+        self.assertEqual(tuple(row), ("household:voice", "shared"))
+        self.assertEqual(tuple(event), ("household:voice", "voice"))
 
 
 if __name__ == "__main__":

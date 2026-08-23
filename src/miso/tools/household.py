@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from miso.identity import Actor, SYSTEM_ACTOR, VOICE_ACTOR, private_owner
 from miso.memory import MemoryStore
 from miso.tools.audit import AuditSink, audit_event
 from miso.tools.base import ToolContext, ToolDefinition, ToolRegistry, ToolRejected
@@ -59,7 +60,13 @@ class HouseholdStore:
         return MemoryStore(self.path).connect()
 
     def create_scheduled(
-        self, kind: str, title: str, due_at: datetime
+        self,
+        kind: str,
+        title: str,
+        due_at: datetime,
+        *,
+        actor: Actor = VOICE_ACTOR,
+        visibility: str | None = None,
     ) -> dict[str, object]:
         now = _utc(self._now())
         due = _utc(due_at)
@@ -67,24 +74,39 @@ class HouseholdStore:
             raise ToolRejected("due time must be in the future")
         identifier = str(uuid.uuid4())
         timestamp = _timestamp(now)
+        resolved_visibility = visibility or ("private" if actor.is_web else "shared")
+        owner = private_owner(actor, resolved_visibility)
         with self.connect() as connection:
             connection.execute(
                 """
                 INSERT INTO scheduled_items(
-                    id, kind, title, due_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    id, kind, title, due_at, created_at, updated_at,
+                    visibility, owner_email, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (identifier, kind, title.strip(), _timestamp(due), timestamp, timestamp),
+                (
+                    identifier, kind, title.strip(), _timestamp(due), timestamp,
+                    timestamp, resolved_visibility, owner, actor.actor_id,
+                ),
             )
             row = connection.execute(
                 "SELECT * FROM scheduled_items WHERE id = ?", (identifier,)
             ).fetchone()
         return self._scheduled_dict(row)
 
-    def list_scheduled(self, kind: str, status: str = "pending") -> list[dict[str, object]]:
+    def list_scheduled(
+        self,
+        kind: str,
+        status: str = "pending",
+        *,
+        actor: Actor = VOICE_ACTOR,
+    ) -> list[dict[str, object]]:
         self.recover_due()
-        statement = "SELECT * FROM scheduled_items WHERE kind = ?"
-        values: list[object] = [kind]
+        statement = (
+            "SELECT * FROM scheduled_items WHERE kind = ? "
+            "AND (visibility = 'shared' OR owner_email = ?)"
+        )
+        values: list[object] = [kind, actor.email]
         if status != "all":
             statement += " AND status = ?"
             values.append(status)
@@ -100,6 +122,7 @@ class HouseholdStore:
         *,
         title: str | None = None,
         due_at: datetime | None = None,
+        actor: Actor = VOICE_ACTOR,
     ) -> dict[str, object]:
         self.recover_due()
         if title is None and due_at is None:
@@ -119,8 +142,9 @@ class HouseholdStore:
         with self.connect() as connection:
             cursor = connection.execute(
                 f"UPDATE scheduled_items SET {', '.join(updates)} "
-                "WHERE id = ? AND kind = ? AND status = 'pending'",
-                values,
+                "WHERE id = ? AND kind = ? AND status = 'pending' "
+                "AND (visibility = 'shared' OR owner_email = ?)",
+                (*values, actor.email),
             )
             if cursor.rowcount != 1:
                 raise ToolRejected(f"pending {kind} was not found")
@@ -129,7 +153,9 @@ class HouseholdStore:
             ).fetchone()
         return self._scheduled_dict(row)
 
-    def cancel_scheduled(self, identifier: str, kind: str) -> dict[str, object]:
+    def cancel_scheduled(
+        self, identifier: str, kind: str, *, actor: Actor = VOICE_ACTOR
+    ) -> dict[str, object]:
         self.recover_due()
         now = _timestamp(_utc(self._now()))
         with self.connect() as connection:
@@ -138,8 +164,9 @@ class HouseholdStore:
                 UPDATE scheduled_items
                 SET status = 'cancelled', updated_at = ?, revision = revision + 1
                 WHERE id = ? AND kind = ? AND status = 'pending'
+                  AND (visibility = 'shared' OR owner_email = ?)
                 """,
-                (now, identifier, kind),
+                (now, identifier, kind, actor.email),
             )
             if cursor.rowcount != 1:
                 raise ToolRejected(f"pending {kind} was not found")
@@ -185,34 +212,49 @@ class HouseholdStore:
         list_name: str,
         name: str,
         quantity: int,
-        added_by: str | None,
+        *,
+        actor: Actor = VOICE_ACTOR,
+        shared: bool = True,
     ) -> dict[str, object]:
         now = _timestamp(_utc(self._now()))
         list_id = str(uuid.uuid4())
         item_id = str(uuid.uuid4())
+        owner = private_owner(actor, "shared" if shared else "private")
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO shopping_lists(id, name, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT OR IGNORE INTO shopping_lists(
+                    id, name, shared, created_at, updated_at, owner_email, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (list_id, list_name.strip(), now, now),
+                (list_id, list_name.strip(), int(shared), now, now, owner, actor.actor_id),
             )
             row = connection.execute(
-                "SELECT id FROM shopping_lists WHERE name = ? COLLATE NOCASE",
-                (list_name.strip(),),
+                """
+                SELECT id FROM shopping_lists
+                WHERE name = ? COLLATE NOCASE
+                  AND (shared = 1 OR owner_email = ?)
+                """,
+                (list_name.strip(), actor.email),
             ).fetchone()
+            if row is None:
+                raise ToolRejected("shopping list is not accessible to this actor")
             connection.execute(
                 """
                 INSERT INTO shopping_items(
-                    id, list_id, name, quantity, added_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, list_id, name, quantity, added_by, created_at, updated_at,
+                    actor_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (item_id, row["id"], name.strip(), quantity, added_by, now, now),
+                (
+                    item_id, row["id"], name.strip(), quantity, actor.actor_id,
+                    now, now, actor.actor_id,
+                ),
             )
             item = connection.execute(
                 """
-                SELECT i.*, l.name AS list_name, l.shared
+                SELECT i.*, l.name AS list_name, l.shared,
+                       l.owner_email, l.created_by
                 FROM shopping_items AS i JOIN shopping_lists AS l ON l.id = i.list_id
                 WHERE i.id = ?
                 """,
@@ -226,9 +268,13 @@ class HouseholdStore:
         *,
         include_completed: bool = False,
         include_removed: bool = False,
+        actor: Actor = VOICE_ACTOR,
     ) -> list[dict[str, object]]:
-        conditions = ["l.name = ? COLLATE NOCASE"]
-        values: list[object] = [list_name.strip()]
+        conditions = [
+            "l.name = ? COLLATE NOCASE",
+            "(l.shared = 1 OR l.owner_email = ?)",
+        ]
+        values: list[object] = [list_name.strip(), actor.email]
         if not include_completed:
             conditions.append("i.completed = 0")
         if not include_removed:
@@ -236,7 +282,8 @@ class HouseholdStore:
         with self.connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT i.*, l.name AS list_name, l.shared
+                SELECT i.*, l.name AS list_name, l.shared,
+                       l.owner_email, l.created_by
                 FROM shopping_items AS i JOIN shopping_lists AS l ON l.id = i.list_id
                 WHERE {' AND '.join(conditions)}
                 ORDER BY i.completed, i.created_at, i.id
@@ -252,6 +299,7 @@ class HouseholdStore:
         name: str | None = None,
         quantity: int | None = None,
         completed: bool | None = None,
+        actor: Actor = VOICE_ACTOR,
     ) -> dict[str, object]:
         if name is None and quantity is None and completed is None:
             raise ToolRejected("at least one field must be updated")
@@ -268,14 +316,17 @@ class HouseholdStore:
         with self.connect() as connection:
             cursor = connection.execute(
                 f"UPDATE shopping_items SET {', '.join(updates)} "
-                "WHERE id = ? AND status = 'active'",
-                values,
+                "WHERE id = ? AND status = 'active' AND EXISTS ("
+                "SELECT 1 FROM shopping_lists AS l WHERE l.id = shopping_items.list_id "
+                "AND (l.shared = 1 OR l.owner_email = ?))",
+                (*values, actor.email),
             )
             if cursor.rowcount != 1:
                 raise ToolRejected("active shopping item was not found")
             row = connection.execute(
                 """
-                SELECT i.*, l.name AS list_name, l.shared
+                SELECT i.*, l.name AS list_name, l.shared,
+                       l.owner_email, l.created_by
                 FROM shopping_items AS i JOIN shopping_lists AS l ON l.id = i.list_id
                 WHERE i.id = ?
                 """,
@@ -283,7 +334,9 @@ class HouseholdStore:
             ).fetchone()
         return self._shopping_dict(row)
 
-    def remove_shopping_item(self, identifier: str) -> dict[str, object]:
+    def remove_shopping_item(
+        self, identifier: str, *, actor: Actor = VOICE_ACTOR
+    ) -> dict[str, object]:
         now = _timestamp(_utc(self._now()))
         with self.connect() as connection:
             cursor = connection.execute(
@@ -291,14 +344,20 @@ class HouseholdStore:
                 UPDATE shopping_items
                 SET status = 'removed', updated_at = ?, revision = revision + 1
                 WHERE id = ? AND status = 'active'
+                  AND EXISTS (
+                    SELECT 1 FROM shopping_lists AS l
+                    WHERE l.id = shopping_items.list_id
+                      AND (l.shared = 1 OR l.owner_email = ?)
+                  )
                 """,
-                (now, identifier),
+                (now, identifier, actor.email),
             )
             if cursor.rowcount != 1:
                 raise ToolRejected("active shopping item was not found")
             row = connection.execute(
                 """
-                SELECT i.*, l.name AS list_name, l.shared
+                SELECT i.*, l.name AS list_name, l.shared,
+                       l.owner_email, l.created_by
                 FROM shopping_items AS i JOIN shopping_lists AS l ON l.id = i.list_id
                 WHERE i.id = ?
                 """,
@@ -318,6 +377,9 @@ class HouseholdStore:
             "updated_at": row["updated_at"],
             "completed_at": row["completed_at"],
             "revision": row["revision"],
+            "visibility": row["visibility"],
+            "owner_email": row["owner_email"],
+            "created_by": row["created_by"],
         }
 
     @staticmethod
@@ -335,6 +397,9 @@ class HouseholdStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "revision": row["revision"],
+            "owner_email": row["owner_email"],
+            "created_by": row["created_by"],
+            "actor_id": row["actor_id"],
         }
 
 
@@ -388,6 +453,10 @@ class ScheduledItemWorker:
                             title=item["title"],
                             due_at=item["due_at"],
                             revision=item["revision"],
+                            visibility=item["visibility"],
+                            owner_email=item["owner_email"],
+                            actor=SYSTEM_ACTOR.actor_id,
+                            actor_source=SYSTEM_ACTOR.source,
                         )
                     )
             except Exception:
@@ -418,14 +487,23 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
         due = _utc(store._now()) + timedelta(seconds=int(arguments["duration_seconds"]))
         return {
             "timer": store.create_scheduled(
-                "timer", str(arguments.get("title", "Timer")), due
+                "timer", str(arguments.get("title", "Timer")), due,
+                actor=context.actor,
             )
         }
 
-    def scheduled_list(kind: str, arguments: Mapping[str, object]):
-        return {f"{kind}s": store.list_scheduled(kind, str(arguments.get("status", "pending")))}
+    def scheduled_list(
+        kind: str, arguments: Mapping[str, object], context: ToolContext
+    ):
+        return {
+            f"{kind}s": store.list_scheduled(
+                kind, str(arguments.get("status", "pending")), actor=context.actor
+            )
+        }
 
-    def scheduled_update(kind: str, arguments: Mapping[str, object]):
+    def scheduled_update(
+        kind: str, arguments: Mapping[str, object], context: ToolContext
+    ):
         title_value = arguments.get("title")
         due_value = None
         if "duration_seconds" in arguments:
@@ -438,11 +516,18 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                 kind,
                 title=str(title_value) if title_value is not None else None,
                 due_at=due_value,
+                actor=context.actor,
             )
         }
 
-    def scheduled_cancel(kind: str, arguments: Mapping[str, object]):
-        return {kind: store.cancel_scheduled(str(arguments["id"]), kind)}
+    def scheduled_cancel(
+        kind: str, arguments: Mapping[str, object], context: ToolContext
+    ):
+        return {
+            kind: store.cancel_scheduled(
+                str(arguments["id"]), kind, actor=context.actor
+            )
+        }
 
     definitions = (
         ToolDefinition(
@@ -455,7 +540,7 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
         ToolDefinition(
             "timer_list", "List durable timers",
             _object_schema({"status": status}),
-            lambda arguments, _context: scheduled_list("timer", arguments),
+            lambda arguments, context: scheduled_list("timer", arguments, context),
         ),
         ToolDefinition(
             "timer_update", "Update a pending timer",
@@ -466,49 +551,49 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                 },
                 "title": title,
             }, ("id",)),
-            lambda arguments, _context: scheduled_update("timer", arguments),
+            lambda arguments, context: scheduled_update("timer", arguments, context),
         ),
         ToolDefinition(
             "timer_cancel", "Cancel a pending timer",
             _object_schema({"id": identifier}, ("id",)),
-            lambda arguments, _context: scheduled_cancel("timer", arguments),
+            lambda arguments, context: scheduled_cancel("timer", arguments, context),
         ),
         ToolDefinition(
             "reminder_create", "Create a durable reminder",
             _object_schema({"due_at": due_at, "title": title}, ("due_at", "title")),
-            lambda arguments, _context: {
+            lambda arguments, context: {
                 "reminder": store.create_scheduled(
-                    "reminder", str(arguments["title"]), _parse_due_at(arguments["due_at"])
+                    "reminder", str(arguments["title"]),
+                    _parse_due_at(arguments["due_at"]), actor=context.actor,
                 )
             },
         ),
         ToolDefinition(
             "reminder_list", "List durable reminders",
             _object_schema({"status": status}),
-            lambda arguments, _context: scheduled_list("reminder", arguments),
+            lambda arguments, context: scheduled_list("reminder", arguments, context),
         ),
         ToolDefinition(
             "reminder_update", "Update a pending reminder",
             _object_schema({"id": identifier, "due_at": due_at, "title": title}, ("id",)),
-            lambda arguments, _context: scheduled_update("reminder", arguments),
+            lambda arguments, context: scheduled_update("reminder", arguments, context),
         ),
         ToolDefinition(
             "reminder_cancel", "Cancel a pending reminder",
             _object_schema({"id": identifier}, ("id",)),
-            lambda arguments, _context: scheduled_cancel("reminder", arguments),
+            lambda arguments, context: scheduled_cancel("reminder", arguments, context),
         ),
         ToolDefinition(
             "shopping_add", "Add an item to a shared shopping list",
             _object_schema({
                 "list_name": list_name, "name": title,
                 "quantity": {"type": "integer", "minimum": 1, "maximum": 999},
-                "added_by": {"type": "string", "minLength": 1, "maxLength": 100},
             }, ("name",)),
-            lambda arguments, _context: {
+            lambda arguments, context: {
                 "item": store.add_shopping_item(
                     str(arguments.get("list_name", "shopping")), str(arguments["name"]),
                     int(arguments.get("quantity", 1)),
-                    str(arguments["added_by"]) if "added_by" in arguments else None,
+                    actor=context.actor,
                 )
             },
         ),
@@ -519,11 +604,12 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                 "include_completed": {"type": "boolean"},
                 "include_removed": {"type": "boolean"},
             }),
-            lambda arguments, _context: {
+            lambda arguments, context: {
                 "items": store.list_shopping_items(
                     str(arguments.get("list_name", "shopping")),
                     include_completed=bool(arguments.get("include_completed", False)),
                     include_removed=bool(arguments.get("include_removed", False)),
+                    actor=context.actor,
                 )
             },
         ),
@@ -534,20 +620,23 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                 "quantity": {"type": "integer", "minimum": 1, "maximum": 999},
                 "completed": {"type": "boolean"},
             }, ("id",)),
-            lambda arguments, _context: {
+            lambda arguments, context: {
                 "item": store.update_shopping_item(
                     str(arguments["id"]),
                     name=str(arguments["name"]) if "name" in arguments else None,
                     quantity=int(arguments["quantity"]) if "quantity" in arguments else None,
                     completed=bool(arguments["completed"]) if "completed" in arguments else None,
+                    actor=context.actor,
                 )
             },
         ),
         ToolDefinition(
             "shopping_remove", "Remove an item from a shared shopping list",
             _object_schema({"id": identifier}, ("id",)),
-            lambda arguments, _context: {
-                "item": store.remove_shopping_item(str(arguments["id"]))
+            lambda arguments, context: {
+                "item": store.remove_shopping_item(
+                    str(arguments["id"]), actor=context.actor
+                )
             },
         ),
     )

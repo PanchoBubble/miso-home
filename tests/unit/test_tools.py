@@ -7,6 +7,7 @@ from threading import Event
 import time
 import unittest
 
+from miso.identity import web_actor
 from miso.tools import (
     DeveloperShellController,
     InMemoryAuditLog,
@@ -51,6 +52,22 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["arguments"]["value"], "[REDACTED]")
         self.assertEqual(events[1]["status"], "rejected")
+
+    def test_web_actor_is_available_to_handler_and_recorded_in_audit(self) -> None:
+        audit = InMemoryAuditLog()
+        registry = ToolRegistry(audit)
+        actor = web_actor("juan@example.com")
+        registry.register(
+            ToolDefinition(
+                "whoami",
+                "Return the authenticated actor",
+                {"type": "object", "additionalProperties": False},
+                lambda _arguments, context: context.actor.public_dict(),
+            )
+        )
+        result = registry.invoke("whoami", {}, actor=actor)
+        self.assertEqual(result.output["email"], "juan@example.com")
+        self.assertTrue(all(event["actor"] == "juan@example.com" for event in audit.events()))
 
     def test_success_returns_structured_result(self) -> None:
         registry = ToolRegistry()

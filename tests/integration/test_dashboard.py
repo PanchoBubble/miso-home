@@ -129,6 +129,13 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertNotIn("ollama_url", encoded)
         self.assertNotIn("api_key", encoded)
 
+        response, content = self.request("GET", "/api/identity")
+        identity = json.loads(content)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(identity["actor"]["id"], "local@miso.invalid")
+        self.assertEqual(identity["actor"]["source"], "web")
+        self.assertEqual(identity["voice_actor"]["id"], "household:voice")
+
     def test_streamed_routed_tool_chat_is_searchable_and_audited(self) -> None:
         response, content = self.request(
             "POST",
@@ -162,9 +169,22 @@ class DashboardIntegrationTests(unittest.TestCase):
             any(
                 item.get("event") == "tool_invocation_finished"
                 and item.get("tool") == "timer_create"
+                and item.get("actor") == "local@miso.invalid"
                 for item in activity
             )
         )
+        with self.server.memory_store.connect() as connection:
+            conversation = connection.execute(
+                "SELECT visibility, owner_email, created_by FROM conversations "
+                "WHERE id = ?",
+                (completed["conversation_id"],),
+            ).fetchone()
+            timer = connection.execute(
+                "SELECT visibility, owner_email, created_by FROM scheduled_items"
+            ).fetchone()
+        expected = ("private", "local@miso.invalid", "local@miso.invalid")
+        self.assertEqual(tuple(conversation), expected)
+        self.assertEqual(tuple(timer), expected)
 
     def test_developer_mode_is_visible_expiring_and_command_is_scoped(self) -> None:
         response, content = self.request(

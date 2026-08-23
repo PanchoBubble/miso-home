@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-SCHEMA_VERSION = 2
+from miso.identity import Actor, VOICE_ACTOR, normalize_email, private_owner
+
+SCHEMA_VERSION = 3
 
 MIGRATION_1 = """
 CREATE TABLE conversations (
@@ -140,6 +142,44 @@ CREATE INDEX shopping_items_list_status
     ON shopping_items(list_id, status, completed, created_at);
 """
 
+MIGRATION_3 = """
+CREATE TABLE household_members (
+    email TEXT PRIMARY KEY COLLATE NOCASE,
+    display_name TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+
+ALTER TABLE conversations ADD COLUMN visibility TEXT NOT NULL DEFAULT 'shared'
+    CHECK (visibility IN ('shared', 'private'));
+ALTER TABLE conversations ADD COLUMN owner_email TEXT REFERENCES household_members(email);
+ALTER TABLE conversations ADD COLUMN created_by TEXT NOT NULL DEFAULT 'household:voice';
+
+ALTER TABLE events ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'household:voice';
+ALTER TABLE events ADD COLUMN actor_source TEXT NOT NULL DEFAULT 'voice'
+    CHECK (actor_source IN ('web', 'voice', 'system'));
+
+ALTER TABLE memories ADD COLUMN visibility TEXT NOT NULL DEFAULT 'shared'
+    CHECK (visibility IN ('shared', 'private'));
+ALTER TABLE memories ADD COLUMN owner_email TEXT REFERENCES household_members(email);
+ALTER TABLE memories ADD COLUMN created_by TEXT NOT NULL DEFAULT 'household:voice';
+
+ALTER TABLE scheduled_items ADD COLUMN visibility TEXT NOT NULL DEFAULT 'shared'
+    CHECK (visibility IN ('shared', 'private'));
+ALTER TABLE scheduled_items ADD COLUMN owner_email TEXT REFERENCES household_members(email);
+ALTER TABLE scheduled_items ADD COLUMN created_by TEXT NOT NULL DEFAULT 'household:voice';
+
+ALTER TABLE shopping_lists ADD COLUMN owner_email TEXT REFERENCES household_members(email);
+ALTER TABLE shopping_lists ADD COLUMN created_by TEXT NOT NULL DEFAULT 'household:voice';
+ALTER TABLE shopping_items ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'household:voice';
+CREATE INDEX conversations_visibility_owner ON conversations(visibility, owner_email);
+CREATE INDEX memories_visibility_owner ON memories(visibility, owner_email);
+CREATE INDEX scheduled_items_visibility_owner
+    ON scheduled_items(visibility, owner_email, status, due_at);
+CREATE INDEX shopping_lists_visibility_owner ON shopping_lists(shared, owner_email);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -196,18 +236,48 @@ class MemoryStore:
                     f"BEGIN IMMEDIATE;\n{MIGRATION_2}\n"
                     "PRAGMA user_version = 2;\nCOMMIT;"
                 )
+            if version < 3:
+                connection.executescript(
+                    f"BEGIN IMMEDIATE;\n{MIGRATION_3}\n"
+                    "PRAGMA user_version = 3;\nCOMMIT;"
+                )
 
     def integrity_check(self) -> str:
         with self.connect() as connection:
             return str(connection.execute("PRAGMA integrity_check").fetchone()[0])
 
-    def create_conversation(self, conversation_id: str | None = None) -> str:
+    def provision_household_members(self, emails: Iterable[str]) -> None:
+        now = utc_now()
+        normalized = sorted({normalize_email(email) for email in emails})
+        with self.connect() as connection:
+            for email in normalized:
+                connection.execute(
+                    """
+                    INSERT INTO household_members(email, created_at, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(email) DO UPDATE SET enabled = 1, updated_at = excluded.updated_at
+                    """,
+                    (email, now, now),
+                )
+
+    def create_conversation(
+        self,
+        conversation_id: str | None = None,
+        *,
+        actor: Actor = VOICE_ACTOR,
+        visibility: str = "shared",
+    ) -> str:
         identifier = conversation_id or str(uuid.uuid4())
         now = utc_now()
+        owner = private_owner(actor, visibility)
         with self.connect() as connection:
             connection.execute(
-                "INSERT INTO conversations(id, created_at, updated_at) VALUES (?, ?, ?)",
-                (identifier, now, now),
+                """
+                INSERT INTO conversations(
+                    id, created_at, updated_at, visibility, owner_email, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (identifier, now, now, visibility, owner, actor.actor_id),
             )
         return identifier
 
@@ -219,16 +289,24 @@ class MemoryStore:
         content: str = "",
         role: str | None = None,
         payload: Mapping[str, object] | None = None,
+        actor: Actor = VOICE_ACTOR,
     ) -> int:
         now = utc_now()
         encoded = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         with self.connect() as connection:
+            if not self._conversation_accessible(connection, conversation_id, actor):
+                raise PermissionError("conversation is not accessible to this actor")
             cursor = connection.execute(
                 """
-                INSERT INTO events(conversation_id, kind, role, content, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO events(
+                    conversation_id, kind, role, content, payload_json, created_at,
+                    actor_id, actor_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (conversation_id, kind, role, content, encoded, now),
+                (
+                    conversation_id, kind, role, content, encoded, now,
+                    actor.actor_id, actor.source,
+                ),
             )
             connection.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -236,18 +314,23 @@ class MemoryStore:
             )
             return int(cursor.lastrowid)
 
-    def conversation_exists(self, conversation_id: str) -> bool:
+    def conversation_exists(
+        self, conversation_id: str, *, actor: Actor = VOICE_ACTOR
+    ) -> bool:
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
-            ).fetchone()
-        return row is not None
+            return self._conversation_accessible(connection, conversation_id, actor)
 
     def events(
-        self, conversation_id: str, *, limit: int = 100
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 100,
+        actor: Actor = VOICE_ACTOR,
     ) -> list[ConversationEvent]:
         bounded_limit = max(1, min(limit, 500))
         with self.connect() as connection:
+            if not self._conversation_accessible(connection, conversation_id, actor):
+                raise PermissionError("conversation is not accessible to this actor")
             rows = connection.execute(
                 """
                 SELECT * FROM (
@@ -281,16 +364,24 @@ class MemoryStore:
         source_event_id: int | None = None,
         tags: Iterable[str] = (),
         source_links: Sequence[Mapping[str, str | None]] = (),
+        actor: Actor = VOICE_ACTOR,
+        visibility: str = "shared",
     ) -> int:
         now = utc_now()
+        owner = private_owner(actor, visibility)
         normalized_tags = sorted({tag.strip().casefold() for tag in tags if tag.strip()})
         with self.connect() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO memories(kind, content, importance, source_event_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO memories(
+                    kind, content, importance, source_event_id, created_at, updated_at,
+                    visibility, owner_email, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (kind, content, importance, source_event_id, now, now),
+                (
+                    kind, content, importance, source_event_id, now, now,
+                    visibility, owner, actor.actor_id,
+                ),
             )
             memory_id = int(cursor.lastrowid)
             for tag in normalized_tags:
@@ -317,7 +408,9 @@ class MemoryStore:
                 )
             return memory_id
 
-    def search(self, query: str, *, limit: int = 20) -> list[SearchResult]:
+    def search(
+        self, query: str, *, limit: int = 20, actor: Actor = VOICE_ACTOR
+    ) -> list[SearchResult]:
         if not query.strip():
             return []
         bounded_limit = max(1, min(limit, 100))
@@ -329,16 +422,19 @@ class MemoryStore:
                 FROM memory_fts
                 JOIN memories AS m ON m.id = memory_fts.rowid
                 WHERE memory_fts MATCH ?
+                  AND (m.visibility = 'shared' OR m.owner_email = ?)
                 UNION ALL
                 SELECT 'event' AS record_type, e.id, e.content,
                        bm25(event_fts) AS rank, e.created_at
                 FROM event_fts
                 JOIN events AS e ON e.id = event_fts.rowid
+                JOIN conversations AS c ON c.id = e.conversation_id
                 WHERE event_fts MATCH ?
+                  AND (c.visibility = 'shared' OR c.owner_email = ?)
                 ORDER BY rank, created_at DESC
                 LIMIT ?
                 """,
-                (query, query, bounded_limit),
+                (query, actor.email, query, actor.email, bounded_limit),
             ).fetchall()
         return [
             SearchResult(
@@ -351,17 +447,41 @@ class MemoryStore:
             for row in rows
         ]
 
-    def delete_memory(self, memory_id: int) -> bool:
+    def delete_memory(
+        self, memory_id: int, *, actor: Actor = VOICE_ACTOR
+    ) -> bool:
         with self.connect() as connection:
-            cursor = connection.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            cursor = connection.execute(
+                """
+                DELETE FROM memories
+                WHERE id = ? AND (visibility = 'shared' OR owner_email = ?)
+                """,
+                (memory_id, actor.email),
+            )
             connection.execute(
                 "DELETE FROM tags WHERE NOT EXISTS "
                 "(SELECT 1 FROM memory_tags WHERE memory_tags.tag_id = tags.id)"
             )
             return cursor.rowcount == 1
 
-    def delete_event(self, event_id: int, *, delete_derived: bool = True) -> bool:
+    def delete_event(
+        self,
+        event_id: int,
+        *,
+        delete_derived: bool = True,
+        actor: Actor = VOICE_ACTOR,
+    ) -> bool:
         with self.connect() as connection:
+            accessible = connection.execute(
+                """
+                SELECT 1 FROM events AS e
+                JOIN conversations AS c ON c.id = e.conversation_id
+                WHERE e.id = ? AND (c.visibility = 'shared' OR c.owner_email = ?)
+                """,
+                (event_id, actor.email),
+            ).fetchone()
+            if accessible is None:
+                return False
             if delete_derived:
                 connection.execute(
                     "DELETE FROM memories WHERE source_event_id = ?", (event_id,)
@@ -372,3 +492,16 @@ class MemoryStore:
                 "(SELECT 1 FROM memory_tags WHERE memory_tags.tag_id = tags.id)"
             )
             return cursor.rowcount == 1
+
+    @staticmethod
+    def _conversation_accessible(
+        connection: sqlite3.Connection, conversation_id: str, actor: Actor
+    ) -> bool:
+        row = connection.execute(
+            """
+            SELECT 1 FROM conversations
+            WHERE id = ? AND (visibility = 'shared' OR owner_email = ?)
+            """,
+            (conversation_id, actor.email),
+        ).fetchone()
+        return row is not None
