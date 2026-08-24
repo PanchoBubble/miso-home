@@ -1,0 +1,20 @@
+[Unit]
+Description=Full isolated restore check of the latest Miso backup
+RequiresMountsFor=/media/pancho/T7
+After=miso-database-backup.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/miso/miso-backup.env
+ExecStart=/usr/local/sbin/miso-backup verify --full
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/media/pancho/T7/backups/miso /var/lib/miso /run/lock
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true

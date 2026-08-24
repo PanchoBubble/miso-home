@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted backup of Miso local state
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=miso-database-backup.service
+
+[Install]
+WantedBy=timers.target

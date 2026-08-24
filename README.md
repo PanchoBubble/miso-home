@@ -39,6 +39,21 @@ The installer places root-owned application code in `/opt/miso/app`, installs
 unprivileged `miso` system user.
 Optional environment overrides belong in `/etc/miso/miso.env`, never in Git.
 
+After the recovery key exists, install the separate local backup automation:
+
+```bash
+sudo ops/install-miso-backup.sh
+sudo systemctl start miso-database-backup.service
+sudo systemctl start miso-database-restore-check.service
+```
+
+It creates a verified SQLite online snapshot plus durable state and encrypted
+configuration on the Samsung T7 each day. Publication uses an atomic rename;
+weekly checks perform a full isolated restore. Retention is capped at 30 points
+and 20 GiB so Miso cannot silently consume the media allocation. See
+[`docs/miso-storage-layout.md`](docs/miso-storage-layout.md) for the format,
+space thresholds, recovery procedure, and override settings.
+
 The first Pi provider is Ollama on `127.0.0.1:11434`. Its systemd drop-in keeps
 downloaded models under `/var/lib/miso/models/ollama`; the initial deployment
 uses `qwen3:0.6b` as a small ARM64 smoke-test model. Larger-model benchmarking

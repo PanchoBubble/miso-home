@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly isolated restore check of Miso backups
+
+[Timer]
+OnCalendar=Mon *-*-* 05:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=miso-database-restore-check.service
+
+[Install]
+WantedBy=timers.target
