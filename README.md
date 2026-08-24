@@ -116,6 +116,18 @@ permissions; install Miso and approve notifications only from the canonical
 HTTPS origin. The service worker caches a fixed list of shell assets and always
 sends API, authenticated, streaming, and cross-origin requests to the network.
 
+Remote API requests must carry a valid Cloudflare Access application assertion.
+Set `MISO_ACCESS_TEAM_DOMAIN` to the exact HTTPS team origin and
+`MISO_ACCESS_AUDIENCE` to the Miso application's AUD tag in `/etc/miso/miso.env`.
+Miso verifies the assertion's RS256 signature against Cloudflare's rotating key
+set, issuer, audience, time bounds, token type, and email before applying the
+same `MISO_HOUSEHOLD_ALLOWED_EMAILS` policy used by local identity. The local
+bearer token remains available over the LAN as a recovery path.
+The dedicated `miso-cloudflared.service` reads its remotely managed tunnel token
+from the root-only `/etc/cloudflared/miso.token` through systemd credentials. It
+runs separately from any legacy `cloudflared.service`; the runtime installer
+enables it only after that token file exists.
+
 ## Household identity and sharing
 
 Every request is attributed to an origin-controlled actor. Local dashboard and

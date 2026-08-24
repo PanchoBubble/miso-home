@@ -15,6 +15,7 @@ from typing import Type, cast
 from urllib.parse import parse_qs, urlsplit
 
 from miso import __version__
+from miso.access import AccessJWTError, AccessJWTVerifier
 from miso.audio import AudioManager
 from miso.config import Settings
 from miso.conversation import ConversationManager
@@ -90,6 +91,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         wake_manager: WakeWordManager,
         conversation_manager: ConversationManager,
         identity_policy: HouseholdIdentityPolicy,
+        access_verifier: AccessJWTVerifier | None,
         started_at: float,
     ) -> None:
         self.settings = settings
@@ -104,6 +106,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.conversation_manager = conversation_manager
         self.memory_store = MemoryStore(settings.database_path)
         self.identity_policy = identity_policy
+        self.access_verifier = access_verifier
         self.memory_store.provision_household_members(identity_policy.allowed_emails)
         self.started_at = started_at
         self._active_requests: dict[str, tuple[threading.Event, str]] = {}
@@ -260,6 +263,14 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             ):
                 self._request_actor = self.miso.identity_policy.local_actor
                 return True
+            if self.miso.access_verifier is not None:
+                assertion = self.headers.get("Cf-Access-Jwt-Assertion", "")
+                try:
+                    email = self.miso.access_verifier.verify(assertion)
+                    self._request_actor = self.miso.identity_policy.web_actor(email)
+                    return True
+                except (AccessJWTError, PermissionError):
+                    pass
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
 
@@ -652,10 +663,16 @@ def create_server(
     speech_manager: SpeechManager | None = None,
     wake_manager: WakeWordManager | None = None,
     conversation_manager: ConversationManager | None = None,
+    access_verifier: AccessJWTVerifier | None = None,
 ) -> MisoHTTPServer:
     identity_policy = HouseholdIdentityPolicy(
         settings.household_allowed_emails, settings.dashboard_email
     )
+    if access_verifier is None and settings.access_team_domain is not None:
+        access_verifier = AccessJWTVerifier(
+            settings.access_team_domain,
+            cast(str, settings.access_audience),
+        )
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path
     )
@@ -780,5 +797,6 @@ def create_server(
         wake_manager=wake,
         conversation_manager=conversation,
         identity_policy=identity_policy,
+        access_verifier=access_verifier,
         started_at=time.monotonic(),
     )

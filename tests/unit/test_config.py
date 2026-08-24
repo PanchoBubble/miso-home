@@ -37,6 +37,10 @@ class SettingsTests(unittest.TestCase):
                     "MISO_ROUTING_ATTEMPT_TIMEOUT": "30",
                     "MISO_DASHBOARD_EMAIL": "Juan@Example.com",
                     "MISO_HOUSEHOLD_ALLOWED_EMAILS": "ana@example.com,juan@example.com",
+                    "MISO_ACCESS_TEAM_DOMAIN": (
+                        "https://sowe-tech.cloudflareaccess.com/"
+                    ),
+                    "MISO_ACCESS_AUDIENCE": "miso-application-audience",
                     "MISO_AUDIO_CAPTURE_CARD": "MisoUSB",
                     "MISO_AUDIO_PLAYBACK_CARD": "USB_Speaker",
                     "MISO_AUDIO_BUFFER_MILLISECONDS": "800",
@@ -74,6 +78,13 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(
                 settings.household_allowed_emails,
                 ("ana@example.com", "juan@example.com"),
+            )
+            self.assertEqual(
+                settings.access_team_domain,
+                "https://sowe-tech.cloudflareaccess.com",
+            )
+            self.assertEqual(
+                settings.access_audience, "miso-application-audience"
             )
             self.assertEqual(settings.audio_capture_card, "MisoUSB")
             self.assertEqual(settings.audio_playback_card, "USB_Speaker")
@@ -141,6 +152,28 @@ class SettingsTests(unittest.TestCase):
                     "MISO_HOUSEHOLD_ALLOWED_EMAILS": (
                         "juan@example.com,JUAN@example.com"
                     )
+                }
+            )
+
+    def test_rejects_incomplete_or_invalid_access_configuration(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "must be set together"):
+            Settings.from_env(
+                {"MISO_ACCESS_TEAM_DOMAIN": "https://sowe-tech.cloudflareaccess.com"}
+            )
+        with self.assertRaisesRegex(ConfigError, "cloudflareaccess.com"):
+            Settings.from_env(
+                {
+                    "MISO_ACCESS_TEAM_DOMAIN": "https://access.example.com",
+                    "MISO_ACCESS_AUDIENCE": "miso-application-audience",
+                }
+            )
+        with self.assertRaisesRegex(ConfigError, "AUDIENCE is invalid"):
+            Settings.from_env(
+                {
+                    "MISO_ACCESS_TEAM_DOMAIN": (
+                        "https://sowe-tech.cloudflareaccess.com"
+                    ),
+                    "MISO_ACCESS_AUDIENCE": "short",
                 }
             )
 

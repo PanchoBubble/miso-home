@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import unittest
 
+from miso.access import AccessJWTError
 from miso.config import Settings
 from miso.http import create_server
 from miso.providers import ChatChunk, ProviderHealth, ProviderSet
@@ -305,6 +306,77 @@ class DashboardAuthenticationTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertNotIn(b"dashboard-secret-at-least-32-chars", content)
                 connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_access_assertion_resolves_allowlisted_actor_only(self) -> None:
+        class FakeAccessVerifier:
+            def verify(self, assertion: str) -> str:
+                if assertion == "allowed-assertion":
+                    return "member@example.com"
+                if assertion == "unlisted-assertion":
+                    return "outsider@example.com"
+                raise AccessJWTError("invalid assertion")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings(
+                host="127.0.0.1",
+                port=8090,
+                database_path=root / "miso.sqlite3",
+                state_dir=root,
+                model_dir=root,
+                ollama_url="http://127.0.0.1:11434",
+                ollama_model="qwen3:0.6b",
+                provider_timeout_seconds=120,
+                log_level="INFO",
+                dashboard_token="dashboard-secret-at-least-32-chars",
+                household_allowed_emails=("member@example.com",),
+            )
+            router = ProviderRouter(
+                ProviderSet(
+                    pi=FakeProvider(),
+                    lan=None,
+                    hosted=FakeProvider("hosted-gpt", available=False),
+                ),
+                InMemoryAuditLog(),
+            )
+            server = create_server(
+                settings,
+                port=0,
+                router=router,
+                access_verifier=FakeAccessVerifier(),  # type: ignore[arg-type]
+            )
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def identity(headers: dict[str, str]) -> tuple[int, bytes]:
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_port, timeout=5
+                    )
+                    connection.request("GET", "/api/identity", headers=headers)
+                    response = connection.getresponse()
+                    content = response.read()
+                    connection.close()
+                    return response.status, content
+
+                status, content = identity(
+                    {"Cf-Access-Jwt-Assertion": "allowed-assertion"}
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(
+                    json.loads(content)["actor"]["id"], "member@example.com"
+                )
+                status, _ = identity(
+                    {"Cf-Access-Jwt-Assertion": "unlisted-assertion"}
+                )
+                self.assertEqual(status, 401)
+                status, _ = identity(
+                    {"Cf-Access-Authenticated-User-Email": "member@example.com"}
+                )
+                self.assertEqual(status, 401)
             finally:
                 server.shutdown()
                 server.server_close()

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from miso.identity import IdentityError, normalize_email
 
@@ -59,6 +60,8 @@ class Settings:
     dashboard_token: str | None = field(default=None, repr=False)
     dashboard_email: str = "local@miso.invalid"
     household_allowed_emails: tuple[str, ...] = ()
+    access_team_domain: str | None = None
+    access_audience: str | None = None
     developer_root: Path | None = None
     developer_commands: tuple[str, ...] = ("python3", "git", "rg", "ls")
     audio_enabled: bool = True
@@ -243,6 +246,10 @@ class Settings:
                 source.get("MISO_HOUSEHOLD_ALLOWED_EMAILS", ""),
                 "MISO_HOUSEHOLD_ALLOWED_EMAILS",
             ),
+            access_team_domain=(
+                source.get("MISO_ACCESS_TEAM_DOMAIN", "").strip().rstrip("/") or None
+            ),
+            access_audience=source.get("MISO_ACCESS_AUDIENCE", "").strip() or None,
             developer_root=(
                 Path(source["MISO_DEVELOPER_ROOT"])
                 if source.get("MISO_DEVELOPER_ROOT")
@@ -424,6 +431,34 @@ class Settings:
             raise ConfigError(
                 "MISO_HOUSEHOLD_ALLOWED_EMAILS must contain normalized email addresses"
             )
+        if (self.access_team_domain is None) != (self.access_audience is None):
+            raise ConfigError(
+                "MISO_ACCESS_TEAM_DOMAIN and MISO_ACCESS_AUDIENCE must be set together"
+            )
+        if self.access_team_domain is not None:
+            parsed_team_domain = urlsplit(self.access_team_domain)
+            if (
+                parsed_team_domain.scheme != "https"
+                or not parsed_team_domain.hostname
+                or not parsed_team_domain.hostname.endswith(".cloudflareaccess.com")
+                or parsed_team_domain.username is not None
+                or parsed_team_domain.password is not None
+                or parsed_team_domain.port is not None
+                or parsed_team_domain.path not in {"", "/"}
+                or parsed_team_domain.query
+                or parsed_team_domain.fragment
+            ):
+                raise ConfigError(
+                    "MISO_ACCESS_TEAM_DOMAIN must be an HTTPS cloudflareaccess.com origin"
+                )
+            if not self.access_audience or not (
+                16 <= len(self.access_audience) <= 128
+                and all(
+                    character.isalnum() or character in "_-"
+                    for character in self.access_audience
+                )
+            ):
+                raise ConfigError("MISO_ACCESS_AUDIENCE is invalid")
         if self.developer_root is not None and not self.developer_root.is_absolute():
             raise ConfigError("MISO_DEVELOPER_ROOT must be absolute")
         if not self.developer_commands:

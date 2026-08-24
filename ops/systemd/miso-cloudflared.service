@@ -1,0 +1,33 @@
+[Unit]
+Description=Cloudflare Tunnel connector for the Miso PWA
+Documentation=https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/
+After=network-online.target miso.service
+Wants=network-online.target
+Requires=miso.service
+
+[Service]
+Type=notify
+DynamicUser=yes
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token-file ${CREDENTIALS_DIRECTORY}/tunnel-token
+LoadCredential=tunnel-token:/etc/cloudflared/miso.token
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=0
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,7 @@ TARGET_ROOT="${TARGET_ROOT:-/opt/miso/app}"
 UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso.service"
 MDNS_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-mdns.service"
 MDNS_PUBLISH_SOURCE="${SOURCE_ROOT}/ops/bin/miso-mdns-publish.sh"
+TUNNEL_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-cloudflared.service"
 CONVERSATION_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-conversation.env"
 
 fail() {
@@ -14,13 +15,14 @@ fail() {
 }
 
 [[ "${EUID}" -eq 0 ]] || fail "run as root"
-for command in awk aplay arecord avahi-publish-address getent install ip python3 rsync systemctl usermod; do
+for command in awk aplay arecord avahi-publish-address cloudflared getent install ip python3 rsync systemctl usermod; do
   command -v "${command}" >/dev/null || fail "missing command: ${command}"
 done
 [[ -d "${SOURCE_ROOT}/src/miso" ]] || fail "Miso source not found under ${SOURCE_ROOT}"
 [[ -f "${UNIT_SOURCE}" ]] || fail "systemd unit not found: ${UNIT_SOURCE}"
 [[ -f "${MDNS_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${MDNS_UNIT_SOURCE}"
 [[ -f "${MDNS_PUBLISH_SOURCE}" ]] || fail "helper not found: ${MDNS_PUBLISH_SOURCE}"
+[[ -f "${TUNNEL_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${TUNNEL_UNIT_SOURCE}"
 [[ -f "${CONVERSATION_ENV_SOURCE}" ]] || fail \
   "conversation environment not found: ${CONVERSATION_ENV_SOURCE}"
 getent passwd miso >/dev/null || fail "miso service user is not configured"
@@ -38,6 +40,8 @@ install -o root -g root -m 0644 "${UNIT_SOURCE}" \
   /etc/systemd/system/miso.service
 install -o root -g root -m 0644 "${MDNS_UNIT_SOURCE}" \
   /etc/systemd/system/miso-mdns.service
+install -o root -g root -m 0644 "${TUNNEL_UNIT_SOURCE}" \
+  /etc/systemd/system/miso-cloudflared.service
 install -o root -g root -m 0755 "${MDNS_PUBLISH_SOURCE}" \
   /usr/local/bin/miso-mdns-publish
 install -d -o root -g root -m 0755 /etc/miso
@@ -51,5 +55,11 @@ systemctl enable miso.service
 systemctl enable miso-mdns.service
 systemctl restart miso.service
 systemctl restart miso-mdns.service
+if [[ -s /etc/cloudflared/miso.token ]]; then
+  systemctl enable miso-cloudflared.service
+  systemctl restart miso-cloudflared.service
+else
+  printf 'Miso tunnel token is absent; connector remains disabled\n'
+fi
 
 printf 'Installed and started Miso from %s\n' "${SOURCE_ROOT}"

@@ -14,11 +14,13 @@ to `local@miso.invalid`. `MISO_HOUSEHOLD_ALLOWED_EMAILS` is a comma-separated
 set of normalized household member emails reserved for authenticated identity
 providers. Invalid and duplicate addresses fail configuration validation.
 
-The current local dashboard authenticates with its existing bearer token and
-maps that credential to `MISO_DASHBOARD_EMAIL`. Cloudflare Access identity is
-not trusted from an HTTP header in this phase: the later Access integration must
-validate the Access assertion at the origin and then resolve its email through
-the same allowlist policy.
+The local dashboard authenticates with its existing bearer token and maps that
+credential to `MISO_DASHBOARD_EMAIL`. Remote requests authenticate with the
+`Cf-Access-Jwt-Assertion` application token. Miso validates its RS256 signature
+against the team domain's rotating key set, exact issuer and application AUD,
+time bounds, application-token type, and email before resolving the email
+through the same allowlist policy. The unauthenticated convenience email header
+is never trusted.
 
 ## Authorization matrix
 
