@@ -6,13 +6,13 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from miso.identity import Actor, VOICE_ACTOR, normalize_email, private_owner
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATION_1 = """
 CREATE TABLE conversations (
@@ -180,6 +180,16 @@ CREATE INDEX scheduled_items_visibility_owner
 CREATE INDEX shopping_lists_visibility_owner ON shopping_lists(shared, owner_email);
 """
 
+MIGRATION_4 = """
+CREATE TABLE memory_embeddings (
+    memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (memory_id, model)
+) STRICT;
+"""
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -192,6 +202,22 @@ class SearchResult:
     content: str
     rank: float
     created_at: str
+    kind: str
+    role: str | None
+    conversation_id: str | None
+    importance: float | None
+    tags: tuple[str, ...]
+    source_event_id: int | None
+    sources: tuple[Mapping[str, object], ...]
+    visibility: str
+    created_by: str
+
+
+@dataclass(frozen=True, slots=True)
+class DeletionResult:
+    records_deleted: int
+    derived_memories_deleted: int
+    embeddings_deleted: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +266,11 @@ class MemoryStore:
                 connection.executescript(
                     f"BEGIN IMMEDIATE;\n{MIGRATION_3}\n"
                     "PRAGMA user_version = 3;\nCOMMIT;"
+                )
+            if version < 4:
+                connection.executescript(
+                    f"BEGIN IMMEDIATE;\n{MIGRATION_4}\n"
+                    "PRAGMA user_version = 4;\nCOMMIT;"
                 )
 
     def integrity_check(self) -> str:
@@ -409,60 +440,225 @@ class MemoryStore:
             return memory_id
 
     def search(
-        self, query: str, *, limit: int = 20, actor: Actor = VOICE_ACTOR
+        self,
+        query: str,
+        *,
+        limit: int | None = 20,
+        actor: Actor = VOICE_ACTOR,
+        kinds: Iterable[str] = (),
+        tag: str | None = None,
+        record_types: Iterable[str] = ("memory", "event"),
     ) -> list[SearchResult]:
-        if not query.strip():
-            return []
-        bounded_limit = max(1, min(limit, 100))
+        normalized_query = query.strip()
+        normalized_kinds = sorted({kind.strip() for kind in kinds if kind.strip()})
+        normalized_tag = tag.strip().casefold() if tag and tag.strip() else None
+        requested_types = set(record_types)
+        if not requested_types <= {"memory", "event"}:
+            raise ValueError("record type must be memory or event")
+        bounded_limit = None if limit is None else max(1, min(limit, 5000))
         with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT 'memory' AS record_type, m.id, m.content,
-                       bm25(memory_fts) AS rank, m.created_at
-                FROM memory_fts
-                JOIN memories AS m ON m.id = memory_fts.rowid
-                WHERE memory_fts MATCH ?
-                  AND (m.visibility = 'shared' OR m.owner_email = ?)
-                UNION ALL
-                SELECT 'event' AS record_type, e.id, e.content,
-                       bm25(event_fts) AS rank, e.created_at
-                FROM event_fts
-                JOIN events AS e ON e.id = event_fts.rowid
-                JOIN conversations AS c ON c.id = e.conversation_id
-                WHERE event_fts MATCH ?
-                  AND (c.visibility = 'shared' OR c.owner_email = ?)
-                ORDER BY rank, created_at DESC
-                LIMIT ?
-                """,
-                (query, actor.email, query, actor.email, bounded_limit),
-            ).fetchall()
-        return [
-            SearchResult(
-                record_type=row["record_type"],
-                record_id=row["id"],
-                content=row["content"],
-                rank=row["rank"],
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+            rows: list[sqlite3.Row] = []
+            if "memory" in requested_types:
+                if normalized_query:
+                    memory_sql = """
+                        SELECT 'memory' AS record_type, m.*,
+                               bm25(memory_fts) AS rank,
+                               NULL AS role, NULL AS conversation_id,
+                               NULL AS actor_id, NULL AS actor_source
+                        FROM memory_fts
+                        JOIN memories AS m ON m.id = memory_fts.rowid
+                        WHERE memory_fts MATCH ?
+                          AND (m.visibility = 'shared' OR m.owner_email = ?)
+                    """
+                    memory_parameters: list[object] = [normalized_query, actor.email]
+                else:
+                    memory_sql = """
+                        SELECT 'memory' AS record_type, m.*, 0.0 AS rank,
+                               NULL AS role, NULL AS conversation_id,
+                               NULL AS actor_id, NULL AS actor_source
+                        FROM memories AS m
+                        WHERE (m.visibility = 'shared' OR m.owner_email = ?)
+                    """
+                    memory_parameters = [actor.email]
+                if normalized_kinds:
+                    placeholders = ",".join("?" for _ in normalized_kinds)
+                    memory_sql += f" AND m.kind IN ({placeholders})"
+                    memory_parameters.extend(normalized_kinds)
+                if normalized_tag:
+                    memory_sql += """
+                        AND EXISTS (
+                            SELECT 1 FROM memory_tags AS mt
+                            JOIN tags AS t ON t.id = mt.tag_id
+                            WHERE mt.memory_id = m.id AND t.name = ? COLLATE NOCASE
+                        )
+                    """
+                    memory_parameters.append(normalized_tag)
+                rows.extend(connection.execute(memory_sql, memory_parameters).fetchall())
 
-    def delete_memory(
-        self, memory_id: int, *, actor: Actor = VOICE_ACTOR
+            if (
+                "event" in requested_types
+                and not normalized_kinds
+                and normalized_tag is None
+            ):
+                if normalized_query:
+                    event_sql = """
+                        SELECT 'event' AS record_type, e.id, e.content,
+                               bm25(event_fts) AS rank, e.created_at,
+                               e.kind, e.role, e.conversation_id, e.actor_id,
+                               e.actor_source, c.visibility, c.created_by,
+                               NULL AS importance, NULL AS source_event_id,
+                               NULL AS updated_at, NULL AS owner_email
+                        FROM event_fts
+                        JOIN events AS e ON e.id = event_fts.rowid
+                        JOIN conversations AS c ON c.id = e.conversation_id
+                        WHERE event_fts MATCH ?
+                          AND (c.visibility = 'shared' OR c.owner_email = ?)
+                    """
+                    event_parameters = (normalized_query, actor.email)
+                else:
+                    event_sql = """
+                        SELECT 'event' AS record_type, e.id, e.content,
+                               0.0 AS rank, e.created_at, e.kind, e.role,
+                               e.conversation_id, e.actor_id, e.actor_source,
+                               c.visibility, c.created_by, NULL AS importance,
+                               NULL AS source_event_id, NULL AS updated_at,
+                               NULL AS owner_email
+                        FROM events AS e
+                        JOIN conversations AS c ON c.id = e.conversation_id
+                        WHERE (c.visibility = 'shared' OR c.owner_email = ?)
+                    """
+                    event_parameters = (actor.email,)
+                rows.extend(connection.execute(event_sql, event_parameters).fetchall())
+
+            results = [self._search_result(connection, row, actor) for row in rows]
+        results.sort(key=lambda item: item.created_at, reverse=True)
+        if normalized_query:
+            results.sort(key=lambda item: item.rank)
+        return results if bounded_limit is None else results[:bounded_limit]
+
+    def update_memory(
+        self,
+        memory_id: int,
+        *,
+        importance: float | None = None,
+        tags: Iterable[str] | None = None,
+        actor: Actor = VOICE_ACTOR,
     ) -> bool:
+        normalized_tags = None
+        if tags is not None:
+            normalized_tags = sorted(
+                {tag.strip().casefold() for tag in tags if tag.strip()}
+            )
         with self.connect() as connection:
-            cursor = connection.execute(
+            accessible = connection.execute(
                 """
-                DELETE FROM memories
+                SELECT 1 FROM memories
                 WHERE id = ? AND (visibility = 'shared' OR owner_email = ?)
                 """,
                 (memory_id, actor.email),
+            ).fetchone()
+            if accessible is None:
+                return False
+            if importance is not None:
+                connection.execute(
+                    "UPDATE memories SET importance = ? WHERE id = ?",
+                    (importance, memory_id),
+                )
+            if normalized_tags is not None:
+                connection.execute(
+                    "DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,)
+                )
+                for tag_name in normalized_tags:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO tags(name) VALUES (?)", (tag_name,)
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO memory_tags(memory_id, tag_id)
+                        SELECT ?, id FROM tags WHERE name = ?
+                        """,
+                        (memory_id, tag_name),
+                    )
+                connection.execute(
+                    "DELETE FROM tags WHERE NOT EXISTS "
+                    "(SELECT 1 FROM memory_tags WHERE memory_tags.tag_id = tags.id)"
+                )
+            if importance is not None or normalized_tags is not None:
+                connection.execute(
+                    "UPDATE memories SET updated_at = ? WHERE id = ?",
+                    (utc_now(), memory_id),
+                )
+            return True
+
+    def prune_preview(
+        self,
+        *,
+        older_than_days: int | None = None,
+        topic: str = "",
+        actor: Actor = VOICE_ACTOR,
+        limit: int = 500,
+    ) -> tuple[list[SearchResult], DeletionResult]:
+        if older_than_days is None and not topic.strip():
+            raise ValueError("an age or topic is required")
+        candidates = self.search(topic, limit=None, actor=actor)
+        if older_than_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+            candidates = [
+                item
+                for item in candidates
+                if datetime.fromisoformat(item.created_at) < cutoff
+            ]
+        candidates = candidates[: max(1, min(limit, 5000))]
+        selections = [(item.record_type, item.record_id) for item in candidates]
+        with self.connect() as connection:
+            _, derived, embeddings = self._deletion_plan(
+                connection, selections, actor
             )
+        selected_memories = {
+            item.record_id for item in candidates if item.record_type == "memory"
+        }
+        return candidates, DeletionResult(
+            len(candidates), len(derived - selected_memories), embeddings
+        )
+
+    def delete_records(
+        self,
+        records: Iterable[tuple[str, int]],
+        *,
+        actor: Actor = VOICE_ACTOR,
+    ) -> DeletionResult:
+        selections = list(dict.fromkeys(records))
+        if not selections:
+            return DeletionResult(0, 0, 0)
+        with self.connect() as connection:
+            plan, derived, embeddings = self._deletion_plan(
+                connection, selections, actor
+            )
+            selected_memories = {
+                identifier for kind, identifier in plan if kind == "memory"
+            }
+            selected_events = {
+                identifier for kind, identifier in plan if kind == "event"
+            }
+            memory_ids = selected_memories | derived
+            for memory_id in memory_ids:
+                connection.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            for event_id in selected_events:
+                connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
             connection.execute(
                 "DELETE FROM tags WHERE NOT EXISTS "
                 "(SELECT 1 FROM memory_tags WHERE memory_tags.tag_id = tags.id)"
             )
-            return cursor.rowcount == 1
+        return DeletionResult(len(plan), len(derived - selected_memories), embeddings)
+
+    def delete_memory(
+        self, memory_id: int, *, actor: Actor = VOICE_ACTOR
+    ) -> bool:
+        try:
+            result = self.delete_records((("memory", memory_id),), actor=actor)
+        except PermissionError:
+            return False
+        return result.records_deleted == 1
 
     def delete_event(
         self,
@@ -471,7 +667,150 @@ class MemoryStore:
         delete_derived: bool = True,
         actor: Actor = VOICE_ACTOR,
     ) -> bool:
-        with self.connect() as connection:
+        if not delete_derived:
+            with self.connect() as connection:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM events
+                    WHERE id IN (
+                        SELECT e.id FROM events AS e
+                        JOIN conversations AS c ON c.id = e.conversation_id
+                        WHERE e.id = ?
+                          AND (c.visibility = 'shared' OR c.owner_email = ?)
+                    )
+                    """,
+                    (event_id, actor.email),
+                )
+                return cursor.rowcount == 1
+        try:
+            result = self.delete_records((("event", event_id),), actor=actor)
+        except PermissionError:
+            return False
+        return result.records_deleted == 1
+
+    def _search_result(
+        self, connection: sqlite3.Connection, row: sqlite3.Row, actor: Actor
+    ) -> SearchResult:
+        if row["record_type"] == "memory":
+            tags = tuple(
+                value["name"]
+                for value in connection.execute(
+                    """
+                    SELECT t.name FROM tags AS t
+                    JOIN memory_tags AS mt ON mt.tag_id = t.id
+                    WHERE mt.memory_id = ? ORDER BY t.name COLLATE NOCASE
+                    """,
+                    (row["id"],),
+                )
+            )
+            sources: list[Mapping[str, object]] = [
+                {
+                    "source_type": value["source_type"],
+                    "source_id": value["source_id"],
+                    "uri": value["uri"],
+                }
+                for value in connection.execute(
+                    """
+                    SELECT source_type, source_id, uri FROM source_links
+                    WHERE memory_id = ? ORDER BY id
+                    """,
+                    (row["id"],),
+                )
+            ]
+            if row["source_event_id"] is not None:
+                source = connection.execute(
+                    """
+                    SELECT e.id, e.conversation_id, e.kind, e.role, e.content,
+                           e.created_at, e.actor_id, e.actor_source
+                    FROM events AS e
+                    JOIN conversations AS c ON c.id = e.conversation_id
+                    WHERE e.id = ?
+                      AND (c.visibility = 'shared' OR c.owner_email = ?)
+                    """,
+                    (row["source_event_id"], actor.email),
+                ).fetchone()
+                if source is not None:
+                    sources.insert(
+                        0,
+                        {
+                            "source_type": "transcript",
+                            "source_id": str(source["id"]),
+                            "conversation_id": source["conversation_id"],
+                            "kind": source["kind"],
+                            "role": source["role"],
+                            "content": source["content"],
+                            "created_at": source["created_at"],
+                            "actor_id": source["actor_id"],
+                            "actor_source": source["actor_source"],
+                        },
+                    )
+            return SearchResult(
+                record_type="memory",
+                record_id=row["id"],
+                content=row["content"],
+                rank=float(row["rank"]),
+                created_at=row["created_at"],
+                kind=row["kind"],
+                role=None,
+                conversation_id=None,
+                importance=float(row["importance"]),
+                tags=tags,
+                source_event_id=row["source_event_id"],
+                sources=tuple(sources),
+                visibility=row["visibility"],
+                created_by=row["created_by"],
+            )
+        return SearchResult(
+            record_type="event",
+            record_id=row["id"],
+            content=row["content"],
+            rank=float(row["rank"]),
+            created_at=row["created_at"],
+            kind=row["kind"],
+            role=row["role"],
+            conversation_id=row["conversation_id"],
+            importance=None,
+            tags=(),
+            source_event_id=None,
+            sources=(
+                {
+                    "source_type": "transcript",
+                    "source_id": str(row["id"]),
+                    "conversation_id": row["conversation_id"],
+                    "kind": row["kind"],
+                    "role": row["role"],
+                    "actor_id": row["actor_id"],
+                    "actor_source": row["actor_source"],
+                },
+            ),
+            visibility=row["visibility"],
+            created_by=row["actor_id"],
+        )
+
+    def _deletion_plan(
+        self,
+        connection: sqlite3.Connection,
+        selections: Iterable[tuple[str, int]],
+        actor: Actor,
+    ) -> tuple[set[tuple[str, int]], set[int], int]:
+        plan = set(selections)
+        if any(kind not in {"memory", "event"} for kind, _ in plan):
+            raise ValueError("record type must be memory or event")
+        selected_memories = {
+            identifier for kind, identifier in plan if kind == "memory"
+        }
+        selected_events = {identifier for kind, identifier in plan if kind == "event"}
+        for memory_id in selected_memories:
+            accessible = connection.execute(
+                """
+                SELECT 1 FROM memories
+                WHERE id = ? AND (visibility = 'shared' OR owner_email = ?)
+                """,
+                (memory_id, actor.email),
+            ).fetchone()
+            if accessible is None:
+                raise PermissionError("memory record is not accessible")
+        for event_id in selected_events:
             accessible = connection.execute(
                 """
                 SELECT 1 FROM events AS e
@@ -481,17 +820,54 @@ class MemoryStore:
                 (event_id, actor.email),
             ).fetchone()
             if accessible is None:
-                return False
-            if delete_derived:
-                connection.execute(
-                    "DELETE FROM memories WHERE source_event_id = ?", (event_id,)
+                raise PermissionError("transcript record is not accessible")
+
+        derived: set[int] = set()
+        for event_id in selected_events:
+            derived.update(
+                value["id"]
+                for value in connection.execute(
+                    """
+                    SELECT m.id FROM memories AS m
+                    WHERE m.source_event_id = ? OR EXISTS (
+                        SELECT 1 FROM source_links AS sl
+                        WHERE sl.memory_id = m.id
+                          AND sl.source_type IN ('event', 'transcript')
+                          AND sl.source_id = ?
+                    )
+                    """,
+                    (event_id, str(event_id)),
                 )
-            cursor = connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
-            connection.execute(
-                "DELETE FROM tags WHERE NOT EXISTS "
-                "(SELECT 1 FROM memory_tags WHERE memory_tags.tag_id = tags.id)"
             )
-            return cursor.rowcount == 1
+        frontier = set(selected_memories) | derived
+        visited: set[int] = set()
+        while frontier:
+            source_id = frontier.pop()
+            if source_id in visited:
+                continue
+            visited.add(source_id)
+            dependents = {
+                value["id"]
+                for value in connection.execute(
+                    """
+                    SELECT m.id FROM memories AS m
+                    JOIN source_links AS sl ON sl.memory_id = m.id
+                    WHERE sl.source_type = 'memory' AND sl.source_id = ?
+                    """,
+                    (str(source_id),),
+                )
+            }
+            derived.update(dependents)
+            frontier.update(dependents - visited)
+        all_memory_ids = selected_memories | derived
+        embeddings = sum(
+            connection.execute(
+                "SELECT count(*) FROM memory_embeddings WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()[0]
+            for memory_id in all_memory_ids
+        )
+        return plan, derived, embeddings
 
     @staticmethod
     def _conversation_accessible(

@@ -9,6 +9,10 @@ const state = {
   reconnectTimer: null,
   reconnectDelay: 3000,
   statusInFlight: false,
+  memoryRecords: new Map(),
+  selectedMemory: new Set(),
+  memoryLoaded: false,
+  memoryTag: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -396,26 +400,268 @@ function emptyNode(text) {
   return node;
 }
 
+function memoryKey(record) {
+  return record.record_type + ":" + record.record_id;
+}
+
+function memoryKindLabel(record) {
+  if (record.record_type === "event") {
+    return record.role ? record.role + " transcript" : "Transcript";
+  }
+  if (record.kind === "inferred" && record.importance >= 0.9) {
+    return "Inferred · important";
+  }
+  return record.kind;
+}
+
+function renderMemoryResults(results, summary = "") {
+  state.memoryRecords = new Map(results.map((record) => [memoryKey(record), record]));
+  state.selectedMemory.clear();
+  $("#delete-memory").disabled = true;
+  $("#delete-memory").textContent = "Delete selected";
+  $("#memory-count").textContent = summary
+    || results.length + " record" + (results.length === 1 ? "" : "s");
+  const nodes = results.map((result) => {
+    const item = document.createElement("article");
+    item.className = "memory-item";
+
+    const select = document.createElement("input");
+    select.type = "checkbox";
+    select.className = "memory-select";
+    select.setAttribute("aria-label", "Select " + memoryKindLabel(result));
+    select.dataset.memoryKey = memoryKey(result);
+
+    const copy = document.createElement("div");
+    copy.className = "memory-copy";
+    const top = document.createElement("div");
+    top.className = "memory-top";
+    const title = document.createElement("strong");
+    title.textContent = memoryKindLabel(result);
+    top.append(title);
+
+    if (result.record_type === "memory") {
+      const important = document.createElement("button");
+      important.type = "button";
+      important.className = "important-button"
+        + (result.importance >= 0.9 ? " active" : "");
+      important.dataset.importantKey = memoryKey(result);
+      important.textContent = result.importance >= 0.9
+        ? "★ Important"
+        : "☆ Mark important";
+      top.append(important);
+    }
+
+    const content = document.createElement("p");
+    content.textContent = result.content || "(no text recorded)";
+    const meta = document.createElement("span");
+    meta.className = "memory-meta";
+    const importance = result.importance == null
+      ? ""
+      : " · importance " + Math.round(result.importance * 100) + "%";
+    meta.textContent = new Date(result.created_at).toLocaleString()
+      + " · " + result.visibility + " · " + result.created_by + importance;
+    copy.append(top, content, meta);
+
+    if (result.tags.length) {
+      const tags = document.createElement("div");
+      tags.className = "memory-tags";
+      result.tags.forEach((name) => {
+        const tag = document.createElement("button");
+        tag.type = "button";
+        tag.className = "memory-tag";
+        tag.dataset.memoryTag = name;
+        tag.textContent = name;
+        tags.append(tag);
+      });
+      copy.append(tags);
+    }
+
+    if (result.sources.length) {
+      const source = document.createElement("details");
+      source.className = "memory-source";
+      const sourceTitle = document.createElement("summary");
+      sourceTitle.textContent = "Provenance · " + result.sources.length
+        + " source" + (result.sources.length === 1 ? "" : "s");
+      source.append(sourceTitle);
+      result.sources.forEach((value) => {
+        const line = document.createElement("p");
+        const detail = value.content ? " — " + value.content : "";
+        line.textContent = value.source_type + " · " + value.source_id + detail;
+        source.append(line);
+      });
+      copy.append(source);
+    }
+
+    item.append(select, copy);
+    return item;
+  });
+  $("#memory-results").replaceChildren(
+    ...(nodes.length ? nodes : [emptyNode("No matches")]),
+  );
+}
+
 async function searchMemory(event) {
-  event.preventDefault();
+  if (event) {
+    event.preventDefault();
+    state.memoryTag = "";
+  }
   const query = $("#memory-query").value.trim();
-  if (!query) return;
   $("#memory-results").replaceChildren(emptyNode("Searching local memory…"));
   try {
-    const data = await api(`/api/memory?q=${encodeURIComponent(query)}`);
-    const nodes = data.results.map((result) => {
-      const item = document.createElement("div");
-      item.className = "memory-item";
-      const title = document.createElement("strong");
-      title.textContent = `${result.record_type} · ${new Date(result.created_at).toLocaleString()}`;
-      const content = document.createElement("p");
-      content.textContent = result.content;
-      item.append(title, content);
-      return item;
-    });
-    $("#memory-results").replaceChildren(...(nodes.length ? nodes : [emptyNode("No matches")]));
+    const kind = $("#memory-kind").value;
+    const parameters = new URLSearchParams({ q: query });
+    if (kind === "transcript") parameters.set("record_type", "event");
+    else if (kind) parameters.set("kind", kind);
+    if (state.memoryTag) parameters.set("tag", state.memoryTag);
+    const data = await api("/api/memory?" + parameters);
+    const summary = state.memoryTag
+      ? data.results.length + " tagged “" + state.memoryTag + "”"
+      : "";
+    renderMemoryResults(data.results, summary);
+    state.memoryLoaded = true;
   } catch (error) {
     $("#memory-results").replaceChildren(emptyNode(error.message));
+  }
+}
+
+function parsedTags(value) {
+  return [...new Set(value.split(",").map((tag) => tag.trim()).filter(Boolean))]
+    .slice(0, 20);
+}
+
+async function rememberMemory(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  try {
+    await api("/api/memory", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "remember",
+        content: $("#remember-content").value,
+        tags: parsedTags($("#remember-tags").value),
+        visibility: $("#remember-visibility").value,
+      }),
+    });
+    event.currentTarget.reset();
+    state.memoryTag = "";
+    $("#memory-query").value = "";
+    $("#memory-kind").value = "";
+    await searchMemory();
+  } catch (error) {
+    $("#memory-count").textContent = error.message;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function toggleImportant(key) {
+  const record = state.memoryRecords.get(key);
+  if (!record || record.record_type !== "memory") return;
+  const active = record.importance >= 0.9;
+  const tags = active
+    ? record.tags.filter((tag) => tag !== "important")
+    : [...new Set([...record.tags, "important"])];
+  try {
+    await api("/api/memory", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "update",
+        record_id: record.record_id,
+        importance: active ? 0.5 : 1,
+        tags,
+      }),
+    });
+    await searchMemory();
+  } catch (error) {
+    $("#memory-count").textContent = error.message;
+  }
+}
+
+function updateMemorySelection(key, selected) {
+  if (selected) state.selectedMemory.add(key);
+  else state.selectedMemory.delete(key);
+  const count = state.selectedMemory.size;
+  $("#delete-memory").disabled = count === 0;
+  $("#delete-memory").textContent = count
+    ? "Delete selected (" + count + ")"
+    : "Delete selected";
+}
+
+async function previewPruning(event) {
+  event.preventDefault();
+  const rawDays = $("#prune-days").value;
+  const topic = $("#prune-topic").value.trim();
+  if (!rawDays && !topic) {
+    $("#memory-count").textContent = "Enter an age or topic to preview";
+    return;
+  }
+  $("#memory-results").replaceChildren(emptyNode("Building a deletion preview…"));
+  try {
+    const data = await api("/api/memory", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "preview_prune",
+        older_than_days: rawDays ? Number(rawDays) : null,
+        topic,
+      }),
+    });
+    const impact = data.impact;
+    renderMemoryResults(
+      data.candidates,
+      "Preview: " + impact.records + " records, "
+        + impact.derived_memories + " derived, "
+        + impact.embeddings + " embeddings",
+    );
+  } catch (error) {
+    $("#memory-results").replaceChildren(emptyNode(error.message));
+  }
+}
+
+async function deleteSelectedMemory() {
+  const records = [...state.selectedMemory]
+    .map((key) => state.memoryRecords.get(key));
+  if (!records.length) return;
+  const suffix = records.length === 1 ? "" : "s";
+  if (!window.confirm(
+    "Permanently delete " + records.length + " selected record" + suffix
+      + " and its derived data?",
+  )) return;
+  try {
+    const data = await api("/api/memory", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "delete",
+        records: records.map(({ record_type, record_id }) => ({
+          record_type,
+          record_id,
+        })),
+      }),
+    });
+    const deleted = data.deleted;
+    await searchMemory();
+    $("#memory-count").textContent = "Deleted " + deleted.records
+      + " selected and " + deleted.derived_memories + " derived records";
+  } catch (error) {
+    $("#memory-count").textContent = error.message;
+  }
+}
+
+async function exportMemory() {
+  try {
+    const data = await api("/api/memory/export");
+    const blob = new Blob(
+      [JSON.stringify(data, null, 2)],
+      { type: "application/json" },
+    );
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "miso-memory-" + new Date().toISOString().slice(0, 10) + ".json";
+    link.click();
+    URL.revokeObjectURL(link.href);
+    $("#memory-count").textContent = "Exported " + data.records.length + " records";
+  } catch (error) {
+    $("#memory-count").textContent = error.message;
   }
 }
 
@@ -457,7 +703,10 @@ function activateTab(name) {
     $(`#${view}-view`).classList.toggle("hidden", view !== name);
   });
   if (name === "activity") loadActivity();
-  if (name === "memory") requestAnimationFrame(() => $("#memory-query").focus());
+  if (name === "memory") {
+    if (!state.memoryLoaded) searchMemory();
+    requestAnimationFrame(() => $("#memory-query").focus());
+  }
 }
 
 function openPanel(name = "activity") {
@@ -524,6 +773,29 @@ $("#messages").addEventListener("click", (event) => {
 $("#cancel-chat").addEventListener("click", cancelChat);
 $("#new-chat").addEventListener("click", resetConversation);
 $("#memory-form").addEventListener("submit", searchMemory);
+$("#remember-form").addEventListener("submit", rememberMemory);
+$("#prune-form").addEventListener("submit", previewPruning);
+$("#delete-memory").addEventListener("click", deleteSelectedMemory);
+$("#export-memory").addEventListener("click", exportMemory);
+$("#memory-results").addEventListener("change", (event) => {
+  if (event.target.matches("[data-memory-key]")) {
+    updateMemorySelection(event.target.dataset.memoryKey, event.target.checked);
+  }
+});
+$("#memory-results").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-important-key]");
+  if (button) {
+    toggleImportant(button.dataset.importantKey);
+    return;
+  }
+  const tag = event.target.closest("[data-memory-tag]");
+  if (tag) {
+    state.memoryTag = tag.dataset.memoryTag;
+    $("#memory-query").value = "";
+    $("#memory-kind").value = "";
+    searchMemory();
+  }
+});
 $("#refresh-status").addEventListener("click", loadStatus);
 $("#refresh-activity").addEventListener("click", loadActivity);
 $("#service-status").addEventListener("click", loadStatus);

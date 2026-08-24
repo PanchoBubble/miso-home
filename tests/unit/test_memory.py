@@ -73,6 +73,91 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(spanish[0].record_type, "event")
         self.assertIn("café", spanish[0].content)
         self.assertEqual(english[0].record_type, "memory")
+        self.assertEqual(english[0].tags, ("household", "recycling"))
+        self.assertEqual(english[0].sources[0]["source_type"], "transcript")
+        self.assertIn("Recuérdame", english[0].sources[0]["content"])
+
+    def test_browses_filters_and_updates_memory_controls(self) -> None:
+        routine = self.store.add_memory(
+            "Take the bins out every Thursday",
+            kind="routine",
+            importance=0.6,
+            tags=("household", "bins"),
+        )
+        self.store.add_memory(
+            "The kitchen gets busy at seven",
+            kind="inferred",
+            importance=0.9,
+            tags=("important",),
+        )
+
+        recent = self.store.search("")
+        routines = self.store.search("", kinds=("routine",))
+        tagged = self.store.search("", tag="BINS")
+        self.assertEqual(len(recent), 2)
+        self.assertEqual([item.record_id for item in routines], [routine])
+        self.assertEqual([item.record_id for item in tagged], [routine])
+
+        self.assertTrue(
+            self.store.update_memory(
+                routine, importance=1.0, tags=("important", "recycling")
+            )
+        )
+        updated = self.store.search("", kinds=("routine",))[0]
+        self.assertEqual(updated.importance, 1.0)
+        self.assertEqual(updated.tags, ("important", "recycling"))
+
+    def test_prune_preview_and_delete_include_summaries_and_embeddings(self) -> None:
+        conversation = self.store.create_conversation()
+        event = self.store.append_event(
+            conversation,
+            kind="message",
+            role="user",
+            content="temporary travel plan",
+        )
+        base = self.store.add_memory(
+            "temporary destination",
+            source_event_id=event,
+            tags=("temporary",),
+        )
+        summary = self.store.add_memory(
+            "temporary trip summary",
+            kind="summary",
+            source_links=(
+                {
+                    "source_type": "memory",
+                    "source_id": str(base),
+                    "uri": None,
+                },
+            ),
+        )
+        with self.store.connect() as connection:
+            for memory_id in (base, summary):
+                connection.execute(
+                    """
+                    INSERT INTO memory_embeddings(memory_id, model, embedding, created_at)
+                    VALUES (?, 'test-model', ?, '2026-08-24T00:00:00+00:00')
+                    """,
+                    (memory_id, b"vector"),
+                )
+
+        candidates, impact = self.store.prune_preview(topic="travel")
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(impact.derived_memories_deleted, 2)
+        self.assertEqual(impact.embeddings_deleted, 2)
+
+        deleted = self.store.delete_records((("event", event),))
+        self.assertEqual(deleted.records_deleted, 1)
+        self.assertEqual(deleted.derived_memories_deleted, 2)
+        self.assertEqual(deleted.embeddings_deleted, 2)
+        self.assertFalse(self.store.search("temporary"))
+        with self.store.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT count(*) FROM memory_embeddings"
+                ).fetchone()[0],
+                0,
+            )
 
     def test_delete_event_removes_derived_memory_and_fts_rows(self) -> None:
         conversation = self.store.create_conversation()

@@ -103,6 +103,9 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'rel="manifest"', content)
         self.assertIn(b'href="/favicon-32.png"', content)
         self.assertIn(b'id="install-app"', content)
+        self.assertIn(b'id="remember-form"', content)
+        self.assertIn(b'id="prune-form"', content)
+        self.assertIn(b'id="export-memory"', content)
         self.assertIn(b'http://miso.local/', content)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
         response, javascript = self.request("GET", "/app.js")
@@ -114,6 +117,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b"friendlyToolName", javascript)
         self.assertIn(b"beforeinstallprompt", javascript)
         self.assertIn(b"navigator.serviceWorker.register", javascript)
+        self.assertIn(b"preview_prune", javascript)
+        self.assertIn(b"deleteSelectedMemory", javascript)
 
         response, content = self.request("GET", "/manifest.webmanifest")
         manifest = json.loads(content)
@@ -131,6 +136,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
+        self.assertIn(b'miso-shell-v5', service_worker)
         self.assertNotIn(b'caches.match(request)', service_worker)
 
         response, icon = self.request("GET", "/icon-192.png")
@@ -221,6 +227,79 @@ class DashboardIntegrationTests(unittest.TestCase):
         expected = ("private", "local@miso.invalid", "local@miso.invalid")
         self.assertEqual(tuple(conversation), expected)
         self.assertEqual(tuple(timer), expected)
+
+    def test_memory_management_api_remembers_exports_previews_and_deletes(self) -> None:
+        response, content = self.request(
+            "POST",
+            "/api/memory",
+            {
+                "action": "remember",
+                "content": "Keep the spare key in the blue drawer",
+                "tags": ["Household", "Key"],
+                "visibility": "private",
+            },
+        )
+        created = json.loads(content)["record"]
+        self.assertEqual(response.status, 201)
+        self.assertEqual(created["kind"], "explicit")
+        self.assertEqual(created["importance"], 1.0)
+        self.assertEqual(created["tags"], ["household", "key"])
+        self.assertEqual(created["visibility"], "private")
+
+        response, content = self.request("GET", "/api/memory?kind=explicit")
+        results = json.loads(content)["results"]
+        self.assertEqual(response.status, 200)
+        self.assertEqual([item["record_id"] for item in results], [created["record_id"]])
+
+        response, content = self.request(
+            "POST",
+            "/api/memory",
+            {
+                "action": "update",
+                "record_id": created["record_id"],
+                "importance": 0.75,
+                "tags": ["household", "security"],
+            },
+        )
+        updated = json.loads(content)["record"]
+        self.assertEqual(response.status, 200)
+        self.assertEqual(updated["importance"], 0.75)
+        self.assertEqual(updated["tags"], ["household", "security"])
+
+        response, content = self.request("GET", "/api/memory/export")
+        exported = json.loads(content)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(exported["schema_version"], 1)
+        self.assertEqual(len(exported["records"]), 1)
+        self.assertEqual(exported["actor"]["id"], "local@miso.invalid")
+
+        response, content = self.request(
+            "POST",
+            "/api/memory",
+            {"action": "preview_prune", "topic": "drawer"},
+        )
+        preview = json.loads(content)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(preview["impact"]["records"], 1)
+        self.assertEqual(preview["candidates"][0]["record_id"], created["record_id"])
+
+        response, content = self.request(
+            "POST",
+            "/api/memory",
+            {
+                "action": "delete",
+                "records": [
+                    {
+                        "record_type": "memory",
+                        "record_id": created["record_id"],
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(content)["deleted"]["records"], 1)
+        response, content = self.request("GET", "/api/memory?q=drawer")
+        self.assertEqual(json.loads(content)["results"], [])
 
     def test_developer_mode_is_visible_expiring_and_command_is_scoped(self) -> None:
         response, content = self.request(

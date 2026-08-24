@@ -134,13 +134,46 @@
 
         <section id="memory-view" class="panel-view hidden" role="tabpanel">
           <div class="section-heading">
-            <div><h3>Search memory</h3><p>Find conversation fragments and remembered household facts.</p></div>
+            <div><h3>Memory library</h3><p>Search facts and transcripts, inspect their source, and manage what Miso retains.</p></div>
+            <button id="export-memory" class="quiet-button" type="button">Export</button>
           </div>
+          <form id="remember-form" class="memory-control">
+            <label for="remember-content">Remember something explicitly</label>
+            <textarea id="remember-content" rows="2" maxlength="4000" placeholder="The blue bin is collected on Friday" required></textarea>
+            <div class="memory-fields">
+              <label>Tags<input id="remember-tags" maxlength="300" placeholder="recycling, household"></label>
+              <label>Visibility<select id="remember-visibility"><option value="private">Private</option><option value="shared">Household</option></select></label>
+            </div>
+            <button type="submit">Remember</button>
+          </form>
           <form id="memory-form" class="search-form">
             <label class="sr-only" for="memory-query">Search memory</label>
-            <input id="memory-query" placeholder="Try “recycling”" maxlength="500">
+            <input id="memory-query" placeholder="Search or leave blank for recent" maxlength="500">
+            <label class="sr-only" for="memory-kind">Memory type</label>
+            <select id="memory-kind">
+              <option value="">Everything</option>
+              <option value="transcript">Transcripts</option>
+              <option value="explicit">Explicit</option>
+              <option value="inferred">Inferred</option>
+              <option value="routine">Routines</option>
+              <option value="summary">Summaries</option>
+            </select>
             <button type="submit">Search</button>
           </form>
+          <div class="memory-actions">
+            <span id="memory-count" aria-live="polite">Browse recent records</span>
+            <button id="delete-memory" class="warning-button" type="button" disabled>Delete selected</button>
+          </div>
+          <details class="prune-control">
+            <summary>Preview pruning</summary>
+            <form id="prune-form" class="memory-control">
+              <div class="memory-fields">
+                <label>Older than<input id="prune-days" type="number" min="1" max="36500" placeholder="days"></label>
+                <label>Topic<input id="prune-topic" maxlength="500" placeholder="temporary"></label>
+              </div>
+              <button type="submit">Preview only</button>
+            </form>
+          </details>
           <div id="memory-results" class="memory-results"></div>
         </section>
 

@@ -120,6 +120,13 @@ searches SQLite memory, and reads redacted tool/routing activity. Chat history
 is retained under a conversation ID without exposing database paths, provider
 URLs, API keys, or environment values to the browser.
 
+The Memory view browses explicit, inferred, routine, summary, and transcript
+records under the same household visibility policy. Members can add tagged
+explicit memories, inspect transcript provenance, mark records important,
+export their accessible records, preview age- or topic-based pruning, and
+select records for permanent deletion. Deleting a source also removes dependent
+summaries, tags, full-text rows, and embedding rows in the same transaction.
+
 Loopback access works without a token for local development and SSH forwarding.
 Any non-loopback `MISO_HOST` requires `MISO_DASHBOARD_TOKEN`; the browser keeps
 that token in session storage only. Developer mode is visibly disabled by

@@ -27,7 +27,7 @@ from miso.identity import (
     SYSTEM_ACTOR,
     VOICE_ACTOR,
 )
-from miso.memory import MemoryStore
+from miso.memory import MemoryStore, SearchResult, utc_now
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError, create_router
 from miso.speech import PiperBackend, PiperVoice, SpeechError, SpeechManager
@@ -213,8 +213,15 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             elif parsed.path == "/api/identity":
                 self._identity()
             elif parsed.path == "/api/memory":
-                query = parse_qs(parsed.query).get("q", [""])[0]
-                self._memory(query)
+                parameters = parse_qs(parsed.query)
+                self._memory(
+                    parameters.get("q", [""])[0],
+                    kind=parameters.get("kind", [""])[0],
+                    tag=parameters.get("tag", [""])[0],
+                    record_type=parameters.get("record_type", [""])[0],
+                )
+            elif parsed.path == "/api/memory/export":
+                self._memory_export()
             elif parsed.path == "/api/activity":
                 raw_limit = parse_qs(parsed.query).get("limit", ["50"])[0]
                 try:
@@ -263,6 +270,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         HTTPStatus.OK,
                         {"cancelled": self.miso.speech_manager.cancel(request_id)},
                     )
+            elif parsed.path == "/api/memory":
+                self._memory_action(payload)
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -351,32 +360,184 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 return
             self._json(HTTPStatus.ACCEPTED, {"request_id": request_id})
 
-        def _memory(self, query: str) -> None:
-            if len(query) > 500:
+        def _memory(
+            self, query: str, *, kind: str, tag: str, record_type: str
+        ) -> None:
+            if len(query) > 500 or len(tag) > 64:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "query_too_long"})
                 return
+            kinds = () if not kind else (kind,)
+            record_types = (
+                ("memory", "event") if not record_type else (record_type,)
+            )
             try:
                 results = self.miso.memory_store.search(
-                    query, limit=30, actor=self._actor()
+                    query,
+                    limit=100,
+                    actor=self._actor(),
+                    kinds=kinds,
+                    tag=tag,
+                    record_types=record_types,
                 )
             except Exception:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_search"})
                 return
             self._json(
                 HTTPStatus.OK,
+                {"results": [_memory_result_payload(item) for item in results]},
+            )
+
+        def _memory_export(self) -> None:
+            records = self.miso.memory_store.search(
+                "", limit=None, actor=self._actor()
+            )
+            self._json(
+                HTTPStatus.OK,
                 {
-                    "results": [
-                        {
-                            "record_type": item.record_type,
-                            "record_id": item.record_id,
-                            "content": item.content,
-                            "rank": item.rank,
-                            "created_at": item.created_at,
-                        }
-                        for item in results
-                    ]
+                    "schema_version": 1,
+                    "exported_at": utc_now(),
+                    "actor": self._actor().public_dict(),
+                    "records": [_memory_result_payload(item) for item in records],
                 },
             )
+
+        def _memory_action(self, payload: dict[str, object]) -> None:
+            action = payload.get("action")
+            actor = self._actor()
+            try:
+                if action == "remember":
+                    content = payload.get("content")
+                    visibility = payload.get("visibility", "private")
+                    if (
+                        not isinstance(content, str)
+                        or not 1 <= len(content.strip()) <= 4000
+                    ):
+                        raise ValueError("invalid_memory_content")
+                    if visibility not in {"shared", "private"}:
+                        raise ValueError("invalid_visibility")
+                    tags = _memory_tags(payload.get("tags", []))
+                    memory_id = self.miso.memory_store.add_memory(
+                        content.strip(),
+                        kind="explicit",
+                        importance=1.0,
+                        tags=tags,
+                        actor=actor,
+                        visibility=cast(str, visibility),
+                    )
+                    record = self._memory_record(memory_id)
+                    self._json(
+                        HTTPStatus.CREATED,
+                        {"record": _memory_result_payload(record)},
+                    )
+                    return
+                if action == "update":
+                    memory_id = _record_id(payload.get("record_id"))
+                    raw_importance = payload.get("importance")
+                    importance = None
+                    if raw_importance is not None:
+                        if isinstance(raw_importance, bool) or not isinstance(
+                            raw_importance, (int, float)
+                        ):
+                            raise ValueError("invalid_importance")
+                        importance = float(raw_importance)
+                        if not 0 <= importance <= 1:
+                            raise ValueError("invalid_importance")
+                    tags = None
+                    if "tags" in payload:
+                        tags = _memory_tags(payload["tags"])
+                    if importance is None and tags is None:
+                        raise ValueError("no_memory_changes")
+                    if not self.miso.memory_store.update_memory(
+                        memory_id, importance=importance, tags=tags, actor=actor
+                    ):
+                        self._json(
+                            HTTPStatus.NOT_FOUND, {"error": "memory_not_found"}
+                        )
+                        return
+                    record = self._memory_record(memory_id)
+                    self._json(
+                        HTTPStatus.OK,
+                        {"record": _memory_result_payload(record)},
+                    )
+                    return
+                if action == "preview_prune":
+                    raw_days = payload.get("older_than_days")
+                    days = None
+                    if raw_days is not None and raw_days != "":
+                        if (
+                            isinstance(raw_days, bool)
+                            or not isinstance(raw_days, int)
+                            or not 1 <= raw_days <= 36500
+                        ):
+                            raise ValueError("invalid_prune_age")
+                        days = raw_days
+                    topic = payload.get("topic", "")
+                    if not isinstance(topic, str) or len(topic) > 500:
+                        raise ValueError("invalid_prune_topic")
+                    candidates, impact = self.miso.memory_store.prune_preview(
+                        older_than_days=days, topic=topic, actor=actor
+                    )
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "candidates": [
+                                _memory_result_payload(item) for item in candidates
+                            ],
+                            "impact": {
+                                "records": impact.records_deleted,
+                                "derived_memories": impact.derived_memories_deleted,
+                                "embeddings": impact.embeddings_deleted,
+                            },
+                        },
+                    )
+                    return
+                if action == "delete":
+                    raw_records = payload.get("records")
+                    if (
+                        not isinstance(raw_records, list)
+                        or not 1 <= len(raw_records) <= 100
+                    ):
+                        raise ValueError("invalid_delete_selection")
+                    records: list[tuple[str, int]] = []
+                    for raw_record in raw_records:
+                        if not isinstance(raw_record, dict):
+                            raise ValueError("invalid_delete_selection")
+                        record_type = raw_record.get("record_type")
+                        if record_type not in {"memory", "event"}:
+                            raise ValueError("invalid_record_type")
+                        records.append(
+                            (
+                                cast(str, record_type),
+                                _record_id(raw_record.get("record_id")),
+                            )
+                        )
+                    deleted = self.miso.memory_store.delete_records(
+                        records, actor=actor
+                    )
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "deleted": {
+                                "records": deleted.records_deleted,
+                                "derived_memories": deleted.derived_memories_deleted,
+                                "embeddings": deleted.embeddings_deleted,
+                            }
+                        },
+                    )
+                    return
+                raise ValueError("invalid_memory_action")
+            except PermissionError:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "memory_not_found"})
+            except ValueError as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            except Exception:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "memory_action_failed"})
+
+        def _memory_record(self, memory_id: int) -> SearchResult:
+            records = self.miso.memory_store.search(
+                "", limit=None, actor=self._actor(), record_types=("memory",)
+            )
+            return next(item for item in records if item.record_id == memory_id)
 
         def _activity(self, limit: int) -> None:
             audit_root = self.miso.settings.state_dir / "audit"
@@ -643,6 +804,42 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             return
 
     return Handler
+
+
+def _memory_result_payload(item: SearchResult) -> dict[str, object]:
+    return {
+        "record_type": item.record_type,
+        "record_id": item.record_id,
+        "content": item.content,
+        "rank": item.rank,
+        "created_at": item.created_at,
+        "kind": item.kind,
+        "role": item.role,
+        "conversation_id": item.conversation_id,
+        "importance": item.importance,
+        "tags": list(item.tags),
+        "source_event_id": item.source_event_id,
+        "sources": list(item.sources),
+        "visibility": item.visibility,
+        "created_by": item.created_by,
+    }
+
+
+def _memory_tags(value: object) -> list[str]:
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValueError("invalid_memory_tags")
+    tags: list[str] = []
+    for tag in value:
+        if not isinstance(tag, str) or not 1 <= len(tag.strip()) <= 64:
+            raise ValueError("invalid_memory_tags")
+        tags.append(tag.strip())
+    return tags
+
+
+def _record_id(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("invalid_record_id")
+    return value
 
 
 def _jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:

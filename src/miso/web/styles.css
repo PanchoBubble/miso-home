@@ -197,7 +197,7 @@ h2 { letter-spacing: -0.025em; }
 .privacy-note { margin: 0 0 18px; color: #696f69; text-align: center; font-size: 0.59rem; }
 
 .panel-scrim { position: fixed; inset: 0; z-index: 29; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(3px); }
-.side-panel { position: fixed; inset: 0 0 0 auto; z-index: 30; width: min(440px, 100vw); display: grid; grid-template-rows: auto auto 1fr; border-left: 1px solid var(--line); background: #101311; box-shadow: var(--panel-shadow); transform: translateX(104%); visibility: hidden; transition: transform 190ms ease, visibility 190ms; }
+.side-panel { position: fixed; inset: 0 0 0 auto; z-index: 30; width: min(520px, 100vw); display: grid; grid-template-rows: auto auto 1fr; border-left: 1px solid var(--line); background: #101311; box-shadow: var(--panel-shadow); transform: translateX(104%); visibility: hidden; transition: transform 190ms ease, visibility 190ms; }
 .side-panel.open { transform: translateX(0); visibility: visible; }
 .panel-header { padding: 25px 24px 19px; display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .panel-header h2 { margin: 0; font-size: 1.25rem; }
@@ -217,11 +217,34 @@ h2 { letter-spacing: -0.025em; }
 .activity-copy, .provider-copy { min-width: 0; }
 .activity-item strong, .memory-item strong, .provider strong { display: block; margin-bottom: 4px; color: var(--ink-soft); font-size: 0.72rem; }
 .activity-item p, .memory-item p, .provider p { margin: 0; color: var(--muted); font-size: 0.66rem; line-height: 1.5; overflow-wrap: anywhere; }
-.memory-item { padding: 13px; }
+.memory-item { padding: 13px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 11px; }
 .memory-item p { color: var(--muted-strong); }
-.search-form { margin-bottom: 16px; display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.memory-select { width: 16px; min-height: 16px; margin: 3px 0 0; accent-color: var(--accent); }
+.memory-copy { min-width: 0; display: grid; gap: 8px; }
+.memory-top, .memory-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.memory-top strong { margin: 0; text-transform: capitalize; }
+.memory-meta { color: var(--muted); font-size: 0.61rem; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.memory-tag { padding: 3px 7px; border-color: transparent; border-radius: 999px; color: var(--accent-bright); background: var(--accent-soft); font-size: 0.58rem; }
+.memory-tag:hover { border-color: rgba(230, 162, 103, 0.45); background: rgba(230, 162, 103, 0.2); }
+.memory-source { border-top: 1px solid var(--line); padding-top: 7px; }
+.memory-source summary { color: var(--muted); cursor: pointer; font-size: 0.62rem; }
+.memory-source p { margin-top: 7px; font-size: 0.62rem; }
+.important-button { min-height: 29px; padding: 0 8px; border-radius: 8px; color: var(--muted-strong); background: transparent; font-size: 0.61rem; }
+.important-button.active { color: var(--accent-bright); border-color: rgba(230, 162, 103, 0.45); background: var(--accent-soft); }
+.search-form { margin-bottom: 12px; display: grid; grid-template-columns: minmax(0, 1fr) 120px auto; gap: 8px; }
 input, select { width: 100%; min-height: 40px; padding: 0 11px; border-radius: 10px; background: #0d100e; }
 .search-form button, .control-section button:not(.quiet-button):not(.warning-button) { padding: 0 13px; border-radius: 10px; background: var(--surface-raised); }
+.memory-control { margin-bottom: 14px; padding: 13px; display: grid; gap: 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.memory-control textarea { width: 100%; min-height: 64px; padding: 10px 11px; resize: vertical; border-radius: 10px; background: #0d100e; line-height: 1.45; }
+.memory-control > button { min-height: 36px; padding: 0 13px; border-radius: 10px; background: var(--surface-raised); justify-self: end; }
+.memory-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(110px, 0.55fr); gap: 8px; }
+.memory-fields label { display: grid; gap: 5px; }
+.memory-actions { min-height: 38px; margin-bottom: 8px; color: var(--muted); font-size: 0.64rem; }
+.memory-actions .warning-button { min-height: 32px; }
+.prune-control { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.prune-control > summary { padding: 11px 13px; color: var(--muted-strong); cursor: pointer; font-size: 0.68rem; }
+.prune-control .memory-control { margin: 0; padding-top: 3px; border: 0; }
 .empty { padding: 32px 8px; color: var(--muted); text-align: center; font-size: 0.72rem; }
 .control-section { margin-bottom: 12px; padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .field-grid { display: grid; gap: 7px; }
@@ -274,6 +297,9 @@ label { color: var(--muted-strong); font-size: 0.68rem; }
   .conversation-header { gap: 10px; }
   .conversation-header .quiet-button { padding-inline: 7px; }
   .route-chip span:last-child { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .search-form { grid-template-columns: minmax(0, 1fr) auto; }
+  .search-form select { grid-column: 1 / -1; grid-row: 2; }
+  .memory-fields { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
