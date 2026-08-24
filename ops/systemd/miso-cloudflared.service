@@ -8,7 +8,9 @@ Requires=miso.service
 [Service]
 Type=notify
 DynamicUser=yes
-ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token-file ${CREDENTIALS_DIRECTORY}/tunnel-token
+# Ignore every local cloudflared configuration file. This connector receives its
+# complete ingress configuration from the dedicated remotely managed tunnel.
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /dev/null tunnel run --token-file ${CREDENTIALS_DIRECTORY}/tunnel-token
 LoadCredential=tunnel-token:/etc/cloudflared/miso.token
 Restart=on-failure
 RestartSec=5s
