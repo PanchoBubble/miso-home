@@ -369,14 +369,19 @@ class DashboardAuthenticationTests(unittest.TestCase):
                 self.assertEqual(
                     json.loads(content)["actor"]["id"], "member@example.com"
                 )
-                status, _ = identity(
-                    {"Cf-Access-Jwt-Assertion": "unlisted-assertion"}
-                )
-                self.assertEqual(status, 401)
-                status, _ = identity(
-                    {"Cf-Access-Authenticated-User-Email": "member@example.com"}
-                )
-                self.assertEqual(status, 401)
+                with self.assertLogs("miso.http", level="WARNING") as captured:
+                    status, _ = identity(
+                        {"Cf-Access-Jwt-Assertion": "unlisted-assertion"}
+                    )
+                    self.assertEqual(status, 401)
+                    status, _ = identity(
+                        {"Cf-Access-Authenticated-User-Email": "member@example.com"}
+                    )
+                    self.assertEqual(status, 401)
+                diagnostic = "\n".join(captured.output)
+                self.assertIn("household allowlist", diagnostic)
+                self.assertIn("invalid assertion", diagnostic)
+                self.assertNotIn("unlisted-assertion", diagnostic)
             finally:
                 server.shutdown()
                 server.server_close()

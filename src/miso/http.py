@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import platform
 import threading
 import time
@@ -69,6 +70,7 @@ STATIC_ASSETS = {
     "/icon-512.png": "icon-512.png",
     "/icon-maskable-512.png": "icon-maskable-512.png",
 }
+LOGGER = logging.getLogger("miso.http")
 
 
 class MisoHTTPServer(ThreadingHTTPServer):
@@ -269,8 +271,12 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     email = self.miso.access_verifier.verify(assertion)
                     self._request_actor = self.miso.identity_policy.web_actor(email)
                     return True
-                except (AccessJWTError, PermissionError):
-                    pass
+                except AccessJWTError as error:
+                    LOGGER.warning("Cloudflare Access assertion rejected: %s", error)
+                except PermissionError:
+                    LOGGER.warning(
+                        "Cloudflare Access identity rejected by household allowlist"
+                    )
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
 
