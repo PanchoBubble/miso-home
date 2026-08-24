@@ -27,6 +27,8 @@ credential directory and runs as a dynamic unprivileged user. The runtime
 installer leaves the connector disabled when that root-only token file is
 absent. The legacy `cloudflared.service` can therefore continue unchanged while
 the Miso connector is deployed, verified, or rolled back independently.
+The connector explicitly ignores legacy configuration files and starts with a
+local deny-all bootstrap route until the remotely managed ingress arrives.
 
 ## Request boundary
 

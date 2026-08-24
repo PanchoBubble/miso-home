@@ -7,6 +7,7 @@ UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso.service"
 MDNS_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-mdns.service"
 MDNS_PUBLISH_SOURCE="${SOURCE_ROOT}/ops/bin/miso-mdns-publish.sh"
 TUNNEL_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-cloudflared.service"
+TUNNEL_BOOTSTRAP_SOURCE="${SOURCE_ROOT}/ops/cloudflared/miso-bootstrap.yml"
 CONVERSATION_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-conversation.env"
 
 fail() {
@@ -23,6 +24,7 @@ done
 [[ -f "${MDNS_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${MDNS_UNIT_SOURCE}"
 [[ -f "${MDNS_PUBLISH_SOURCE}" ]] || fail "helper not found: ${MDNS_PUBLISH_SOURCE}"
 [[ -f "${TUNNEL_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${TUNNEL_UNIT_SOURCE}"
+[[ -f "${TUNNEL_BOOTSTRAP_SOURCE}" ]] || fail "tunnel bootstrap not found: ${TUNNEL_BOOTSTRAP_SOURCE}"
 [[ -f "${CONVERSATION_ENV_SOURCE}" ]] || fail \
   "conversation environment not found: ${CONVERSATION_ENV_SOURCE}"
 getent passwd miso >/dev/null || fail "miso service user is not configured"
@@ -42,6 +44,9 @@ install -o root -g root -m 0644 "${MDNS_UNIT_SOURCE}" \
   /etc/systemd/system/miso-mdns.service
 install -o root -g root -m 0644 "${TUNNEL_UNIT_SOURCE}" \
   /etc/systemd/system/miso-cloudflared.service
+install -d -o root -g root -m 0755 /etc/cloudflared
+install -o root -g root -m 0644 "${TUNNEL_BOOTSTRAP_SOURCE}" \
+  /etc/cloudflared/miso-bootstrap.yml
 install -o root -g root -m 0755 "${MDNS_PUBLISH_SOURCE}" \
   /usr/local/bin/miso-mdns-publish
 install -d -o root -g root -m 0755 /etc/miso
