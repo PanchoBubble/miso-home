@@ -23,6 +23,7 @@ EnvironmentFile=-/etc/miso/miso-stt.env
 EnvironmentFile=-/etc/miso/miso-tts.env
 EnvironmentFile=-/etc/miso/miso-wake.env
 EnvironmentFile=-/etc/miso/miso-conversation.env
+EnvironmentFile=-/etc/miso/miso-calendar.env
 EnvironmentFile=-/etc/miso/miso.env
 ExecStartPre=/usr/bin/python3 -m miso --check-config
 ExecStart=/usr/bin/python3 -m miso

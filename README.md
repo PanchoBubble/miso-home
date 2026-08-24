@@ -106,6 +106,12 @@ overrides are strict by default, and progress chunks are emitted before health
 checks or model loading. Household schemas are narrowed to the relevant tool
 family and omitted entirely from unrelated prompts.
 
+Google Calendar is an optional validated tool family with per-user local OAuth
+tokens, timezone-aware events, recurrence, and a deliberately explicit mapping
+for unidentified voice requests. See
+[`docs/miso-google-calendar.md`](docs/miso-google-calendar.md) for Google Cloud,
+authorization, security, and Pi deployment steps.
+
 ## Local dashboard
 
 The service root (`/`) serves the dependency-free operator console. It streams

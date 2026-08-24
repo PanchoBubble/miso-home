@@ -7,6 +7,7 @@ from os import environ
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from miso.identity import IdentityError, normalize_email
 
@@ -53,6 +54,14 @@ class Settings:
     dashboard_email: str = "local@miso.invalid"
     access_team_domain: str | None = None
     access_audience: str | None = None
+    google_calendar_enabled: bool = False
+    google_calendar_client_path: Path = Path("/etc/miso/google-calendar-client.json")
+    google_calendar_token_dir: Path = Path(
+        "/var/lib/miso/state/google-calendar"
+    )
+    google_calendar_default_timezone: str = "Europe/London"
+    google_calendar_default_id: str = "primary"
+    google_calendar_voice_email: str | None = None
     developer_root: Path | None = None
     developer_commands: tuple[str, ...] = ("python3", "git", "rg", "ls")
     audio_enabled: bool = True
@@ -84,7 +93,8 @@ class Settings:
     stt_timeout_seconds: float = 45.0
     stt_prompt: str = (
         "Miso. English and Spanish home assistant commands. "
-        "Timer, shopping list, lights. Temporizador, lista de compras, luces."
+        "Timer, shopping list, calendar, events, lights. "
+        "Temporizador, lista de compras, calendario, citas, luces."
     )
     stt_result_capacity: int = 16
     stt_vad_threshold_dbfs: float = -38.0
@@ -237,6 +247,36 @@ class Settings:
                 source.get("MISO_ACCESS_TEAM_DOMAIN", "").strip().rstrip("/") or None
             ),
             access_audience=source.get("MISO_ACCESS_AUDIENCE", "").strip() or None,
+            google_calendar_enabled=_boolean(
+                source.get("MISO_GOOGLE_CALENDAR_ENABLED", "false"),
+                "MISO_GOOGLE_CALENDAR_ENABLED",
+            ),
+            google_calendar_client_path=Path(
+                source.get(
+                    "MISO_GOOGLE_CALENDAR_CLIENT_PATH",
+                    "/etc/miso/google-calendar-client.json",
+                )
+            ),
+            google_calendar_token_dir=Path(
+                source.get(
+                    "MISO_GOOGLE_CALENDAR_TOKEN_DIR",
+                    "/var/lib/miso/state/google-calendar",
+                )
+            ),
+            google_calendar_default_timezone=source.get(
+                "MISO_GOOGLE_CALENDAR_DEFAULT_TIMEZONE", "Europe/London"
+            ).strip(),
+            google_calendar_default_id=source.get(
+                "MISO_GOOGLE_CALENDAR_DEFAULT_ID", "primary"
+            ).strip(),
+            google_calendar_voice_email=(
+                _email(
+                    source["MISO_GOOGLE_CALENDAR_VOICE_EMAIL"],
+                    "MISO_GOOGLE_CALENDAR_VOICE_EMAIL",
+                )
+                if source.get("MISO_GOOGLE_CALENDAR_VOICE_EMAIL", "").strip()
+                else None
+            ),
             developer_root=(
                 Path(source["MISO_DEVELOPER_ROOT"])
                 if source.get("MISO_DEVELOPER_ROOT")
@@ -305,7 +345,8 @@ class Settings:
             stt_prompt=source.get(
                 "MISO_STT_PROMPT",
                 "Miso. English and Spanish home assistant commands. "
-                "Timer, shopping list, lights. Temporizador, lista de compras, luces.",
+                "Timer, shopping list, calendar, events, lights. "
+                "Temporizador, lista de compras, calendario, citas, luces.",
             ).strip(),
             stt_result_capacity=stt_result_capacity,
             stt_vad_threshold_dbfs=stt_vad_threshold_dbfs,
@@ -439,6 +480,24 @@ class Settings:
                 )
             ):
                 raise ConfigError("MISO_ACCESS_AUDIENCE is invalid")
+        for name, path in (
+            ("MISO_GOOGLE_CALENDAR_CLIENT_PATH", self.google_calendar_client_path),
+            ("MISO_GOOGLE_CALENDAR_TOKEN_DIR", self.google_calendar_token_dir),
+        ):
+            if not path.is_absolute():
+                raise ConfigError(f"{name} must be absolute")
+        try:
+            ZoneInfo(self.google_calendar_default_timezone)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ConfigError(
+                "MISO_GOOGLE_CALENDAR_DEFAULT_TIMEZONE must be a valid IANA timezone"
+            ) from error
+        if (
+            not self.google_calendar_default_id
+            or len(self.google_calendar_default_id) > 1024
+            or any(ord(character) < 32 for character in self.google_calendar_default_id)
+        ):
+            raise ConfigError("MISO_GOOGLE_CALENDAR_DEFAULT_ID is invalid")
         if self.developer_root is not None and not self.developer_root.is_absolute():
             raise ConfigError("MISO_DEVELOPER_ROOT must be absolute")
         if not self.developer_commands:
@@ -589,3 +648,19 @@ class Settings:
         missing = [str(path) for path in paths if not path.is_dir()]
         if missing:
             raise ConfigError(f"required directories are missing: {', '.join(missing)}")
+        if self.google_calendar_enabled and not self.google_calendar_client_path.is_file():
+            raise ConfigError(
+                "MISO_GOOGLE_CALENDAR_CLIENT_PATH is missing while Calendar is enabled"
+            )
+        if self.google_calendar_enabled:
+            from miso.tools.google_calendar import (
+                GoogleCalendarError,
+                GoogleOAuthClient,
+            )
+
+            try:
+                GoogleOAuthClient.load(self.google_calendar_client_path)
+            except GoogleCalendarError as error:
+                raise ConfigError(
+                    f"Google Calendar OAuth client is invalid: {error}"
+                ) from error

@@ -90,6 +90,15 @@ _ROUTINE_MARKERS = (
         "añade",
         "agrega",
         "comprar",
+        "calendar",
+        "calendario",
+        "agenda",
+        "appointment",
+        "event",
+        "evento",
+        "cita",
+        "reunión",
+        "reunion",
 )
 
 
@@ -377,6 +386,14 @@ class ProviderRouter:
             for marker in ("remind", "reminder", "recuérd", "recordatorio")
         ):
             prefix = "reminder_"
+        elif any(
+            marker in latest
+            for marker in (
+                "calendar", "calendario", "agenda", "appointment", "event",
+                "evento", "cita", "reunión", "reunion",
+            )
+        ):
+            prefix = "calendar_"
         elif any(
             marker in latest
             for marker in (

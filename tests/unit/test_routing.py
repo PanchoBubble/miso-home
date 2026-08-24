@@ -109,6 +109,8 @@ class ProviderRouterTests(unittest.TestCase):
                 "timer_cancel",
                 "reminder_create",
                 "shopping_add",
+                "calendar_list",
+                "calendar_event_create",
             )
         )
         router = self.router()
@@ -125,6 +127,11 @@ class ProviderRouterTests(unittest.TestCase):
             self.request("Analyze my shopping list", tools)
         )
         self.assertEqual(complex_shopping.selected_tools, ("shopping_add",))
+        calendar = router.plan(self.request("Añade una cita al calendario", tools))
+        self.assertEqual(
+            calendar.selected_tools,
+            ("calendar_list", "calendar_event_create"),
+        )
 
     def test_acknowledgement_precedes_health_and_routine_prefers_pi(self) -> None:
         router = self.router(lan=successful("lan-ollama"))

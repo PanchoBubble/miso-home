@@ -40,6 +40,7 @@ from miso.transcription import (
 from miso.wake import OpenWakeWordModel, WakeWordManager
 from miso.tools import (
     DeveloperShellController,
+    GoogleCalendarConfig,
     HouseholdStore,
     ScheduledItemWorker,
     ToolRegistry,
@@ -686,8 +687,17 @@ def create_server(
             settings.access_team_domain,
             cast(str, settings.access_audience),
         )
+    calendar_config = None
+    if settings.google_calendar_enabled:
+        calendar_config = GoogleCalendarConfig(
+            client_path=settings.google_calendar_client_path,
+            token_dir=settings.google_calendar_token_dir,
+            default_timezone=settings.google_calendar_default_timezone,
+            default_calendar_id=settings.google_calendar_default_id,
+            voice_account_email=settings.google_calendar_voice_email,
+        )
     registry = tool_registry or create_runtime_registry(
-        settings.state_dir, settings.database_path
+        settings.state_dir, settings.database_path, calendar_config
     )
     shell = developer_shell or DeveloperShellController(
         (settings.developer_root or settings.state_dir).resolve(),

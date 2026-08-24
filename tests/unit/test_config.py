@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 
 from miso.config import ConfigError, Settings
@@ -225,6 +226,60 @@ class SettingsTests(unittest.TestCase):
             Settings.from_env({"MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS": "0"})
         with self.assertRaisesRegex(ConfigError, "ACKNOWLEDGEMENT"):
             Settings.from_env({"MISO_CONVERSATION_ACKNOWLEDGEMENT": ""})
+
+    def test_google_calendar_configuration_is_local_and_validated(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for child in ("db", "state", "models"):
+                (root / child).mkdir()
+            client = root / "google-client.json"
+            client.write_text(
+                json.dumps(
+                    {
+                        "installed": {
+                            "client_id": "123.apps.googleusercontent.com",
+                            "client_secret": "test-secret",
+                        }
+                    }
+                )
+            )
+            client.chmod(0o600)
+            settings = Settings.from_env(
+                {
+                    "MISO_DB_PATH": str(root / "db" / "miso.sqlite3"),
+                    "MISO_STATE_DIR": str(root / "state"),
+                    "MISO_MODEL_DIR": str(root / "models"),
+                    "MISO_GOOGLE_CALENDAR_ENABLED": "true",
+                    "MISO_GOOGLE_CALENDAR_CLIENT_PATH": str(client),
+                    "MISO_GOOGLE_CALENDAR_TOKEN_DIR": str(root / "state" / "tokens"),
+                    "MISO_GOOGLE_CALENDAR_DEFAULT_TIMEZONE": "Europe/Madrid",
+                    "MISO_GOOGLE_CALENDAR_DEFAULT_ID": "family@example.com",
+                    "MISO_GOOGLE_CALENDAR_VOICE_EMAIL": "Juan@Example.com",
+                }
+            )
+            settings.validate_runtime_paths()
+            self.assertTrue(settings.google_calendar_enabled)
+            self.assertEqual(settings.google_calendar_default_timezone, "Europe/Madrid")
+            self.assertEqual(settings.google_calendar_voice_email, "juan@example.com")
+
+        with self.assertRaisesRegex(ConfigError, "valid IANA timezone"):
+            Settings.from_env(
+                {"MISO_GOOGLE_CALENDAR_DEFAULT_TIMEZONE": "Mars/Olympus"}
+            )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for child in ("db", "state", "models"):
+                (root / child).mkdir()
+            with self.assertRaisesRegex(ConfigError, "CLIENT_PATH is missing"):
+                Settings.from_env(
+                    {
+                        "MISO_DB_PATH": str(root / "db" / "miso.sqlite3"),
+                        "MISO_STATE_DIR": str(root / "state"),
+                        "MISO_MODEL_DIR": str(root / "models"),
+                        "MISO_GOOGLE_CALENDAR_ENABLED": "true",
+                        "MISO_GOOGLE_CALENDAR_CLIENT_PATH": str(root / "missing.json"),
+                    }
+                ).validate_runtime_paths()
 
 
 if __name__ == "__main__":

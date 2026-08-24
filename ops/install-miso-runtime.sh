@@ -9,6 +9,7 @@ MDNS_PUBLISH_SOURCE="${SOURCE_ROOT}/ops/bin/miso-mdns-publish.sh"
 TUNNEL_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-cloudflared.service"
 TUNNEL_BOOTSTRAP_SOURCE="${SOURCE_ROOT}/ops/cloudflared/miso-bootstrap.yml"
 CONVERSATION_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-conversation.env"
+CALENDAR_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-calendar.env"
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -27,6 +28,8 @@ done
 [[ -f "${TUNNEL_BOOTSTRAP_SOURCE}" ]] || fail "tunnel bootstrap not found: ${TUNNEL_BOOTSTRAP_SOURCE}"
 [[ -f "${CONVERSATION_ENV_SOURCE}" ]] || fail \
   "conversation environment not found: ${CONVERSATION_ENV_SOURCE}"
+[[ -f "${CALENDAR_ENV_SOURCE}" ]] || fail \
+  "calendar environment not found: ${CALENDAR_ENV_SOURCE}"
 getent passwd miso >/dev/null || fail "miso service user is not configured"
 getent group audio >/dev/null || fail "audio group is not configured"
 usermod --append --groups audio miso
@@ -52,6 +55,10 @@ install -o root -g root -m 0755 "${MDNS_PUBLISH_SOURCE}" \
 install -d -o root -g root -m 0755 /etc/miso
 install -o root -g root -m 0644 "${CONVERSATION_ENV_SOURCE}" \
   /etc/miso/miso-conversation.env
+if [[ ! -e /etc/miso/miso-calendar.env ]]; then
+  install -o root -g root -m 0644 "${CALENDAR_ENV_SOURCE}" \
+    /etc/miso/miso-calendar.env
+fi
 
 PYTHONPATH="${TARGET_ROOT}/src" PYTHONDONTWRITEBYTECODE=1 \
   python3 -m compileall -q "${TARGET_ROOT}/src"
