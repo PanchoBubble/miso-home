@@ -1,0 +1,20 @@
+[Unit]
+Description=Publish the Miso LAN hostname with mDNS
+Documentation=https://avahi.org/
+After=avahi-daemon.service network-online.target
+Requires=avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Keep rsp.local as the Pi's reverse-DNS identity; this is an extra forward alias.
+ExecStart=/usr/local/bin/miso-mdns-publish miso.local eth0
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

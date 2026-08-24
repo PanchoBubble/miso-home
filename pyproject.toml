@@ -13,4 +13,4 @@ dependencies = []
 where = ["src"]
 
 [tool.setuptools.package-data]
-"miso.web" = ["*.html", "*.css", "*.js"]
+"miso.web" = ["*.html", "*.css", "*.js", "*.webmanifest", "*.svg", "*.png"]

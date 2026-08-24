@@ -1,10 +1,14 @@
 const state = {
-  token: sessionStorage.getItem("miso-dashboard-token") || "",
+  token: localStorage.getItem("miso-dashboard-token") || "",
   conversationId: null,
   requestId: null,
   developerEnabled: false,
   connected: false,
   panelReturnFocus: null,
+  installPrompt: null,
+  reconnectTimer: null,
+  reconnectDelay: 3000,
+  statusInFlight: false,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -84,6 +88,20 @@ function setConnected(connected, detail = "") {
     ? "Dashboard access is required. Enter the token in Controls to reconnect."
     : "Miso is offline. Your draft is safe; reconnect to send it.";
   $("#offline-banner").classList.toggle("hidden", connected);
+  const showLanFallback = !connected
+    && detail !== "Access needed"
+    && window.location.hostname !== "miso.local";
+  $("#lan-fallback").classList.toggle("hidden", !showLanFallback);
+}
+
+function scheduleReconnect() {
+  if (state.reconnectTimer || !navigator.onLine) return;
+  const delay = state.reconnectDelay;
+  state.reconnectTimer = window.setTimeout(() => {
+    state.reconnectTimer = null;
+    state.reconnectDelay = Math.min(state.reconnectDelay * 2, 30000);
+    loadStatus();
+  }, delay);
 }
 
 function renderProviders(providers) {
@@ -109,14 +127,47 @@ function renderProviders(providers) {
 }
 
 async function loadStatus() {
+  if (state.statusInFlight) return;
+  state.statusInFlight = true;
   try {
     const data = await api("/api/status");
     setConnected(true, `Online · ${data.service.architecture}`);
+    state.reconnectDelay = 3000;
+    if (state.reconnectTimer) window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
     renderProviders(data.providers);
     renderDeveloper(data.developer_mode);
   } catch (error) {
     setConnected(false, error.message === "unauthorized" ? "Access needed" : "Offline");
+    scheduleReconnect();
+  } finally {
+    state.statusInFlight = false;
   }
+}
+
+async function installApp() {
+  if (!state.installPrompt) return;
+  state.installPrompt.prompt();
+  await state.installPrompt.userChoice;
+  state.installPrompt = null;
+  $("#install-app").classList.add("hidden");
+}
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+  navigator.serviceWorker.register("/service-worker.js", { scope: "/" })
+    .then((registration) => {
+      if (registration.waiting) registration.waiting.postMessage("skip-waiting");
+      registration.addEventListener("updatefound", () => {
+        const worker = registration.installing;
+        worker?.addEventListener("statechange", () => {
+          if (worker.state === "installed" && navigator.serviceWorker.controller) {
+            worker.postMessage("skip-waiting");
+          }
+        });
+      });
+    })
+    .catch(() => {});
 }
 
 function renderDeveloper(status) {
@@ -477,6 +528,7 @@ $("#refresh-status").addEventListener("click", loadStatus);
 $("#refresh-activity").addEventListener("click", loadActivity);
 $("#service-status").addEventListener("click", loadStatus);
 $("#retry-connection").addEventListener("click", loadStatus);
+$("#install-app").addEventListener("click", installApp);
 $("#enable-developer").addEventListener("click", () => developerAction("enable"));
 $("#disable-developer").addEventListener("click", () => developerAction("disable"));
 $("#run-developer").addEventListener("click", runDeveloperCommand);
@@ -492,12 +544,24 @@ document.addEventListener("keydown", (event) => {
 });
 $("#save-token").addEventListener("click", () => {
   state.token = $("#access-token").value.trim();
-  if (state.token) sessionStorage.setItem("miso-dashboard-token", state.token);
-  else sessionStorage.removeItem("miso-dashboard-token");
+  if (state.token) localStorage.setItem("miso-dashboard-token", state.token);
+  else localStorage.removeItem("miso-dashboard-token");
   loadStatus();
   loadActivity();
 });
-window.addEventListener("online", loadStatus);
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  state.installPrompt = event;
+  $("#install-app").classList.remove("hidden");
+});
+window.addEventListener("appinstalled", () => {
+  state.installPrompt = null;
+  $("#install-app").classList.add("hidden");
+});
+window.addEventListener("online", () => {
+  state.reconnectDelay = 3000;
+  loadStatus();
+});
 window.addEventListener("offline", () => setConnected(false, "Offline"));
 
 $("#access-token").value = state.token;
@@ -505,4 +569,7 @@ updateRouteChip();
 resizeComposer();
 loadStatus();
 loadActivity();
-setInterval(loadStatus, 15000);
+registerServiceWorker();
+setInterval(() => {
+  if (state.connected) loadStatus();
+}, 15000);

@@ -99,6 +99,10 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b"What can I help with?", content)
         self.assertIn(b'id="side-panel"', content)
         self.assertIn(b'id="turn-progress"', content)
+        self.assertIn(b'rel="manifest"', content)
+        self.assertIn(b'href="/favicon-32.png"', content)
+        self.assertIn(b'id="install-app"', content)
+        self.assertIn(b'http://miso.local/', content)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
         response, javascript = self.request("GET", "/app.js")
         self.assertEqual(response.status, 200)
@@ -107,6 +111,36 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b"secureCrypto.getRandomValues", javascript)
         self.assertIn(b"requestSubmit", javascript)
         self.assertIn(b"friendlyToolName", javascript)
+        self.assertIn(b"beforeinstallprompt", javascript)
+        self.assertIn(b"navigator.serviceWorker.register", javascript)
+
+        response, content = self.request("GET", "/manifest.webmanifest")
+        manifest = json.loads(content)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            response.getheader("Content-Type"),
+            "application/manifest+json; charset=utf-8",
+        )
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual(manifest["start_url"], "/")
+        self.assertIn("192x192", {icon["sizes"] for icon in manifest["icons"]})
+        self.assertIn("512x512", {icon["sizes"] for icon in manifest["icons"]})
+
+        response, service_worker = self.request("GET", "/service-worker.js")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
+        self.assertIn(b'request.headers.has("Authorization")', service_worker)
+        self.assertNotIn(b'caches.match(request)', service_worker)
+
+        response, icon = self.request("GET", "/icon-192.png")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "image/png")
+        self.assertTrue(icon.startswith(b"\x89PNG\r\n\x1a\n"))
+
+        response, favicon = self.request("GET", "/favicon-32.png")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "image/png")
+        self.assertTrue(favicon.startswith(b"\x89PNG\r\n\x1a\n"))
 
         response, content = self.request("GET", "/api/status")
         payload = json.loads(content)
@@ -128,6 +162,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertNotIn(str(self.settings.database_path), encoded)
         self.assertNotIn("ollama_url", encoded)
         self.assertNotIn("api_key", encoded)
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
 
         response, content = self.request("GET", "/api/identity")
         identity = json.loads(content)

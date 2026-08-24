@@ -35,7 +35,8 @@ curl --fail http://127.0.0.1:8090/healthz
 ```
 
 The installer places root-owned application code in `/opt/miso/app`, installs
-`miso.service`, and runs the service as the unprivileged `miso` system user.
+`miso.service`, publishes `miso.local` with Avahi, and runs the service as the
+unprivileged `miso` system user.
 Optional environment overrides belong in `/etc/miso/miso.env`, never in Git.
 
 The first Pi provider is Ollama on `127.0.0.1:11434`. Its systemd drop-in keeps
@@ -104,6 +105,16 @@ that token in session storage only. Developer mode is visibly disabled by
 default, expires after at most 15 minutes, and runs only allowlisted argv (never
 shell text) beneath `MISO_DEVELOPER_ROOT`. The default Pi scope is read-only
 `/opt/miso/app`; override it deliberately in `/etc/miso/miso.env` if needed.
+
+The canonical installed-app origin is `https://miso.jyjonline.com`. Cloudflare
+Tunnel and Access publication is configured separately so the origin is never
+made public without its email allowlist. On the home LAN, Avahi publishes the
+fallback address `http://miso.local` (the Pi unit binds port 80 on the LAN
+address only, leaving loopback port 80 to the tunnel ingress). That plain-HTTP fallback is useful for
+discovery and recovery, but browsers do not grant it service-worker or push
+permissions; install Miso and approve notifications only from the canonical
+HTTPS origin. The service worker caches a fixed list of shell assets and always
+sends API, authenticated, streaming, and cross-origin requests to the network.
 
 ## Household identity and sharing
 

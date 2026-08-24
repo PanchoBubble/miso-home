@@ -10,8 +10,11 @@ SupplementaryGroups=audio
 WorkingDirectory=/opt/miso/app
 Environment=PYTHONPATH=/opt/miso/app/src
 Environment=PYTHONDONTWRITEBYTECODE=1
+# MISO_HOST must stay loopback or the LAN address, never 0.0.0.0: cloudflared
+# routes a public hostname to localhost:80, so a wildcard bind would publish
+# the dashboard through the tunnel.
 Environment=MISO_HOST=127.0.0.1
-Environment=MISO_PORT=8090
+Environment=MISO_PORT=80
 Environment=MISO_DB_PATH=/var/lib/miso/db/miso.sqlite3
 Environment=MISO_STATE_DIR=/var/lib/miso/state
 Environment=MISO_MODEL_DIR=/var/lib/miso/models
@@ -45,7 +48,8 @@ ReadWritePaths=/var/lib/miso /run/miso
 RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]

@@ -2,15 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#0d0f0e">
-    <title>Miso · Local assistant</title>
+    <meta name="application-name" content="Miso">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Miso">
+    <title>Miso · Household assistant</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="apple-touch-icon" href="/icon-192.png">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <div id="offline-banner" class="offline-banner hidden" role="status">
       <span id="connection-banner-copy">Miso is offline. Your draft is safe; reconnect to send it.</span>
+      <a id="lan-fallback" class="lan-fallback hidden" href="http://miso.local/">Try miso.local</a>
       <button id="retry-connection" class="quiet-button" type="button">Retry</button>
     </div>
 
@@ -25,6 +33,7 @@
         </a>
 
         <nav class="app-actions" aria-label="Dashboard actions">
+          <button id="install-app" class="install-button hidden" type="button">Install</button>
           <button id="service-status" class="status-button" type="button" title="Refresh connection status">
             <span class="status-dot" aria-hidden="true"></span>
             <span class="status-copy">Connecting</span>

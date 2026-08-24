@@ -56,6 +56,18 @@ MISO_SYSTEM_PROMPT = (
 
 WEB_ROOT = Path(__file__).with_name("web")
 MAX_BODY_BYTES = 65536
+STATIC_ASSETS = {
+    "/": "index.html",
+    "/index.html": "index.html",
+    "/app.js": "app.js",
+    "/styles.css": "styles.css",
+    "/manifest.webmanifest": "manifest.webmanifest",
+    "/service-worker.js": "service-worker.js",
+    "/favicon-32.png": "favicon-32.png",
+    "/icon-192.png": "icon-192.png",
+    "/icon-512.png": "icon-512.png",
+    "/icon-maskable-512.png": "icon-maskable-512.png",
+}
 
 
 class MisoHTTPServer(ThreadingHTTPServer):
@@ -171,7 +183,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     },
                 )
                 return
-            if parsed.path in {"/", "/index.html", "/app.js", "/styles.css"}:
+            if parsed.path in STATIC_ASSETS:
                 self._static(parsed.path)
                 return
             if not parsed.path.startswith("/api/"):
@@ -556,12 +568,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             return value
 
         def _static(self, path: str) -> None:
-            name = {
-                "/": "index.html",
-                "/index.html": "index.html",
-                "/app.js": "app.js",
-                "/styles.css": "styles.css",
-            }[path]
+            name = STATIC_ASSETS[path]
             file_path = WEB_ROOT / name
             if not file_path.is_file():
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -570,6 +577,9 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 ".html": "text/html; charset=utf-8",
                 ".js": "text/javascript; charset=utf-8",
                 ".css": "text/css; charset=utf-8",
+                ".webmanifest": "application/manifest+json; charset=utf-8",
+                ".svg": "image/svg+xml",
+                ".png": "image/png",
             }[file_path.suffix]
             self._bytes(HTTPStatus.OK, file_path.read_bytes(), content_type)
 
