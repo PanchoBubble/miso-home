@@ -311,13 +311,15 @@ class DashboardAuthenticationTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
-    def test_access_assertion_resolves_allowlisted_actor_only(self) -> None:
+    def test_access_assertion_resolves_and_provisions_verified_actor(self) -> None:
         class FakeAccessVerifier:
             def verify(self, assertion: str) -> str:
                 if assertion == "allowed-assertion":
                     return "member@example.com"
                 if assertion == "unlisted-assertion":
                     return "outsider@example.com"
+                if assertion == "malformed-identity":
+                    return "not-an-email"
                 raise AccessJWTError("invalid assertion")
 
         with TemporaryDirectory() as directory:
@@ -333,7 +335,6 @@ class DashboardAuthenticationTests(unittest.TestCase):
                 provider_timeout_seconds=120,
                 log_level="INFO",
                 dashboard_token="dashboard-secret-at-least-32-chars",
-                household_allowed_emails=("member@example.com",),
             )
             router = ProviderRouter(
                 ProviderSet(
@@ -369,9 +370,22 @@ class DashboardAuthenticationTests(unittest.TestCase):
                 self.assertEqual(
                     json.loads(content)["actor"]["id"], "member@example.com"
                 )
+                status, content = identity(
+                    {"Cf-Access-Jwt-Assertion": "unlisted-assertion"}
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(
+                    json.loads(content)["actor"]["id"], "outsider@example.com"
+                )
+                with server.memory_store.connect() as connection:
+                    provisioned = connection.execute(
+                        "SELECT enabled FROM household_members WHERE email = ?",
+                        ("outsider@example.com",),
+                    ).fetchone()
+                self.assertEqual(provisioned["enabled"], 1)
                 with self.assertLogs("miso.http", level="WARNING") as captured:
                     status, _ = identity(
-                        {"Cf-Access-Jwt-Assertion": "unlisted-assertion"}
+                        {"Cf-Access-Jwt-Assertion": "malformed-identity"}
                     )
                     self.assertEqual(status, 401)
                     status, _ = identity(
@@ -379,7 +393,7 @@ class DashboardAuthenticationTests(unittest.TestCase):
                     )
                     self.assertEqual(status, 401)
                 diagnostic = "\n".join(captured.output)
-                self.assertIn("household allowlist", diagnostic)
+                self.assertIn("identity email is invalid", diagnostic)
                 self.assertIn("invalid assertion", diagnostic)
                 self.assertNotIn("unlisted-assertion", diagnostic)
             finally:

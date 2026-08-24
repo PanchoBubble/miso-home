@@ -23,6 +23,7 @@ from miso.conversation import ConversationManager
 from miso.identity import (
     Actor,
     HouseholdIdentityPolicy,
+    IdentityError,
     SYSTEM_ACTOR,
     VOICE_ACTOR,
 )
@@ -109,11 +110,21 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.memory_store = MemoryStore(settings.database_path)
         self.identity_policy = identity_policy
         self.access_verifier = access_verifier
-        self.memory_store.provision_household_members(identity_policy.allowed_emails)
+        self._member_lock = threading.Lock()
+        self._registered_members = {identity_policy.local_dashboard_email}
+        self.memory_store.provision_household_members(self._registered_members)
         self.started_at = started_at
         self._active_requests: dict[str, tuple[threading.Event, str]] = {}
         self._active_lock = threading.Lock()
         super().__init__(server_address, request_handler)
+
+    def access_actor(self, email: str) -> Actor:
+        actor = self.identity_policy.web_actor(email)
+        with self._member_lock:
+            if actor.actor_id not in self._registered_members:
+                self.memory_store.provision_household_members((actor.actor_id,))
+                self._registered_members.add(actor.actor_id)
+        return actor
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
         self.scheduled_worker.start()
@@ -269,14 +280,12 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 assertion = self.headers.get("Cf-Access-Jwt-Assertion", "")
                 try:
                     email = self.miso.access_verifier.verify(assertion)
-                    self._request_actor = self.miso.identity_policy.web_actor(email)
+                    self._request_actor = self.miso.access_actor(email)
                     return True
                 except AccessJWTError as error:
                     LOGGER.warning("Cloudflare Access assertion rejected: %s", error)
-                except PermissionError:
-                    LOGGER.warning(
-                        "Cloudflare Access identity rejected by household allowlist"
-                    )
+                except IdentityError:
+                    LOGGER.warning("Cloudflare Access identity email is invalid")
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
 
@@ -671,9 +680,7 @@ def create_server(
     conversation_manager: ConversationManager | None = None,
     access_verifier: AccessJWTVerifier | None = None,
 ) -> MisoHTTPServer:
-    identity_policy = HouseholdIdentityPolicy(
-        settings.household_allowed_emails, settings.dashboard_email
-    )
+    identity_policy = HouseholdIdentityPolicy(settings.dashboard_email)
     if access_verifier is None and settings.access_team_domain is not None:
         access_verifier = AccessJWTVerifier(
             settings.access_team_domain,

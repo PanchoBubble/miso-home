@@ -11,14 +11,14 @@ from miso.identity import (
 
 
 class HouseholdIdentityPolicyTests(unittest.TestCase):
-    def test_normalizes_allowed_members_and_rejects_unknown_email(self) -> None:
-        policy = HouseholdIdentityPolicy(
-            ("JUAN@Example.com", "ana@example.com"), "local@miso.invalid"
-        )
+    def test_normalizes_cloudflare_and_local_web_identities(self) -> None:
+        policy = HouseholdIdentityPolicy("local@miso.invalid")
         self.assertEqual(policy.web_actor("juan@example.com").actor_id, "juan@example.com")
         self.assertEqual(policy.local_actor.actor_id, "local@miso.invalid")
-        with self.assertRaises(PermissionError):
-            policy.web_actor("stranger@example.com")
+        self.assertEqual(
+            policy.web_actor("STRANGER@Example.com").actor_id,
+            "stranger@example.com",
+        )
 
     def test_shared_and_private_rules_distinguish_voice_from_web(self) -> None:
         juan = web_actor("juan@example.com")

@@ -120,9 +120,10 @@ Remote API requests must carry a valid Cloudflare Access application assertion.
 Set `MISO_ACCESS_TEAM_DOMAIN` to the exact HTTPS team origin and
 `MISO_ACCESS_AUDIENCE` to the Miso application's AUD tag in `/etc/miso/miso.env`.
 Miso verifies the assertion's RS256 signature against Cloudflare's rotating key
-set, issuer, audience, time bounds, token type, and email before applying the
-same `MISO_HOUSEHOLD_ALLOWED_EMAILS` policy used by local identity. The local
-bearer token remains available over the LAN as a recovery path.
+set, issuer, audience, time bounds, token type, and email. Cloudflare Access is
+the sole remote membership authority; Miso dynamically registers each verified
+Access email as a web actor for ownership and audit records. The local bearer
+token remains available over the LAN as a recovery path.
 The dedicated `miso-cloudflared.service` reads its remotely managed tunnel token
 from the root-only `/etc/cloudflared/miso.token` through systemd credentials. It
 runs separately from any legacy `cloudflared.service`; the runtime installer
@@ -132,10 +133,10 @@ enables it only after that token file exists.
 
 Every request is attributed to an origin-controlled actor. Local dashboard and
 bearer-token requests use the normalized `MISO_DASHBOARD_EMAIL` (default
-`local@miso.invalid`); future authenticated household identities must appear in
-the comma-separated `MISO_HOUSEHOLD_ALLOWED_EMAILS` allowlist. Unidentified
-speech always uses `household:voice`, while background work uses `miso:system`.
-Names in prompts or transcripts never select an identity.
+`local@miso.invalid`); remote web identities come only from application JWTs
+admitted by the Cloudflare Access policy. Unidentified speech always uses
+`household:voice`, while background work uses `miso:system`. Names in prompts or
+transcripts never select an identity.
 
 SQLite enforces one common visibility model for conversations, memory,
 timers/reminders, and shopping lists: shared records are available to the

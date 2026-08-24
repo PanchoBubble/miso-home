@@ -36,7 +36,6 @@ class SettingsTests(unittest.TestCase):
                     "MISO_ROUTING_HEALTH_TIMEOUT": "1.5",
                     "MISO_ROUTING_ATTEMPT_TIMEOUT": "30",
                     "MISO_DASHBOARD_EMAIL": "Juan@Example.com",
-                    "MISO_HOUSEHOLD_ALLOWED_EMAILS": "ana@example.com,juan@example.com",
                     "MISO_ACCESS_TEAM_DOMAIN": (
                         "https://sowe-tech.cloudflareaccess.com/"
                     ),
@@ -75,10 +74,6 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.routing_health_timeout_seconds, 1.5)
             self.assertEqual(settings.routing_attempt_timeout_seconds, 30)
             self.assertEqual(settings.dashboard_email, "juan@example.com")
-            self.assertEqual(
-                settings.household_allowed_emails,
-                ("ana@example.com", "juan@example.com"),
-            )
             self.assertEqual(
                 settings.access_team_domain,
                 "https://sowe-tech.cloudflareaccess.com",
@@ -143,17 +138,9 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "DEVELOPER_ROOT must be absolute"):
             Settings.from_env({"MISO_DEVELOPER_ROOT": "relative"})
 
-    def test_rejects_invalid_or_duplicate_household_emails(self) -> None:
+    def test_rejects_invalid_dashboard_email(self) -> None:
         with self.assertRaisesRegex(ConfigError, "valid email"):
             Settings.from_env({"MISO_DASHBOARD_EMAIL": "not-an-email"})
-        with self.assertRaisesRegex(ConfigError, "duplicate"):
-            Settings.from_env(
-                {
-                    "MISO_HOUSEHOLD_ALLOWED_EMAILS": (
-                        "juan@example.com,JUAN@example.com"
-                    )
-                }
-            )
 
     def test_rejects_incomplete_or_invalid_access_configuration(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be set together"):

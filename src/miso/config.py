@@ -31,14 +31,6 @@ def _email(value: str, name: str) -> str:
         raise ConfigError(f"{name} must be a valid email address") from error
 
 
-def _email_list(value: str, name: str) -> tuple[str, ...]:
-    emails = [item.strip() for item in value.split(",") if item.strip()]
-    normalized = tuple(_email(email, name) for email in emails)
-    if len(normalized) != len(set(normalized)):
-        raise ConfigError(f"{name} must not contain duplicate email addresses")
-    return normalized
-
-
 @dataclass(frozen=True, slots=True)
 class Settings:
     host: str
@@ -59,7 +51,6 @@ class Settings:
     routing_attempt_timeout_seconds: float = 45.0
     dashboard_token: str | None = field(default=None, repr=False)
     dashboard_email: str = "local@miso.invalid"
-    household_allowed_emails: tuple[str, ...] = ()
     access_team_domain: str | None = None
     access_audience: str | None = None
     developer_root: Path | None = None
@@ -242,10 +233,6 @@ class Settings:
                 source.get("MISO_DASHBOARD_EMAIL", "local@miso.invalid"),
                 "MISO_DASHBOARD_EMAIL",
             ),
-            household_allowed_emails=_email_list(
-                source.get("MISO_HOUSEHOLD_ALLOWED_EMAILS", ""),
-                "MISO_HOUSEHOLD_ALLOWED_EMAILS",
-            ),
             access_team_domain=(
                 source.get("MISO_ACCESS_TEAM_DOMAIN", "").strip().rstrip("/") or None
             ),
@@ -424,13 +411,6 @@ class Settings:
             raise ConfigError("MISO_DASHBOARD_TOKEN must contain at least 32 characters")
         if self.dashboard_email != _email(self.dashboard_email, "MISO_DASHBOARD_EMAIL"):
             raise ConfigError("MISO_DASHBOARD_EMAIL must be a normalized email address")
-        if any(
-            email != _email(email, "MISO_HOUSEHOLD_ALLOWED_EMAILS")
-            for email in self.household_allowed_emails
-        ):
-            raise ConfigError(
-                "MISO_HOUSEHOLD_ALLOWED_EMAILS must contain normalized email addresses"
-            )
         if (self.access_team_domain is None) != (self.access_audience is None):
             raise ConfigError(
                 "MISO_ACCESS_TEAM_DOMAIN and MISO_ACCESS_AUDIENCE must be set together"

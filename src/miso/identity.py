@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 
 class IdentityError(ValueError):
@@ -61,24 +60,17 @@ def web_actor(email: str) -> Actor:
 
 
 class HouseholdIdentityPolicy:
-    """Resolve allowed members and enforce shared/private ownership semantics."""
+    """Resolve trusted web identities and the local recovery identity."""
 
-    def __init__(self, allowed_emails: Iterable[str], local_dashboard_email: str) -> None:
-        local = normalize_email(local_dashboard_email)
-        allowed = {normalize_email(email) for email in allowed_emails}
-        allowed.add(local)
-        self.allowed_emails = frozenset(allowed)
-        self.local_dashboard_email = local
+    def __init__(self, local_dashboard_email: str) -> None:
+        self.local_dashboard_email = normalize_email(local_dashboard_email)
 
     @property
     def local_actor(self) -> Actor:
         return web_actor(self.local_dashboard_email)
 
     def web_actor(self, email: str) -> Actor:
-        actor = web_actor(email)
-        if actor.actor_id not in self.allowed_emails:
-            raise PermissionError("household member is not allowed")
-        return actor
+        return web_actor(email)
 
 
 def private_owner(actor: Actor, visibility: str) -> str | None:

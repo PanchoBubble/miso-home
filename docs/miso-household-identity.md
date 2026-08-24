@@ -1,30 +1,29 @@
 # Miso household identity and sharing rules
 
 Miso treats identity as an origin property, not as model-provided text. Web
-requests resolve to a normalized, allowlisted email address before they reach
-storage or tools. Voice input deliberately resolves to the stable
-`household:voice` actor because speaker recognition is not enabled; it must
-never inherit the identity of the last dashboard user or a name inferred from a
-transcript. Background reconciliation uses `miso:system`.
+requests resolve to a normalized, cryptographically verified email address
+before they reach storage or tools. Voice input deliberately resolves to the
+stable `household:voice` actor because speaker recognition is not enabled; it
+must never inherit the identity of the last dashboard user or a name inferred
+from a transcript. Background reconciliation uses `miso:system`.
 
-## Actors and allowlist
+## Actors and authorization
 
 `MISO_DASHBOARD_EMAIL` names the local dashboard/bearer-token actor and defaults
-to `local@miso.invalid`. `MISO_HOUSEHOLD_ALLOWED_EMAILS` is a comma-separated
-set of normalized household member emails reserved for authenticated identity
-providers. Invalid and duplicate addresses fail configuration validation.
+to `local@miso.invalid`. The Cloudflare Access application policy is the sole
+allowlist for remote household members.
 
 The local dashboard authenticates with its existing bearer token and maps that
 credential to `MISO_DASHBOARD_EMAIL`. Remote requests authenticate with the
 `Cf-Access-Jwt-Assertion` application token. Miso validates its RS256 signature
 against the team domain's rotating key set, exact issuer and application AUD,
-time bounds, application-token type, and email before resolving the email
-through the same allowlist policy. The unauthenticated convenience email header
-is never trusted.
+time bounds, application-token type, and email. A verified email is normalized
+and dynamically registered in SQLite for private ownership and audit
+attribution. The unauthenticated convenience email header is never trusted.
 
 ## Authorization matrix
 
-| Record | Voice actor | Owning web member | Other allowed web member |
+| Record | Voice actor | Owning web member | Other Access-authorized web member |
 | --- | --- | --- | --- |
 | Shared | Read/write | Read/write | Read/write |
 | Private | Denied | Read/write | Denied |
