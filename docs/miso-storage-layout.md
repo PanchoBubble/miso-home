@@ -46,7 +46,9 @@ guardrails and should be adjusted only from measured production growth.
 of a live database. It:
 
 1. Creates and integrity-checks a database snapshot in a private temporary
-   directory on root ext4.
+   directory on root ext4. The snapshot is normalized from WAL to rollback-
+   journal mode before packaging, so the recovery point is one stable SQLite
+   file and regenerated `-wal`/`-shm` sidecars cannot enter the archive.
 2. Packages the database, durable state, encrypted configuration, manifest, and
    per-file checksums. Models are reproducible and are excluded.
 3. Encrypts private application data before it leaves ext4. The existing
@@ -95,6 +97,14 @@ artifacts, passed both the post-publication quick check and independent full
 isolated restore, and left the live schema-v3 database and all ten existing
 service containers healthy. At that run, root had 152 GiB and the T7 had
 1,075 GiB available.
+
+The WAL-sidecar normalization fix was deployed to Pancho Pi on 2026-08-25 as
+backup-tool SHA-256
+`ae246bf0d010d683d3ea1f0933c15fb5c28ec34d348fbef5e024b31576e20097`.
+The ARM64 unit suite passed, including the self-contained snapshot regression.
+A live encrypted backup then passed its pre-publication full restore, its
+post-publication quick check, and a separate full restore check; Miso and both
+backup timers remained active.
 
 A real replacement is deliberately not automated by the timer. First run
 `sudo /usr/local/sbin/miso-backup verify --full [archive]`. Stop Miso, decrypt

@@ -254,10 +254,30 @@ def create_sqlite_snapshot(source: Path, destination: Path) -> dict[str, int | s
         with sqlite3.connect(source_uri, uri=True) as live:
             with sqlite3.connect(destination) as snapshot:
                 live.backup(snapshot)
+        # The backup API copies the source database's WAL-mode header. Opening
+        # that snapshot for validation can therefore create regenerated -wal
+        # and -shm files beside it. They are not part of the recovery point and
+        # can change while checksums and the tar stream are being produced.
+        # Switch the private snapshot to rollback-journal mode so all committed
+        # pages remain in the main file, then discard only those WAL sidecars.
+        with sqlite3.connect(destination) as snapshot:
+            journal_mode = snapshot.execute(
+                "PRAGMA journal_mode = DELETE"
+            ).fetchone()[0]
+        if str(journal_mode).lower() != "delete":
+            raise BackupError(
+                f"SQLite snapshot journal normalization failed: {journal_mode}"
+            )
+        for suffix in ("-wal", "-shm"):
+            Path(f"{destination}{suffix}").unlink(missing_ok=True)
     except sqlite3.Error as error:
         raise BackupError(f"SQLite online backup failed: {error}") from error
     fsync_file(destination)
-    return sqlite_check(destination, full=True)
+    metadata = sqlite_check(destination, full=True)
+    for suffix in ("-wal", "-shm"):
+        if Path(f"{destination}{suffix}").exists():
+            raise BackupError(f"SQLite snapshot retained a transient {suffix} sidecar")
+    return metadata
 
 
 def copy_tree(source: Path, destination: Path) -> None:

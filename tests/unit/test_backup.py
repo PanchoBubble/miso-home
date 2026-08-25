@@ -82,6 +82,23 @@ class MisoBackupTests(unittest.TestCase):
         )
         self.assertEqual(miso_backup.verify(self.settings, archive, full=True), archive)
 
+    def test_sqlite_snapshot_is_self_contained_without_wal_sidecars(self) -> None:
+        snapshot = self.staging / "snapshot.sqlite3"
+
+        metadata = miso_backup.create_sqlite_snapshot(self.database, snapshot)
+
+        self.assertEqual(metadata["user_version"], 3)
+        self.assertFalse(Path(f"{snapshot}-wal").exists())
+        self.assertFalse(Path(f"{snapshot}-shm").exists())
+        with sqlite3.connect(snapshot) as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA journal_mode").fetchone()[0], "delete"
+            )
+            self.assertEqual(
+                connection.execute("SELECT content FROM memories").fetchone()[0],
+                "recycling on Friday",
+            )
+
     def test_corruption_is_detected_before_decryption(self) -> None:
         archive = miso_backup.backup(self.settings)
         content = bytearray(archive.read_bytes())
