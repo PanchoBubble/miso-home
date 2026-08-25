@@ -13,6 +13,8 @@ const state = {
   selectedMemory: new Set(),
   memoryLoaded: false,
   memoryTag: "",
+  householdLoaded: false,
+  householdData: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -400,6 +402,247 @@ function emptyNode(text) {
   return node;
 }
 
+function householdActorLabel(actorId) {
+  if (actorId === "household:voice") return "Added by voice";
+  if (state.householdData?.actor?.id === actorId) return "Added by you";
+  return `Added by ${actorId}`;
+}
+
+function visibilityLabel(sharedOrVisibility) {
+  return sharedOrVisibility === true || sharedOrVisibility === "shared"
+    ? "Household"
+    : "Private";
+}
+
+function localDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function actionButton(label, action, data = {}, danger = false) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `row-action${danger ? " danger" : ""}`;
+  button.dataset.householdAction = action;
+  Object.entries(data).forEach(([key, value]) => {
+    button.dataset[key] = String(value);
+  });
+  button.textContent = label;
+  return button;
+}
+
+function renderShoppingLists(lists) {
+  const activeCount = lists.reduce(
+    (total, list) => total + list.items.filter((item) => !item.completed).length,
+    0,
+  );
+  $("#shopping-count").textContent = `${activeCount} item${activeCount === 1 ? "" : "s"}`;
+  const listNodes = lists.map((list) => {
+    const section = document.createElement("section");
+    section.className = "shopping-list";
+    const header = document.createElement("div");
+    header.className = "shopping-list-header";
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "shopping-list-title";
+    const title = document.createElement("strong");
+    title.textContent = list.name;
+    const scope = document.createElement("span");
+    scope.className = "visibility-chip";
+    scope.textContent = visibilityLabel(list.shared);
+    titleWrap.append(title, scope);
+    const count = document.createElement("span");
+    count.className = "count-badge";
+    count.textContent = `${list.items.length}`;
+    header.append(titleWrap, count);
+
+    const itemNodes = list.items.map((item) => {
+      const row = document.createElement("div");
+      row.className = `household-row${item.completed ? " completed" : ""}`;
+      const checked = document.createElement("input");
+      checked.type = "checkbox";
+      checked.checked = item.completed;
+      checked.className = "item-check";
+      checked.dataset.householdAction = "shopping_toggle";
+      checked.dataset.id = item.id;
+      checked.dataset.revision = item.revision;
+      checked.setAttribute("aria-label", `${item.completed ? "Restore" : "Complete"} ${item.name}`);
+      const copy = document.createElement("div");
+      copy.className = "household-row-copy";
+      const name = document.createElement("strong");
+      name.textContent = item.quantity > 1 ? `${item.quantity} × ${item.name}` : item.name;
+      const meta = document.createElement("small");
+      meta.textContent = `${householdActorLabel(item.added_by || item.actor_id)} · ${localDateTime(item.created_at)}`;
+      copy.append(name, meta);
+      const actorChip = document.createElement("span");
+      actorChip.className = `actor-chip${item.added_by === "household:voice" ? " voice" : ""}`;
+      actorChip.textContent = item.added_by === "household:voice" ? "Voice" : "Web";
+      const actions = document.createElement("div");
+      actions.className = "row-actions";
+      actions.append(
+        actionButton("Edit", "shopping_edit", {
+          id: item.id,
+          revision: item.revision,
+          name: item.name,
+          quantity: item.quantity,
+        }),
+        actionButton("Remove", "shopping_remove", {
+          id: item.id,
+          revision: item.revision,
+        }, true),
+      );
+      row.append(checked, copy, actorChip, actions);
+      return row;
+    });
+    section.append(header, ...(itemNodes.length ? itemNodes : [emptyNode("Nothing on this list")]));
+    return section;
+  });
+  $("#shopping-lists").replaceChildren(
+    ...(listNodes.length ? listNodes : [emptyNode("No lists yet. Add the first item above.")]),
+  );
+}
+
+function renderSchedule(data) {
+  const pending = [...data.reminders, ...data.timers]
+    .filter((item) => item.status === "pending")
+    .sort((left, right) => left.due_at.localeCompare(right.due_at));
+  const recentPast = [...data.reminders, ...data.timers]
+    .filter((item) => item.status !== "pending")
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+    .slice(0, 4);
+  $("#schedule-count").textContent = `${pending.length} active`;
+  const nodes = [...pending, ...recentPast].map((item) => {
+    const row = document.createElement("div");
+    row.className = `household-row schedule-item${item.status === "pending" ? "" : " past"}`;
+    const icon = document.createElement("span");
+    icon.className = "schedule-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = item.kind === "timer" ? "◷" : "◇";
+    const copy = document.createElement("div");
+    copy.className = "household-row-copy";
+    const title = document.createElement("strong");
+    title.textContent = item.title;
+    const meta = document.createElement("small");
+    meta.textContent = [
+      item.status === "pending" ? localDateTime(item.due_at) : item.status,
+      visibilityLabel(item.visibility),
+      householdActorLabel(item.created_by),
+    ].join(" · ");
+    copy.append(title, meta);
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    if (item.status === "pending") {
+      actions.append(
+        actionButton("Edit", "schedule_edit", {
+          id: item.id,
+          kind: item.kind,
+          title: item.title,
+          dueAt: item.due_at,
+          revision: item.revision,
+        }),
+        actionButton("Cancel", "schedule_cancel", {
+          id: item.id,
+          kind: item.kind,
+          revision: item.revision,
+        }, true),
+      );
+    }
+    row.append(icon, copy, actions);
+    return row;
+  });
+  $("#schedule-items").replaceChildren(
+    ...(nodes.length ? nodes : [emptyNode("No reminders or timers yet")]),
+  );
+}
+
+function renderHouseholdMessages(messages) {
+  $("#message-count").textContent = `${messages.length} note${messages.length === 1 ? "" : "s"}`;
+  const nodes = messages.map((message) => {
+    const article = document.createElement("article");
+    article.className = "household-message";
+    const content = document.createElement("p");
+    content.textContent = message.content;
+    const footer = document.createElement("div");
+    footer.className = "message-meta-row";
+    const meta = document.createElement("span");
+    meta.textContent = `${visibilityLabel(message.visibility)} · ${householdActorLabel(message.created_by)} · ${localDateTime(message.created_at)}`;
+    const remove = actionButton("Remove", "message_delete", {
+      recordId: message.record_id,
+    }, true);
+    footer.append(meta, remove);
+    article.append(content, footer);
+    return article;
+  });
+  $("#household-messages").replaceChildren(
+    ...(nodes.length ? nodes : [emptyNode("No household notes yet")]),
+  );
+}
+
+function showHouseholdNotice(message) {
+  const notice = $("#household-notice");
+  notice.textContent = message;
+  notice.classList.toggle("hidden", !message);
+}
+
+async function loadHousehold() {
+  $("#refresh-household").disabled = true;
+  try {
+    const data = await api("/api/household");
+    state.householdData = data;
+    state.householdLoaded = true;
+    renderShoppingLists(data.lists);
+    renderSchedule(data);
+    renderHouseholdMessages(data.messages);
+    $("#household-updated").textContent = `Updated ${new Date(data.refreshed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    showHouseholdNotice("");
+  } catch (error) {
+    showHouseholdNotice(`Could not load household: ${error.message}`);
+  } finally {
+    $("#refresh-household").disabled = false;
+  }
+}
+
+async function submitHouseholdAction(payload, submitter = null) {
+  if (submitter) submitter.disabled = true;
+  try {
+    await api("/api/household", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await loadHousehold();
+    return true;
+  } catch (error) {
+    const message = error.message === "revision_conflict"
+      ? "Someone changed that item first. The latest version has been loaded."
+      : error.message;
+    showHouseholdNotice(message);
+    if (error.message === "revision_conflict") await loadHousehold();
+    return false;
+  } finally {
+    if (submitter) submitter.disabled = false;
+  }
+}
+
+function setAppView(name) {
+  const household = name === "household";
+  $("#household-view").classList.toggle("hidden", !household);
+  $("#chat-view").classList.toggle("hidden", household);
+  $$('[data-app-view]').forEach((button) => {
+    const active = button.dataset.appView === name;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  if (household && !state.householdLoaded) loadHousehold();
+  if (!household) requestAnimationFrame(() => $("#chat-input").focus());
+}
+
 function memoryKey(record) {
   return record.record_type + ":" + record.record_id;
 }
@@ -755,6 +998,152 @@ function resetConversation() {
   $("#chat-input").focus();
 }
 
+$("#shopping-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const completed = await submitHouseholdAction({
+    action: "shopping_add",
+    name: $("#shopping-name").value.trim(),
+    quantity: Number($("#shopping-quantity").value),
+    list_name: $("#shopping-list-name").value.trim(),
+    shared: $("#shopping-shared").checked,
+  }, event.submitter);
+  if (completed) {
+    $("#shopping-name").value = "";
+    $("#shopping-quantity").value = "1";
+    $("#shopping-name").focus();
+  }
+});
+
+$("#reminder-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const due = new Date($("#reminder-due").value);
+  const completed = await submitHouseholdAction({
+    action: "reminder_create",
+    title: $("#reminder-title").value.trim(),
+    due_at: due.toISOString(),
+    visibility: $("#reminder-shared").checked ? "shared" : "private",
+  }, event.submitter);
+  if (completed) event.currentTarget.reset();
+});
+
+$("#timer-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const completed = await submitHouseholdAction({
+    action: "timer_create",
+    title: $("#timer-title").value.trim(),
+    duration_seconds: Number($("#timer-minutes").value) * 60,
+    visibility: $("#timer-shared").checked ? "shared" : "private",
+  }, event.submitter);
+  if (completed) {
+    $("#timer-title").value = "Timer";
+    $("#timer-minutes").value = "5";
+  }
+});
+
+$("#message-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const completed = await submitHouseholdAction({
+    action: "message_create",
+    content: $("#message-content").value.trim(),
+    visibility: $("#message-shared").checked ? "shared" : "private",
+  }, event.submitter);
+  if (completed) $("#message-content").value = "";
+});
+
+$("#shopping-lists").addEventListener("change", async (event) => {
+  const input = event.target.closest('[data-household-action="shopping_toggle"]');
+  if (!input) return;
+  input.disabled = true;
+  await submitHouseholdAction({
+    action: "shopping_update",
+    id: input.dataset.id,
+    expected_revision: Number(input.dataset.revision),
+    completed: input.checked,
+  });
+});
+
+async function handleHouseholdClick(event) {
+  const button = event.target.closest("[data-household-action]");
+  if (!button || button.matches("input")) return;
+  const action = button.dataset.householdAction;
+  if (action === "shopping_edit") {
+    const name = window.prompt("Item name", button.dataset.name);
+    if (name === null || !name.trim()) return;
+    const quantity = window.prompt("Quantity", button.dataset.quantity);
+    if (quantity === null) return;
+    await submitHouseholdAction({
+      action: "shopping_update",
+      id: button.dataset.id,
+      expected_revision: Number(button.dataset.revision),
+      name: name.trim(),
+      quantity: Number(quantity),
+    }, button);
+    return;
+  }
+  if (action === "shopping_remove") {
+    await submitHouseholdAction({
+      action,
+      id: button.dataset.id,
+      expected_revision: Number(button.dataset.revision),
+    }, button);
+    return;
+  }
+  if (action === "schedule_cancel") {
+    await submitHouseholdAction({
+      action: `${button.dataset.kind}_cancel`,
+      id: button.dataset.id,
+      expected_revision: Number(button.dataset.revision),
+    }, button);
+    return;
+  }
+  if (action === "schedule_edit") {
+    const title = window.prompt("Title", button.dataset.title);
+    if (title === null || !title.trim()) return;
+    const payload = {
+      action: `${button.dataset.kind}_update`,
+      id: button.dataset.id,
+      expected_revision: Number(button.dataset.revision),
+      title: title.trim(),
+    };
+    if (button.dataset.kind === "timer") {
+      const minutes = window.prompt("Restart for how many minutes?", "5");
+      if (minutes === null) return;
+      payload.duration_seconds = Number(minutes) * 60;
+    } else {
+      const current = new Date(button.dataset.dueAt);
+      const initial = Number.isNaN(current.getTime())
+        ? button.dataset.dueAt
+        : new Date(current.getTime() - current.getTimezoneOffset() * 60000)
+          .toISOString().slice(0, 16);
+      const dueAt = window.prompt("Due date and time", initial);
+      if (dueAt === null) return;
+      const dueDate = new Date(dueAt);
+      if (Number.isNaN(dueDate.getTime())) {
+        showHouseholdNotice("Enter a valid reminder date and time.");
+        return;
+      }
+      payload.due_at = dueDate.toISOString();
+    }
+    await submitHouseholdAction(payload, button);
+    return;
+  }
+  if (action === "message_delete") {
+    if (!window.confirm("Remove this household note?")) return;
+    await submitHouseholdAction({
+      action,
+      record_id: Number(button.dataset.recordId),
+    }, button);
+  }
+}
+
+$("#shopping-lists").addEventListener("click", handleHouseholdClick);
+$("#schedule-items").addEventListener("click", handleHouseholdClick);
+$("#household-messages").addEventListener("click", handleHouseholdClick);
+$("#refresh-household").addEventListener("click", loadHousehold);
+$$('[data-app-view]').forEach((button) => {
+  button.addEventListener("click", () => setAppView(button.dataset.appView));
+});
+
 $("#chat-form").addEventListener("submit", sendChat);
 $("#chat-input").addEventListener("input", resizeComposer);
 $("#chat-input").addEventListener("keydown", (event) => {
@@ -820,6 +1209,7 @@ $("#save-token").addEventListener("click", () => {
   else localStorage.removeItem("miso-dashboard-token");
   loadStatus();
   loadActivity();
+  loadHousehold();
 });
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -841,7 +1231,11 @@ updateRouteChip();
 resizeComposer();
 loadStatus();
 loadActivity();
+loadHousehold();
 registerServiceWorker();
 setInterval(() => {
-  if (state.connected) loadStatus();
+  if (state.connected) {
+    loadStatus();
+    if (!$("#household-view").classList.contains("hidden")) loadHousehold();
+  }
 }, 15000);

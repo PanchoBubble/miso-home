@@ -122,6 +122,7 @@ class HouseholdStore:
         *,
         title: str | None = None,
         due_at: datetime | None = None,
+        expected_revision: int | None = None,
         actor: Actor = VOICE_ACTOR,
     ) -> dict[str, object]:
         self.recover_due()
@@ -138,15 +139,26 @@ class HouseholdStore:
         if due_at is not None:
             updates.append("due_at = ?")
             values.append(_timestamp(due_at))
-        values.extend((identifier, kind))
+        values.extend((identifier, kind, actor.email))
+        revision_clause = ""
+        if expected_revision is not None:
+            revision_clause = " AND revision = ?"
+            values.append(expected_revision)
         with self.connect() as connection:
             cursor = connection.execute(
                 f"UPDATE scheduled_items SET {', '.join(updates)} "
                 "WHERE id = ? AND kind = ? AND status = 'pending' "
-                "AND (visibility = 'shared' OR owner_email = ?)",
-                (*values, actor.email),
+                f"AND (visibility = 'shared' OR owner_email = ?){revision_clause}",
+                values,
             )
             if cursor.rowcount != 1:
+                if expected_revision is not None and connection.execute(
+                    "SELECT 1 FROM scheduled_items WHERE id = ? AND kind = ? "
+                    "AND status = 'pending' "
+                    "AND (visibility = 'shared' OR owner_email = ?)",
+                    (identifier, kind, actor.email),
+                ).fetchone():
+                    raise ToolRejected("revision_conflict")
                 raise ToolRejected(f"pending {kind} was not found")
             row = connection.execute(
                 "SELECT * FROM scheduled_items WHERE id = ?", (identifier,)
@@ -154,21 +166,38 @@ class HouseholdStore:
         return self._scheduled_dict(row)
 
     def cancel_scheduled(
-        self, identifier: str, kind: str, *, actor: Actor = VOICE_ACTOR
+        self,
+        identifier: str,
+        kind: str,
+        *,
+        expected_revision: int | None = None,
+        actor: Actor = VOICE_ACTOR,
     ) -> dict[str, object]:
         self.recover_due()
         now = _timestamp(_utc(self._now()))
         with self.connect() as connection:
+            revision_clause = "" if expected_revision is None else " AND revision = ?"
+            values: tuple[object, ...] = (now, identifier, kind, actor.email)
+            if expected_revision is not None:
+                values += (expected_revision,)
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE scheduled_items
                 SET status = 'cancelled', updated_at = ?, revision = revision + 1
                 WHERE id = ? AND kind = ? AND status = 'pending'
                   AND (visibility = 'shared' OR owner_email = ?)
+                  {revision_clause}
                 """,
-                (now, identifier, kind, actor.email),
+                values,
             )
             if cursor.rowcount != 1:
+                if expected_revision is not None and connection.execute(
+                    "SELECT 1 FROM scheduled_items WHERE id = ? AND kind = ? "
+                    "AND status = 'pending' "
+                    "AND (visibility = 'shared' OR owner_email = ?)",
+                    (identifier, kind, actor.email),
+                ).fetchone():
+                    raise ToolRejected("revision_conflict")
                 raise ToolRejected(f"pending {kind} was not found")
             row = connection.execute(
                 "SELECT * FROM scheduled_items WHERE id = ?", (identifier,)
@@ -231,7 +260,7 @@ class HouseholdStore:
             )
             row = connection.execute(
                 """
-                SELECT id FROM shopping_lists
+                SELECT id, shared FROM shopping_lists
                 WHERE name = ? COLLATE NOCASE
                   AND (shared = 1 OR owner_email = ?)
                 """,
@@ -239,6 +268,8 @@ class HouseholdStore:
             ).fetchone()
             if row is None:
                 raise ToolRejected("shopping list is not accessible to this actor")
+            if bool(row["shared"]) != shared:
+                raise ToolRejected("list name already uses different visibility")
             connection.execute(
                 """
                 INSERT INTO shopping_items(
@@ -292,6 +323,55 @@ class HouseholdStore:
             ).fetchall()
         return [self._shopping_dict(row) for row in rows]
 
+    def list_shopping_lists(
+        self,
+        *,
+        include_completed: bool = True,
+        actor: Actor = VOICE_ACTOR,
+    ) -> list[dict[str, object]]:
+        """Return every accessible list with its active items and attribution."""
+        conditions = [
+            "i.status = 'active'",
+            "(l.shared = 1 OR l.owner_email = ?)",
+        ]
+        if not include_completed:
+            conditions.append("i.completed = 0")
+        with self.connect() as connection:
+            lists = connection.execute(
+                "SELECT * FROM shopping_lists "
+                "WHERE shared = 1 OR owner_email = ? "
+                "ORDER BY name COLLATE NOCASE, created_at, id",
+                (actor.email,),
+            ).fetchall()
+            rows = connection.execute(
+                f"""
+                SELECT i.*, l.name AS list_name, l.shared,
+                       l.owner_email, l.created_by
+                FROM shopping_items AS i JOIN shopping_lists AS l ON l.id = i.list_id
+                WHERE {' AND '.join(conditions)}
+                ORDER BY l.name COLLATE NOCASE, i.completed, i.created_at, i.id
+                """,
+                (actor.email,),
+            ).fetchall()
+        items_by_list: dict[str, list[dict[str, object]]] = {
+            row["id"]: [] for row in lists
+        }
+        for row in rows:
+            items_by_list[row["list_id"]].append(self._shopping_dict(row))
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "shared": bool(row["shared"]),
+                "owner_email": row["owner_email"],
+                "created_by": row["created_by"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "items": items_by_list[row["id"]],
+            }
+            for row in lists
+        ]
+
     def update_shopping_item(
         self,
         identifier: str,
@@ -299,6 +379,7 @@ class HouseholdStore:
         name: str | None = None,
         quantity: int | None = None,
         completed: bool | None = None,
+        expected_revision: int | None = None,
         actor: Actor = VOICE_ACTOR,
     ) -> dict[str, object]:
         if name is None and quantity is None and completed is None:
@@ -312,16 +393,28 @@ class HouseholdStore:
         if completed is not None:
             updates.append("completed = ?")
             values.append(int(completed))
-        values.append(identifier)
+        values.extend((identifier, actor.email))
+        revision_clause = ""
+        if expected_revision is not None:
+            revision_clause = " AND revision = ?"
+            values.append(expected_revision)
         with self.connect() as connection:
             cursor = connection.execute(
                 f"UPDATE shopping_items SET {', '.join(updates)} "
                 "WHERE id = ? AND status = 'active' AND EXISTS ("
                 "SELECT 1 FROM shopping_lists AS l WHERE l.id = shopping_items.list_id "
-                "AND (l.shared = 1 OR l.owner_email = ?))",
-                (*values, actor.email),
+                f"AND (l.shared = 1 OR l.owner_email = ?)){revision_clause}",
+                values,
             )
             if cursor.rowcount != 1:
+                if expected_revision is not None and connection.execute(
+                    "SELECT 1 FROM shopping_items AS i "
+                    "JOIN shopping_lists AS l ON l.id = i.list_id "
+                    "WHERE i.id = ? AND i.status = 'active' "
+                    "AND (l.shared = 1 OR l.owner_email = ?)",
+                    (identifier, actor.email),
+                ).fetchone():
+                    raise ToolRejected("revision_conflict")
                 raise ToolRejected("active shopping item was not found")
             row = connection.execute(
                 """
@@ -335,12 +428,20 @@ class HouseholdStore:
         return self._shopping_dict(row)
 
     def remove_shopping_item(
-        self, identifier: str, *, actor: Actor = VOICE_ACTOR
+        self,
+        identifier: str,
+        *,
+        expected_revision: int | None = None,
+        actor: Actor = VOICE_ACTOR,
     ) -> dict[str, object]:
         now = _timestamp(_utc(self._now()))
         with self.connect() as connection:
+            revision_clause = "" if expected_revision is None else " AND revision = ?"
+            values: tuple[object, ...] = (now, identifier, actor.email)
+            if expected_revision is not None:
+                values += (expected_revision,)
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE shopping_items
                 SET status = 'removed', updated_at = ?, revision = revision + 1
                 WHERE id = ? AND status = 'active'
@@ -349,10 +450,19 @@ class HouseholdStore:
                     WHERE l.id = shopping_items.list_id
                       AND (l.shared = 1 OR l.owner_email = ?)
                   )
+                  {revision_clause}
                 """,
-                (now, identifier, actor.email),
+                values,
             )
             if cursor.rowcount != 1:
+                if expected_revision is not None and connection.execute(
+                    "SELECT 1 FROM shopping_items AS i "
+                    "JOIN shopping_lists AS l ON l.id = i.list_id "
+                    "WHERE i.id = ? AND i.status = 'active' "
+                    "AND (l.shared = 1 OR l.owner_email = ?)",
+                    (identifier, actor.email),
+                ).fetchone():
+                    raise ToolRejected("revision_conflict")
                 raise ToolRejected("active shopping item was not found")
             row = connection.execute(
                 """
@@ -481,6 +591,8 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
         "enum": ["pending", "completed", "cancelled", "all"],
     }
     list_name = {"type": "string", "minLength": 1, "maxLength": 100}
+    revision = {"type": "integer", "minimum": 1}
+    visibility = {"type": "string", "enum": ["shared", "private"]}
 
     def timer_create(arguments: Mapping[str, object], context: ToolContext):
         context.raise_if_cancelled()
@@ -489,6 +601,10 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
             "timer": store.create_scheduled(
                 "timer", str(arguments.get("title", "Timer")), due,
                 actor=context.actor,
+                visibility=(
+                    str(arguments["visibility"])
+                    if "visibility" in arguments else None
+                ),
             )
         }
 
@@ -516,6 +632,10 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                 kind,
                 title=str(title_value) if title_value is not None else None,
                 due_at=due_value,
+                expected_revision=(
+                    int(arguments["expected_revision"])
+                    if "expected_revision" in arguments else None
+                ),
                 actor=context.actor,
             )
         }
@@ -525,7 +645,12 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
     ):
         return {
             kind: store.cancel_scheduled(
-                str(arguments["id"]), kind, actor=context.actor
+                str(arguments["id"]), kind,
+                expected_revision=(
+                    int(arguments["expected_revision"])
+                    if "expected_revision" in arguments else None
+                ),
+                actor=context.actor,
             )
         }
 
@@ -535,6 +660,7 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
             _object_schema({
                 "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 604800},
                 "title": title,
+                "visibility": visibility,
             }, ("duration_seconds",)), timer_create,
         ),
         ToolDefinition(
@@ -550,21 +676,28 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                     "type": "integer", "minimum": 1, "maximum": 604800
                 },
                 "title": title,
+                "expected_revision": revision,
             }, ("id",)),
             lambda arguments, context: scheduled_update("timer", arguments, context),
         ),
         ToolDefinition(
             "timer_cancel", "Cancel a pending timer",
-            _object_schema({"id": identifier}, ("id",)),
+            _object_schema({"id": identifier, "expected_revision": revision}, ("id",)),
             lambda arguments, context: scheduled_cancel("timer", arguments, context),
         ),
         ToolDefinition(
             "reminder_create", "Create a durable reminder",
-            _object_schema({"due_at": due_at, "title": title}, ("due_at", "title")),
+            _object_schema({
+                "due_at": due_at, "title": title, "visibility": visibility,
+            }, ("due_at", "title")),
             lambda arguments, context: {
                 "reminder": store.create_scheduled(
                     "reminder", str(arguments["title"]),
                     _parse_due_at(arguments["due_at"]), actor=context.actor,
+                    visibility=(
+                        str(arguments["visibility"])
+                        if "visibility" in arguments else None
+                    ),
                 )
             },
         ),
@@ -575,12 +708,15 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
         ),
         ToolDefinition(
             "reminder_update", "Update a pending reminder",
-            _object_schema({"id": identifier, "due_at": due_at, "title": title}, ("id",)),
+            _object_schema({
+                "id": identifier, "due_at": due_at, "title": title,
+                "expected_revision": revision,
+            }, ("id",)),
             lambda arguments, context: scheduled_update("reminder", arguments, context),
         ),
         ToolDefinition(
             "reminder_cancel", "Cancel a pending reminder",
-            _object_schema({"id": identifier}, ("id",)),
+            _object_schema({"id": identifier, "expected_revision": revision}, ("id",)),
             lambda arguments, context: scheduled_cancel("reminder", arguments, context),
         ),
         ToolDefinition(
@@ -588,12 +724,14 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
             _object_schema({
                 "list_name": list_name, "name": title,
                 "quantity": {"type": "integer", "minimum": 1, "maximum": 999},
+                "shared": {"type": "boolean"},
             }, ("name",)),
             lambda arguments, context: {
                 "item": store.add_shopping_item(
                     str(arguments.get("list_name", "shopping")), str(arguments["name"]),
                     int(arguments.get("quantity", 1)),
                     actor=context.actor,
+                    shared=bool(arguments.get("shared", True)),
                 )
             },
         ),
@@ -619,6 +757,7 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                 "id": identifier, "name": title,
                 "quantity": {"type": "integer", "minimum": 1, "maximum": 999},
                 "completed": {"type": "boolean"},
+                "expected_revision": revision,
             }, ("id",)),
             lambda arguments, context: {
                 "item": store.update_shopping_item(
@@ -626,16 +765,25 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
                     name=str(arguments["name"]) if "name" in arguments else None,
                     quantity=int(arguments["quantity"]) if "quantity" in arguments else None,
                     completed=bool(arguments["completed"]) if "completed" in arguments else None,
+                    expected_revision=(
+                        int(arguments["expected_revision"])
+                        if "expected_revision" in arguments else None
+                    ),
                     actor=context.actor,
                 )
             },
         ),
         ToolDefinition(
             "shopping_remove", "Remove an item from a shared shopping list",
-            _object_schema({"id": identifier}, ("id",)),
+            _object_schema({"id": identifier, "expected_revision": revision}, ("id",)),
             lambda arguments, context: {
                 "item": store.remove_shopping_item(
-                    str(arguments["id"]), actor=context.actor
+                    str(arguments["id"]),
+                    expected_revision=(
+                        int(arguments["expected_revision"])
+                        if "expected_revision" in arguments else None
+                    ),
+                    actor=context.actor,
                 )
             },
         ),

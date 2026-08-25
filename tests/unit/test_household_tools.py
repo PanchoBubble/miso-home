@@ -160,6 +160,35 @@ class HouseholdToolTests(unittest.TestCase):
         self.assertEqual(history[0]["status"], "removed")
         self.assertEqual(history[0]["revision"], 3)
 
+    def test_revision_conflicts_do_not_overwrite_newer_household_state(self) -> None:
+        item = self.invoke(
+            self.registry,
+            "shopping_add",
+            {"list_name": "Shopping", "name": "Milk"},
+        )["item"]
+        updated = self.invoke(
+            self.registry,
+            "shopping_update",
+            {
+                "id": item["id"],
+                "name": "Oat milk",
+                "expected_revision": item["revision"],
+            },
+        )["item"]
+        stale = self.registry.invoke(
+            "shopping_update",
+            {
+                "id": item["id"],
+                "name": "Whole milk",
+                "expected_revision": item["revision"],
+            },
+        )
+        self.assertEqual(stale.status, ToolStatus.REJECTED)
+        self.assertEqual(stale.error, "revision_conflict")
+        lists = HouseholdStore(self.path).list_shopping_lists()
+        self.assertEqual(lists[0]["items"][0]["name"], "Oat milk")
+        self.assertEqual(lists[0]["items"][0]["revision"], updated["revision"])
+
     def test_invalid_inputs_never_write(self) -> None:
         result = self.registry.invoke(
             "shopping_add", {"name": "Milk", "quantity": 0}

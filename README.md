@@ -114,7 +114,15 @@ authorization, security, and Pi deployment steps.
 
 ## Local dashboard
 
-The service root (`/`) serves the dependency-free operator console. It streams
+The service root (`/`) opens a full-viewport household organizer backed by live
+SQLite state. Members can manage shared or private shopping lists, reminders,
+timers, and noticeboard messages, see which list entries came from voice, and
+switch to chat without leaving the PWA. Revision-checked mutations reject stale
+browser edits instead of overwriting newer household or voice changes. Installed
+copies request fullscreen display and fall back to standalone mode where the
+platform does not support it.
+
+The dependency-free operator console streams
 text and tool results, exposes bounded provider health and routing progress,
 searches SQLite memory, and reads redacted tool/routing activity. Chat history
 is retained under a conversation ID without exposing database paths, provider

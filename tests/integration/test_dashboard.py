@@ -8,6 +8,7 @@ import unittest
 from miso.access import AccessJWTError
 from miso.config import Settings
 from miso.http import create_server
+from miso.identity import VOICE_ACTOR
 from miso.providers import ChatChunk, ProviderHealth, ProviderSet
 from miso.routing import ProviderRouter
 from miso.tools import InMemoryAuditLog
@@ -106,6 +107,10 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="remember-form"', content)
         self.assertIn(b'id="prune-form"', content)
         self.assertIn(b'id="export-memory"', content)
+        self.assertIn(b'id="household-view"', content)
+        self.assertIn(b'id="shopping-form"', content)
+        self.assertIn(b'id="reminder-form"', content)
+        self.assertIn(b'id="message-form"', content)
         self.assertIn(b'http://miso.local/', content)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
         response, javascript = self.request("GET", "/app.js")
@@ -127,7 +132,8 @@ class DashboardIntegrationTests(unittest.TestCase):
             response.getheader("Content-Type"),
             "application/manifest+json; charset=utf-8",
         )
-        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual(manifest["display"], "fullscreen")
+        self.assertEqual(manifest["display_override"][0], "fullscreen")
         self.assertEqual(manifest["start_url"], "/")
         self.assertIn("192x192", {icon["sizes"] for icon in manifest["icons"]})
         self.assertIn("512x512", {icon["sizes"] for icon in manifest["icons"]})
@@ -136,7 +142,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v5', service_worker)
+        self.assertIn(b'miso-shell-v6', service_worker)
         self.assertNotIn(b'caches.match(request)', service_worker)
 
         response, icon = self.request("GET", "/icon-192.png")
@@ -177,6 +183,101 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(identity["actor"]["id"], "local@miso.invalid")
         self.assertEqual(identity["actor"]["source"], "web")
         self.assertEqual(identity["voice_actor"]["id"], "household:voice")
+
+    def test_household_views_share_live_state_and_reject_stale_edits(self) -> None:
+        response, content = self.request(
+            "POST",
+            "/api/household",
+            {
+                "action": "shopping_add",
+                "list_name": "Shopping",
+                "name": "Coffee",
+                "quantity": 2,
+                "shared": True,
+            },
+        )
+        self.assertEqual(response.status, 201)
+        created = json.loads(content)["item"]
+        self.assertEqual(created["added_by"], "local@miso.invalid")
+
+        voice = self.server.tool_registry.invoke(
+            "shopping_add",
+            {"list_name": "Shopping", "name": "Bread"},
+            actor=VOICE_ACTOR,
+        )
+        self.assertTrue(voice.ok)
+
+        response, content = self.request("GET", "/api/household")
+        state = json.loads(content)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(state["actor"]["id"], "local@miso.invalid")
+        self.assertEqual(
+            {item["added_by"] for item in state["lists"][0]["items"]},
+            {"local@miso.invalid", "household:voice"},
+        )
+
+        response, content = self.request(
+            "POST",
+            "/api/household",
+            {
+                "action": "shopping_update",
+                "id": created["id"],
+                "name": "Decaf coffee",
+                "expected_revision": created["revision"],
+            },
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(content)["item"]["revision"], 2)
+        response, content = self.request(
+            "POST",
+            "/api/household",
+            {
+                "action": "shopping_update",
+                "id": created["id"],
+                "name": "Stale coffee",
+                "expected_revision": created["revision"],
+            },
+        )
+        self.assertEqual(response.status, 409)
+        self.assertEqual(json.loads(content)["error"], "revision_conflict")
+
+        response, content = self.request(
+            "POST",
+            "/api/household",
+            {
+                "action": "reminder_create",
+                "title": "Put the bins out",
+                "due_at": "2030-08-25T19:00:00+01:00",
+                "visibility": "private",
+            },
+        )
+        self.assertEqual(response.status, 201)
+        self.assertEqual(json.loads(content)["reminder"]["visibility"], "private")
+
+        response, _ = self.request(
+            "POST",
+            "/api/household",
+            {
+                "action": "message_create",
+                "content": "Dinner is at seven",
+                "visibility": "shared",
+            },
+        )
+        self.assertEqual(response.status, 201)
+        response, content = self.request("GET", "/api/household")
+        refreshed = json.loads(content)
+        self.assertEqual(refreshed["messages"][0]["content"], "Dinner is at seven")
+        self.assertEqual(refreshed["reminders"][0]["title"], "Put the bins out")
+
+        response, content = self.request("GET", "/api/activity")
+        activity = json.loads(content)["events"]
+        self.assertTrue(
+            any(
+                item.get("tool") == "shopping_update"
+                and item.get("actor") == "local@miso.invalid"
+                for item in activity
+            )
+        )
 
     def test_streamed_routed_tool_chat_is_searchable_and_audited(self) -> None:
         response, content = self.request(

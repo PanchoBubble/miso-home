@@ -46,6 +46,7 @@ from miso.tools import (
     ToolRegistry,
     create_runtime_registry,
 )
+from miso.tools.audit import audit_event
 
 MISO_SYSTEM_PROMPT = (
     "You are Miso, a friendly local household assistant. Answer ordinary questions "
@@ -109,6 +110,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.wake_manager = wake_manager
         self.conversation_manager = conversation_manager
         self.memory_store = MemoryStore(settings.database_path)
+        self.household_store = HouseholdStore(settings.database_path)
         self.identity_policy = identity_policy
         self.access_verifier = access_verifier
         self._member_lock = threading.Lock()
@@ -229,6 +231,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 except ValueError:
                     limit = 50
                 self._activity(limit)
+            elif parsed.path == "/api/household":
+                self._household()
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -272,6 +276,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     )
             elif parsed.path == "/api/memory":
                 self._memory_action(payload)
+            elif parsed.path == "/api/household":
+                self._household_action(payload)
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -339,6 +345,152 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     "conversation": self.miso.conversation_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
                 },
+            )
+
+        def _household(self) -> None:
+            actor = self._actor()
+            messages = self.miso.memory_store.search(
+                "",
+                limit=50,
+                actor=actor,
+                kinds=("explicit",),
+                tag="household-message",
+                record_types=("memory",),
+            )
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "actor": actor.public_dict(),
+                    "lists": self.miso.household_store.list_shopping_lists(
+                        actor=actor
+                    ),
+                    "timers": self.miso.household_store.list_scheduled(
+                        "timer", "all", actor=actor
+                    ),
+                    "reminders": self.miso.household_store.list_scheduled(
+                        "reminder", "all", actor=actor
+                    ),
+                    "messages": [
+                        _memory_result_payload(item) for item in messages
+                    ],
+                    "refreshed_at": utc_now(),
+                },
+            )
+
+        def _household_action(self, payload: dict[str, object]) -> None:
+            action = payload.get("action")
+            actor = self._actor()
+            tool_name = ""
+            arguments: dict[str, object] = {}
+            output_key = ""
+            try:
+                if action == "shopping_add":
+                    tool_name = "shopping_add"
+                    output_key = "item"
+                    arguments = _copy_fields(
+                        payload,
+                        ("list_name", "name", "quantity", "shared"),
+                    )
+                elif action == "shopping_update":
+                    tool_name = "shopping_update"
+                    output_key = "item"
+                    arguments = _copy_fields(
+                        payload,
+                        ("id", "name", "quantity", "completed", "expected_revision"),
+                    )
+                elif action == "shopping_remove":
+                    tool_name = "shopping_remove"
+                    output_key = "item"
+                    arguments = _copy_fields(
+                        payload, ("id", "expected_revision")
+                    )
+                elif action in {"timer_create", "reminder_create"}:
+                    tool_name = cast(str, action)
+                    output_key = "timer" if action == "timer_create" else "reminder"
+                    arguments = _copy_fields(
+                        payload,
+                        ("title", "duration_seconds", "due_at", "visibility"),
+                    )
+                elif action in {
+                    "timer_update", "reminder_update",
+                    "timer_cancel", "reminder_cancel",
+                }:
+                    tool_name = cast(str, action)
+                    output_key = "timer" if str(action).startswith("timer") else "reminder"
+                    arguments = _copy_fields(
+                        payload,
+                        ("id", "title", "duration_seconds", "due_at", "expected_revision"),
+                    )
+                elif action == "message_create":
+                    content = payload.get("content")
+                    visibility = payload.get("visibility", "shared")
+                    if (
+                        not isinstance(content, str)
+                        or not 1 <= len(content.strip()) <= 2000
+                    ):
+                        raise ValueError("invalid_message_content")
+                    if visibility not in {"shared", "private"}:
+                        raise ValueError("invalid_visibility")
+                    record_id = self.miso.memory_store.add_memory(
+                        content.strip(),
+                        kind="explicit",
+                        importance=0.7,
+                        tags=("household-message",),
+                        actor=actor,
+                        visibility=cast(str, visibility),
+                    )
+                    self.miso.tool_registry.audit_sink.record(
+                        audit_event(
+                            "household_message_created",
+                            record_id=record_id,
+                            visibility=visibility,
+                            actor=actor.actor_id,
+                            actor_source=actor.source,
+                        )
+                    )
+                    self._json(HTTPStatus.CREATED, {"record_id": record_id})
+                    return
+                elif action == "message_delete":
+                    record_id = _record_id(payload.get("record_id"))
+                    deleted = self.miso.memory_store.delete_records(
+                        (("memory", record_id),), actor=actor
+                    )
+                    if deleted.records_deleted != 1:
+                        self._json(
+                            HTTPStatus.NOT_FOUND, {"error": "message_not_found"}
+                        )
+                        return
+                    self.miso.tool_registry.audit_sink.record(
+                        audit_event(
+                            "household_message_deleted",
+                            record_id=record_id,
+                            actor=actor.actor_id,
+                            actor_source=actor.source,
+                        )
+                    )
+                    self._json(HTTPStatus.OK, {"deleted": True})
+                    return
+                else:
+                    raise ValueError("invalid_household_action")
+            except (PermissionError, ValueError) as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+
+            result = self.miso.tool_registry.invoke(
+                tool_name, arguments, actor=actor
+            )
+            if not result.ok:
+                status = (
+                    HTTPStatus.CONFLICT
+                    if result.error == "revision_conflict"
+                    else HTTPStatus.BAD_REQUEST
+                )
+                self._json(status, {"error": result.error or "household_action_failed"})
+                return
+            output = result.output or {}
+            self._json(
+                HTTPStatus.CREATED if tool_name.endswith("_create") or tool_name == "shopping_add" else HTTPStatus.OK,
+                {output_key: output.get(output_key)},
             )
 
         def _speech(self, payload: dict[str, object]) -> None:
@@ -840,6 +992,12 @@ def _record_id(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("invalid_record_id")
     return value
+
+
+def _copy_fields(
+    payload: dict[str, object], fields: tuple[str, ...]
+) -> dict[str, object]:
+    return {name: payload[name] for name in fields if name in payload}
 
 
 def _jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:

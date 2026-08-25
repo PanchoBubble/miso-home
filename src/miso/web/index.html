@@ -32,6 +32,11 @@
           </span>
         </a>
 
+        <nav class="primary-nav" aria-label="Main views">
+          <button class="primary-nav-button active" data-app-view="household" type="button" aria-current="page">Home</button>
+          <button class="primary-nav-button" data-app-view="chat" type="button">Ask Miso</button>
+        </nav>
+
         <nav class="app-actions" aria-label="Dashboard actions">
           <button id="install-app" class="install-button hidden" type="button">Install</button>
           <button id="service-status" class="status-button" type="button" title="Refresh connection status">
@@ -48,7 +53,81 @@
       </header>
 
       <main class="main-stage">
-        <section class="conversation" aria-label="Conversation with Miso">
+        <section id="household-view" class="household-dashboard" aria-label="Household organizer">
+          <header class="household-header">
+            <div>
+              <p class="eyebrow">Household · live from Miso</p>
+              <h1>Everything at home, in one place.</h1>
+              <p>Lists, reminders, timers, and notes stay in sync with requests made by voice.</p>
+            </div>
+            <div class="household-refresh">
+              <span id="household-updated" aria-live="polite">Loading household…</span>
+              <button id="refresh-household" class="quiet-button" type="button">Refresh</button>
+            </div>
+          </header>
+
+          <div id="household-notice" class="household-notice hidden" role="status"></div>
+
+          <div class="household-grid">
+            <section class="household-card shopping-card">
+              <div class="section-heading">
+                <div><p class="card-kicker">Shared & private</p><h2>Shopping lists</h2></div>
+                <span id="shopping-count" class="count-badge">0 items</span>
+              </div>
+              <form id="shopping-form" class="quick-add shopping-add">
+                <label class="sr-only" for="shopping-name">Item</label>
+                <input id="shopping-name" maxlength="500" placeholder="Add an item" required>
+                <label class="sr-only" for="shopping-quantity">Quantity</label>
+                <input id="shopping-quantity" type="number" min="1" max="999" value="1" required>
+                <label class="sr-only" for="shopping-list-name">List</label>
+                <input id="shopping-list-name" maxlength="100" value="Shopping" placeholder="List name" required>
+                <label class="scope-toggle"><input id="shopping-shared" type="checkbox" checked><span>Household</span></label>
+                <button type="submit">Add</button>
+              </form>
+              <div id="shopping-lists" class="shopping-lists"></div>
+            </section>
+
+            <section class="household-card schedule-card">
+              <div class="section-heading">
+                <div><p class="card-kicker">Upcoming</p><h2>Reminders & timers</h2></div>
+                <span id="schedule-count" class="count-badge">0 active</span>
+              </div>
+              <div class="schedule-forms">
+                <form id="reminder-form" class="quick-add schedule-add">
+                  <strong>New reminder</strong>
+                  <input id="reminder-title" maxlength="500" placeholder="Take the bins out" aria-label="Reminder title" required>
+                  <input id="reminder-due" type="datetime-local" aria-label="Reminder time" required>
+                  <label class="scope-toggle"><input id="reminder-shared" type="checkbox"><span>Household</span></label>
+                  <button type="submit">Remind me</button>
+                </form>
+                <form id="timer-form" class="quick-add schedule-add">
+                  <strong>New timer</strong>
+                  <input id="timer-title" maxlength="500" value="Timer" placeholder="Timer name" aria-label="Timer title" required>
+                  <label class="duration-field"><input id="timer-minutes" type="number" min="1" max="10080" value="5" required><span>minutes</span></label>
+                  <label class="scope-toggle"><input id="timer-shared" type="checkbox"><span>Household</span></label>
+                  <button type="submit">Start timer</button>
+                </form>
+              </div>
+              <div id="schedule-items" class="schedule-items"></div>
+            </section>
+
+            <section class="household-card messages-card">
+              <div class="section-heading">
+                <div><p class="card-kicker">Noticeboard</p><h2>Household messages</h2></div>
+                <span id="message-count" class="count-badge">0 notes</span>
+              </div>
+              <form id="message-form" class="quick-add message-add">
+                <label class="sr-only" for="message-content">Message</label>
+                <textarea id="message-content" rows="2" maxlength="2000" placeholder="Leave a note for the household" required></textarea>
+                <label class="scope-toggle"><input id="message-shared" type="checkbox" checked><span>Household</span></label>
+                <button type="submit">Post note</button>
+              </form>
+              <div id="household-messages" class="household-messages"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="chat-view" class="conversation hidden" aria-label="Conversation with Miso">
           <header class="conversation-header">
             <div>
               <p class="eyebrow">At home · private by default</p>
