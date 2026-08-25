@@ -11,11 +11,17 @@ from pathlib import Path
 
 from miso.audio import AudioFormat
 from miso.wake import OpenWakeWordModel, WakeDetector, WakeWordError
+from miso.wake_corpus import load_wake_corpus
 
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument(
+        "--manifest-split",
+        choices=("training", "evaluation"),
+        default="evaluation",
+    )
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument(
         "--executable",
@@ -49,10 +55,12 @@ def _audio(path: Path) -> tuple[bytes, float]:
 
 
 def benchmark(options: argparse.Namespace) -> dict[str, object]:
-    payload = json.loads(options.manifest.read_text(encoding="utf-8"))
-    raw_cases = payload.get("cases") if isinstance(payload, dict) else None
-    if not isinstance(raw_cases, list) or not raw_cases:
-        raise ValueError("manifest must contain a non-empty cases array")
+    corpus = load_wake_corpus(
+        options.manifest, required_split=options.manifest_split
+    )
+    cases = corpus.cases_for(options.manifest_split)
+    if not cases:
+        raise ValueError(f"manifest has no {options.manifest_split} cases")
     model = OpenWakeWordModel(
         options.executable,
         options.model,
@@ -67,23 +75,16 @@ def benchmark(options: argparse.Namespace) -> dict[str, object]:
         activation_frames=options.activation_frames,
         cooldown_seconds=options.cooldown_seconds,
     )
-    manifest_root = options.manifest.parent
     results: list[dict[str, object]] = []
     positives = true_positives = false_positive_files = false_activations = 0
     negative_seconds = 0.0
     target_positives = target_true_positives = 0
     language_counts: dict[str, list[int]] = {"en": [0, 0], "es": [0, 0]}
     try:
-        for raw in raw_cases:
-            if not isinstance(raw, dict):
-                raise ValueError("every manifest case must be an object")
-            relative = raw.get("path")
-            label = raw.get("label")
-            if not isinstance(relative, str) or label not in {"positive", "negative"}:
-                raise ValueError(
-                    "case path must be text and label positive or negative"
-                )
-            path = (manifest_root / relative).resolve()
+        for case in cases:
+            relative = case.relative_path
+            label = case.label
+            path = case.path
             pcm, duration_seconds = _audio(path)
             detector.reset()
             events = []
@@ -99,11 +100,11 @@ def benchmark(options: argparse.Namespace) -> dict[str, object]:
             if label == "positive":
                 positives += 1
                 true_positives += int(detected)
-                language = raw.get("language")
+                language = case.language
                 if language in language_counts:
                     language_counts[language][0] += 1
                     language_counts[language][1] += int(detected)
-                distance = raw.get("distance_meters")
+                distance = case.distance_meters
                 if (
                     isinstance(distance, (int, float))
                     and distance >= options.target_distance_meters
@@ -118,8 +119,8 @@ def benchmark(options: argparse.Namespace) -> dict[str, object]:
                 {
                     "path": relative,
                     "label": label,
-                    "language": raw.get("language"),
-                    "distance_meters": raw.get("distance_meters"),
+                    "language": case.language,
+                    "distance_meters": case.distance_meters,
                     "duration_seconds": round(duration_seconds, 3),
                     "detected": detected,
                     "activations": len(events),
@@ -153,6 +154,11 @@ def benchmark(options: argparse.Namespace) -> dict[str, object]:
         "phrase": options.phrase,
         "model": options.model.name,
         "offline": True,
+        "corpus": {
+            "split": options.manifest_split,
+            "consent_confirmed_at": corpus.consent_confirmed_at,
+            "delete_raw_by": corpus.delete_raw_by,
+        },
         "settings": {
             "threshold": options.threshold,
             "vad_threshold": options.vad_threshold,
@@ -174,7 +180,7 @@ def benchmark(options: argparse.Namespace) -> dict[str, object]:
             "target_distance_recall": (
                 None if target_recall is None else round(target_recall, 4)
             ),
-            "negative_files": len(raw_cases) - positives,
+            "negative_files": len(cases) - positives,
             "false_positive_files": false_positive_files,
             "negative_audio_hours": round(negative_seconds / 3600, 6),
             "false_activations": false_activations,

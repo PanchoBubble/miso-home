@@ -23,9 +23,11 @@ requires human speech captured through the deployment microphone.
 ## Model training
 
 `ops/train-wakeword.py` reproducibly trains `Miso` as a single target phrase
-with openWakeWord 0.6.0. It uses 20,000 augmented positive examples across
-English and Spanish TTS voices, 10,000 confusable negatives, and 20,000 windows
-from the upstream large negative feature set. Confusables include `Milo`,
+with openWakeWord 0.6.0. Its baseline uses 20,000 augmented positive examples
+across English and Spanish TTS voices, 10,000 confusable negatives, and 20,000
+windows from the upstream large negative feature set. It can additionally mix
+consented training-split microphone positives and household hard negatives.
+Confusables include `Milo`,
 `Mia`, `missile`, `missing`, `mismo`, `misa`, `piso`, `quiso`, `hizo`, `aviso`,
 and `permiso`. Voice identities and the final 20% of the general-negative
 timeline are held out from training.
@@ -37,15 +39,20 @@ and scikit-learn. Download openWakeWord's
 then run:
 
 ```bash
-python ops/train-wakeword.py \
+PYTHONPATH=src python ops/train-wakeword.py \
   --output-directory .local/wake-training/run \
-  --negative-features .local/wake-training/validation_set_features.npy
+  --negative-features .local/wake-training/validation_set_features.npy \
+  --microphone-manifest .local/wake-corpus/manifest.json
 ```
 
-The fixed seed, disjoint voice sets, augmentation parameters, selected
-threshold, complete threshold matrix, and ONNX/sklearn parity check are written
-to `metrics.json`. A run exits nonzero unless it finds at least 80% aggregate
-and per-language recall with no more than 0.5 false activations per hour.
+The fixed seed, disjoint voice sets, aggregate microphone corpus counts,
+retention deadline, selected threshold, complete threshold matrix, and
+ONNX/sklearn parity check are written to `metrics.json`. Raw paths, group IDs,
+and audio are not copied into the training output. A run exits nonzero unless
+its synthetic/upstream-negative model-selection holdout finds at least 80%
+aggregate and per-language recall with no more than 0.5 false activations per
+hour. That exit status is not physical-microphone acceptance; the evaluation
+split below remains authoritative.
 
 The accepted model is committed at `models/openwakeword/miso.onnx`. Install it
 with its pinned checksum:
@@ -63,35 +70,55 @@ model.
 
 ## Recording manifest
 
-Record multiple people saying Miso naturally before an English or Spanish
-command at 1 m and 3 m. Add at least one hour of negative room audio containing
-conversation, television, music, silence, and the confusable words. WAV files
-must be uncompressed mono 16 kHz 16-bit PCM. The manifest is JSON relative to
-its own location:
+Record Miso naturally before English and Spanish commands at 1 m and 3 m. Use
+separate recording sessions for training and evaluation, represented by
+pseudonymous `group_id` values; a group may not cross the split boundary. Add
+training hard negatives containing confusable words and reserve at least one
+hour of evaluation room audio containing ordinary conversation, television,
+music, and silence. WAV files must be uncompressed mono 16 kHz 16-bit PCM and
+must stay beneath the manifest directory. Keep the corpus under `.local/`, not
+in git. The manifest must record the explicit consent time and deletion
+deadline:
 
 ```json
 {
+  "consent": {
+    "confirmed": true,
+    "confirmed_at": "2026-08-25T20:00:00Z",
+    "delete_raw_by": "2026-08-26T20:00:00Z"
+  },
   "cases": [
     {
-      "path": "positive/en-speaker-1-3m.wav",
+      "path": "training/en-session-a-1m.wav",
       "label": "positive",
       "language": "en",
-      "distance_meters": 3
+      "distance_meters": 1,
+      "split": "training",
+      "group_id": "positive-session-a"
     },
     {
-      "path": "positive/es-speaker-1-3m.wav",
+      "path": "evaluation/es-session-b-3m.wav",
       "label": "positive",
       "language": "es",
-      "distance_meters": 3
+      "distance_meters": 3,
+      "split": "evaluation",
+      "group_id": "positive-session-b"
     },
     {
-      "path": "negative/quiet-room-01.wav",
+      "path": "evaluation/quiet-room-01.wav",
       "label": "negative",
-      "language": "mixed"
+      "language": "mixed",
+      "split": "evaluation",
+      "group_id": "negative-session-b"
     }
   ]
 }
 ```
+
+The loader refuses missing consent, expired retention, absolute or escaping
+paths, duplicate files, unsupported labels/languages, and any `group_id` used
+in both splits. The trainer reads only `training` audio. The scorer defaults to
+`evaluation` and never selects a threshold from training recordings.
 
 Run a threshold matrix and retain each JSON result with the model checksum:
 
@@ -109,6 +136,18 @@ done
 Tune `MISO_WAKE_THRESHOLD`, `MISO_WAKE_VAD_THRESHOLD`,
 `MISO_WAKE_ENERGY_THRESHOLD_DBFS`, and `MISO_WAKE_ACTIVATION_FRAMES` from those
 results. Do not select a threshold against the training clips.
+
+After the model, aggregate metrics, and checksums are retained, delete the raw
+audio before its approved deadline. The deletion helper resolves and validates
+only manifest-listed files and emits a path-free audit receipt:
+
+```bash
+PYTHONPATH=src python ops/delete-wakeword-corpus.py \
+  --manifest .local/wake-corpus/manifest.json \
+  --split all \
+  --audit-output .local/wake-training/raw-audio-deletion.json \
+  --confirm-delete
+```
 
 ## Synthetic model-selection result
 
@@ -135,10 +174,12 @@ The full machine-readable result is in
 software candidate; they do not replace the physical-microphone acceptance
 described below.
 
-## Current hardware gate
+## Current physical result
 
-On 2026-08-23 the Pancho Pi exposed only its two HDMI playback cards and no
-capture PCM. The runtime and repeatable scorer can therefore be validated in
-software, but human distance and quiet-room measurements remain blocked until
-the intended USB microphone is attached. This limitation must stay visible in
-the beads acceptance record rather than being replaced by synthetic results.
+The intended USB microphone is now attached. A consented 2026-08-25 calibration
+at approximately 1 m measured only 30% recall at the deployed `0.999` threshold.
+Lowering the threshold to `0.95` recovered 80% English and Spanish recall but
+raised the existing negative-set prediction to 6.5452 false activations/hour.
+Those ten temporary clips and their path-bearing artifacts were deleted after
+aggregate metrics were recorded. Production therefore remains at `0.999` until
+a retrained model passes the disjoint physical evaluation above.

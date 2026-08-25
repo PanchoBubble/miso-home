@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train a reproducible Miso openWakeWord head from bilingual synthetic speech."""
+"""Train a Miso openWakeWord head from synthetic and microphone speech."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from onnx import TensorProto, helper, numpy_helper
 from openwakeword.utils import AudioFeatures
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
+
+from miso.wake_corpus import WakeCorpus, load_wake_corpus
 
 
 SAMPLE_RATE = 16_000
@@ -128,6 +130,9 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--general-negative-train", type=int, default=20_000)
     parser.add_argument("--positive-test", type=int, default=2_000)
     parser.add_argument("--confusable-test", type=int, default=2_000)
+    parser.add_argument("--microphone-manifest", type=Path)
+    parser.add_argument("--microphone-positive-train", type=int, default=5_000)
+    parser.add_argument("--microphone-negative-train", type=int, default=5_000)
     parser.add_argument("--seed", type=int, default=20260823)
     return parser.parse_args()
 
@@ -216,15 +221,22 @@ def _synthesize_one(
     aiff_path.unlink()
 
 
-def load_trimmed(path: Path) -> np.ndarray:
+def load_pcm(path: Path) -> np.ndarray:
     with wave.open(str(path), "rb") as source:
         if (
             source.getframerate() != SAMPLE_RATE
             or source.getnchannels() != 1
             or source.getsampwidth() != 2
+            or source.getcomptype() != "NONE"
         ):
-            raise ValueError(f"invalid synthesized WAV: {path}")
-        pcm = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
+            raise ValueError(f"WAV must be uncompressed mono 16 kHz 16-bit: {path}")
+        return np.frombuffer(
+            source.readframes(source.getnframes()), dtype="<i2"
+        ).copy()
+
+
+def load_trimmed(path: Path) -> np.ndarray:
+    pcm = load_pcm(path)
     peak = int(np.max(np.abs(pcm.astype(np.int32)))) if pcm.size else 0
     threshold = max(100, round(peak * 0.0125))
     active = np.flatnonzero(np.abs(pcm.astype(np.int32)) >= threshold)
@@ -307,6 +319,105 @@ def make_feature_set(
                 flush=True,
             )
     return features, languages
+
+
+def make_hard_negative_feature_set(
+    preprocessor: AudioFeatures,
+    paths: list[Path],
+    count: int,
+    rng: np.random.Generator,
+    *,
+    batch_size: int = 128,
+) -> np.ndarray:
+    loaded = {path: load_pcm(path).astype(np.float32) for path in paths}
+    features = np.empty((count, FEATURE_FRAMES, FEATURE_WIDTH), dtype=np.float32)
+    completed = 0
+    started = time.monotonic()
+    while completed < count:
+        size = min(batch_size, count - completed)
+        clips = np.zeros((size, CLIP_SAMPLES), dtype=np.int16)
+        for index in range(size):
+            path = paths[int(rng.integers(0, len(paths)))]
+            audio = loaded[path]
+            if len(audio) > CLIP_SAMPLES:
+                start = int(rng.integers(0, len(audio) - CLIP_SAMPLES + 1))
+                value = audio[start : start + CLIP_SAMPLES]
+            else:
+                value = audio
+            gain = float(rng.uniform(0.8, 1.2))
+            value = np.clip(np.rint(value * gain), -32_768, 32_767).astype(
+                np.int16
+            )
+            offset = (
+                int(rng.integers(0, CLIP_SAMPLES - len(value) + 1))
+                if len(value) < CLIP_SAMPLES
+                else 0
+            )
+            clips[index, offset : offset + len(value)] = value
+        features[completed : completed + size] = preprocessor.embed_clips(
+            clips, batch_size=batch_size, ncpu=1
+        )
+        completed += size
+        if completed % 1_024 == 0 or completed == count:
+            elapsed = max(0.001, time.monotonic() - started)
+            print(
+                f"embedded {completed}/{count} microphone hard negatives "
+                f"({completed / elapsed:.1f} clips/s)",
+                flush=True,
+            )
+    return features
+
+
+def microphone_training_bases(
+    corpus: WakeCorpus,
+) -> tuple[list[BaseClip], list[Path], dict[str, object]]:
+    positives = corpus.cases_for("training", "positive")
+    negatives = corpus.cases_for("training", "negative")
+    language_counts = {
+        language: sum(case.language == language for case in positives)
+        for language in ("en", "es")
+    }
+    if min(language_counts.values()) == 0:
+        raise ValueError(
+            "microphone training split needs English and Spanish positives"
+        )
+    if not negatives:
+        raise ValueError("microphone training split needs hard-negative audio")
+    positive_bases = [
+        BaseClip(case.path, case.language or "", "Miso") for case in positives
+    ]
+    negative_paths = [case.path for case in negatives]
+    evaluation_cases = corpus.cases_for("evaluation")
+    evaluation_positives = tuple(
+        case for case in evaluation_cases if case.label == "positive"
+    )
+    evaluation_languages = {
+        case.language for case in evaluation_positives
+    }
+    if evaluation_languages != {"en", "es"}:
+        raise ValueError(
+            "microphone evaluation split needs English and Spanish positives"
+        )
+    if not any(
+        case.distance_meters is not None and case.distance_meters >= 3
+        for case in evaluation_positives
+    ):
+        raise ValueError("microphone evaluation split needs a 3 m positive")
+    if not any(case.label == "negative" for case in evaluation_cases):
+        raise ValueError("microphone evaluation split needs negative audio")
+    metadata = {
+        "consent_confirmed_at": corpus.consent_confirmed_at,
+        "delete_raw_by": corpus.delete_raw_by,
+        "positive_base_clips": len(positives),
+        "positive_language_base_clips": language_counts,
+        "hard_negative_base_clips": len(negatives),
+        "training_groups": len({case.group_id for case in positives + negatives}),
+        "evaluation_cases_reserved": len(evaluation_cases),
+        "evaluation_groups_reserved": len(
+            {case.group_id for case in evaluation_cases}
+        ),
+    }
+    return positive_bases, negative_paths, metadata
 
 
 def general_negative_windows(
@@ -516,6 +627,11 @@ def sha256(path: Path) -> str:
 
 def main() -> int:
     options = arguments()
+    if (
+        options.microphone_positive_train <= 0
+        or options.microphone_negative_train <= 0
+    ):
+        raise ValueError("microphone training sample counts must be positive")
     root = options.output_directory.resolve()
     root.mkdir(parents=True, exist_ok=True)
     positive_train_bases = synthesize_bases(
@@ -585,14 +701,56 @@ def main() -> int:
         np.random.default_rng(options.seed + 5),
     )
 
-    x = np.concatenate((positive_train, confusable_train, general_train))
-    y = np.concatenate(
+    microphone_positive = np.empty(
+        (0, FEATURE_FRAMES, FEATURE_WIDTH), dtype=np.float32
+    )
+    microphone_negative = np.empty(
+        (0, FEATURE_FRAMES, FEATURE_WIDTH), dtype=np.float32
+    )
+    microphone_metadata: dict[str, object] | None = None
+    if options.microphone_manifest is not None:
+        corpus = load_wake_corpus(
+            options.microphone_manifest, required_split="training"
+        )
+        microphone_bases, microphone_negative_paths, microphone_metadata = (
+            microphone_training_bases(corpus)
+        )
+        microphone_positive, _ = make_feature_set(
+            preprocessor,
+            microphone_bases,
+            options.microphone_positive_train,
+            np.random.default_rng(options.seed + 6),
+        )
+        microphone_negative = make_hard_negative_feature_set(
+            preprocessor,
+            microphone_negative_paths,
+            options.microphone_negative_train,
+            np.random.default_rng(options.seed + 7),
+        )
+
+    x = np.concatenate(
         (
-            np.ones(len(positive_train), dtype=np.uint8),
-            np.zeros(len(confusable_train) + len(general_train), dtype=np.uint8),
+            positive_train,
+            microphone_positive,
+            confusable_train,
+            general_train,
+            microphone_negative,
         )
     )
-    order = np.random.default_rng(options.seed + 6).permutation(len(x))
+    y = np.concatenate(
+        (
+            np.ones(
+                len(positive_train) + len(microphone_positive), dtype=np.uint8
+            ),
+            np.zeros(
+                len(confusable_train)
+                + len(general_train)
+                + len(microphone_negative),
+                dtype=np.uint8,
+            ),
+        )
+    )
+    order = np.random.default_rng(options.seed + 8).permutation(len(x))
     x = x[order].reshape(len(x), -1)
     y = y[order]
     scaler = StandardScaler()
@@ -611,7 +769,15 @@ def main() -> int:
         verbose=True,
     )
     classifier.fit(x, y)
-    del x, y, positive_train, confusable_train, general_train
+    del (
+        x,
+        y,
+        positive_train,
+        microphone_positive,
+        confusable_train,
+        general_train,
+        microphone_negative,
+    )
 
     model_path = root / "miso.onnx"
     export_onnx(model_path, scaler, classifier)
@@ -644,8 +810,19 @@ def main() -> int:
             "positive_samples": options.positive_train,
             "confusable_negative_samples": options.confusable_train,
             "general_negative_samples": options.general_negative_train,
+            "microphone_positive_samples": (
+                options.microphone_positive_train
+                if options.microphone_manifest is not None
+                else 0
+            ),
+            "microphone_hard_negative_samples": (
+                options.microphone_negative_train
+                if options.microphone_manifest is not None
+                else 0
+            ),
             "positive_base_clips": len(positive_train_bases),
             "confusable_base_clips": len(negative_train_bases),
+            "microphone_corpus": microphone_metadata,
             "iterations": classifier.n_iter_,
             "loss": round(float(classifier.loss_), 6),
         },
