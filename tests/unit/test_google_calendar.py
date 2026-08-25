@@ -378,6 +378,14 @@ class GoogleCalendarToolTests(unittest.TestCase):
         self.assertEqual(set(query["scope"][0].split()), set(AUTHORIZATION_SCOPES))
         self.assertNotIn("client-secret", url)
 
+    def test_accepts_google_desktop_client_legacy_authorization_metadata(self):
+        payload = json.loads(self.client_path.read_text())
+        payload["installed"]["auth_uri"] = "https://accounts.google.com/o/oauth2/auth"
+        self.client_path.write_text(json.dumps(payload))
+        os.chmod(self.client_path, 0o600)
+        client = GoogleOAuthClient.load(self.client_path)
+        self.assertEqual(client.client_id, "123.apps.googleusercontent.com")
+
 
 if __name__ == "__main__":
     unittest.main()

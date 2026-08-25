@@ -23,6 +23,12 @@ from miso.tools.base import ToolContext, ToolDefinition, ToolRegistry, ToolRejec
 
 
 AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+TRUSTED_CLIENT_AUTHORIZATION_ENDPOINTS = frozenset(
+    {
+        AUTHORIZATION_ENDPOINT,
+        "https://accounts.google.com/o/oauth2/auth",
+    }
+)
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
 CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3"
@@ -78,13 +84,15 @@ class GoogleOAuthClient:
             or not client_secret
         ):
             raise GoogleCalendarError("Google OAuth client credentials are invalid")
-        for key, expected in (
-            ("auth_uri", AUTHORIZATION_ENDPOINT),
-            ("token_uri", TOKEN_ENDPOINT),
+        configured_auth_uri = section.get("auth_uri")
+        if (
+            configured_auth_uri is not None
+            and configured_auth_uri not in TRUSTED_CLIENT_AUTHORIZATION_ENDPOINTS
         ):
-            configured = section.get(key)
-            if configured is not None and configured != expected:
-                raise GoogleCalendarError(f"Google OAuth {key} is not trusted")
+            raise GoogleCalendarError("Google OAuth auth_uri is not trusted")
+        configured_token_uri = section.get("token_uri")
+        if configured_token_uri is not None and configured_token_uri != TOKEN_ENDPOINT:
+            raise GoogleCalendarError("Google OAuth token_uri is not trusted")
         return cls(client_id, client_secret)
 
 
