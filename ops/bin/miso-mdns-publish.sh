@@ -2,9 +2,27 @@
 set -Eeuo pipefail
 
 ALIAS="${1:-miso.local}"
-INTERFACE="${2:-eth0}"
+REQUESTED_INTERFACE="${2:-auto}"
 
 pids=()
+
+select_interface() {
+  if [[ "${REQUESTED_INTERFACE}" != "auto" ]]; then
+    printf '%s\n' "${REQUESTED_INTERFACE}"
+    return
+  fi
+
+  # Follow the usable LAN default route instead of assuming Ethernet. This
+  # keeps the alias available when the appliance moves between eth0 and wlan0.
+  ip -4 route show default \
+    | awk '/ dev / { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+INTERFACE="$(select_interface)"
+[[ -n "${INTERFACE}" ]] || {
+  printf 'ERROR: no interface with a default IPv4 route\n' >&2
+  exit 1
+}
 
 first_address() {
   ip -"$1" -o addr show dev "${INTERFACE}" scope global \

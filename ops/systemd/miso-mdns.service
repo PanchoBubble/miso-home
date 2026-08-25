@@ -8,7 +8,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Keep rsp.local as the Pi's reverse-DNS identity; this is an extra forward alias.
-ExecStart=/usr/local/bin/miso-mdns-publish miso.local eth0
+ExecStart=/usr/local/bin/miso-mdns-publish miso.local auto
 Restart=on-failure
 RestartSec=3s
 NoNewPrivileges=true
