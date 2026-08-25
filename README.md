@@ -230,6 +230,14 @@ Repeated activations are suppressed by a cooldown. `/api/status` reports model
 availability, thresholds, bounded wake events, activation count, failures, and
 the highest observed score without exposing model paths or captured audio.
 
+On a supported local DSI display, `miso-display.service` uses the compositor's
+idle protocol to power the panel off after five minutes without touch or
+keyboard input. A validated Miso wake activation updates a non-sensitive runtime
+marker, immediately powers the panel on, and resets the idle countdown while
+audio capture remains active. Configure the timeout, output, and marker in
+`/etc/miso/miso-display.env`; installers leave this service disabled on headless
+systems or hosts without `swayidle` and `wlopm`.
+
 The repository includes the reproducibly trained `Miso` model and a pinned
 checksum. Install it, then deploy the runtime:
 

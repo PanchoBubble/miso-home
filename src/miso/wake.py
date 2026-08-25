@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import selectors
 import struct
@@ -11,7 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from miso.audio import AudioFormat, BoundedPCMBuffer
 from miso.transcription import EnergySpeechDetector
@@ -19,6 +20,7 @@ from miso.transcription import EnergySpeechDetector
 
 _READY = b"OWW1"
 _RESET = 0xFFFFFFFF
+LOGGER = logging.getLogger("miso.wake")
 
 
 class WakeWordError(RuntimeError):
@@ -309,6 +311,7 @@ class WakeWordManager:
         activation_frames: int,
         cooldown_seconds: float,
         result_capacity: int,
+        on_activation: Callable[[WakeEvent], None] | None = None,
     ) -> None:
         self.enabled = enabled
         self.audio = audio
@@ -332,6 +335,7 @@ class WakeWordManager:
         self._last_error: str | None = None
         self._activations = 0
         self._failures = 0
+        self._on_activation = on_activation
 
     def start(self) -> None:
         if not self.enabled or (self._thread is not None and self._thread.is_alive()):
@@ -414,6 +418,11 @@ class WakeWordManager:
                 self._stop.wait(1)
                 continue
             for event in events:
+                if self._on_activation is not None:
+                    try:
+                        self._on_activation(event)
+                    except Exception:
+                        LOGGER.exception("wake activation callback failed")
                 with self._condition:
                     self._events.append(event)
                     self._condition.notify_all()

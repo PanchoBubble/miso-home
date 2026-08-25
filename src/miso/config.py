@@ -86,6 +86,7 @@ class Settings:
     wake_activation_frames: int = 1
     wake_cooldown_seconds: float = 2.0
     wake_result_capacity: int = 16
+    display_wake_path: Path | None = None
     stt_enabled: bool = False
     stt_executable: Path = Path("/usr/local/bin/whisper-cli")
     stt_model: Path = Path("/var/lib/miso/models/whisper/ggml-tiny.bin")
@@ -328,6 +329,11 @@ class Settings:
             wake_activation_frames=wake_activation_frames,
             wake_cooldown_seconds=wake_cooldown_seconds,
             wake_result_capacity=wake_result_capacity,
+            display_wake_path=(
+                Path(source["MISO_DISPLAY_WAKE_PATH"])
+                if source.get("MISO_DISPLAY_WAKE_PATH", "").strip()
+                else None
+            ),
             stt_enabled=_boolean(
                 source.get("MISO_STT_ENABLED", "false"), "MISO_STT_ENABLED"
             ),
@@ -563,6 +569,11 @@ class Settings:
             raise ConfigError("MISO_WAKE_COOLDOWN_SECONDS must be between 0 and 60")
         if not 1 <= self.wake_result_capacity <= 1_000:
             raise ConfigError("MISO_WAKE_RESULT_CAPACITY must be between 1 and 1000")
+        if (
+            self.display_wake_path is not None
+            and not self.display_wake_path.is_absolute()
+        ):
+            raise ConfigError("MISO_DISPLAY_WAKE_PATH must be absolute")
         if self.wake_enabled and (
             self.audio_sample_rate != 16_000 or self.audio_channels != 1
         ):

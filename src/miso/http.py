@@ -20,6 +20,7 @@ from miso.access import AccessJWTError, AccessJWTVerifier
 from miso.audio import AudioManager
 from miso.config import Settings
 from miso.conversation import ConversationManager
+from miso.display import DisplayWakeNotifier
 from miso.identity import (
     Actor,
     HouseholdIdentityPolicy,
@@ -1089,6 +1090,7 @@ def create_server(
         activation_frames=settings.wake_activation_frames,
         cooldown_seconds=settings.wake_cooldown_seconds,
         result_capacity=settings.wake_result_capacity,
+        on_activation=DisplayWakeNotifier(settings.display_wake_path).notify,
     )
     transcription = transcription_manager or TranscriptionManager(
         enabled=settings.stt_enabled,

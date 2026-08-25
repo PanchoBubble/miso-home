@@ -163,6 +163,7 @@ class WakeManagerTests(unittest.TestCase):
     def test_publishes_bounded_events_and_redacted_status(self) -> None:
         audio = FakeCaptureBus()
         model = FakeWakeModel([0.95])
+        activations = []
         manager = WakeWordManager(
             enabled=True,
             audio=audio,
@@ -173,6 +174,7 @@ class WakeManagerTests(unittest.TestCase):
             activation_frames=1,
             cooldown_seconds=0,
             result_capacity=2,
+            on_activation=activations.append,
         )
         manager.start()
         assert audio.buffer is not None
@@ -186,6 +188,7 @@ class WakeManagerTests(unittest.TestCase):
         self.assertIsNotNone(event)
         assert event is not None
         self.assertEqual(event.phrase, "Miso")
+        self.assertEqual(activations, [event])
         status = manager.status()
         self.assertEqual(status["model"], "miso.onnx")
         self.assertNotIn("/models", str(status))

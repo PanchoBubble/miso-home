@@ -51,6 +51,7 @@ class SettingsTests(unittest.TestCase):
                     "MISO_WAKE_VAD_THRESHOLD": "0.55",
                     "MISO_WAKE_ENERGY_THRESHOLD_DBFS": "-42",
                     "MISO_WAKE_ACTIVATION_FRAMES": "3",
+                    "MISO_DISPLAY_WAKE_PATH": str(root / "display" / "wake"),
                     "MISO_STT_ENABLED": "true",
                     "MISO_STT_EXECUTABLE": "/opt/whisper/whisper-cli",
                     "MISO_STT_MODEL": str(root / "models" / "whisper.bin"),
@@ -92,6 +93,9 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.wake_vad_threshold, 0.55)
             self.assertEqual(settings.wake_energy_threshold_dbfs, -42)
             self.assertEqual(settings.wake_activation_frames, 3)
+            self.assertEqual(
+                settings.display_wake_path, root / "display" / "wake"
+            )
             self.assertTrue(settings.stt_enabled)
             self.assertEqual(settings.stt_threads, 3)
             self.assertEqual(settings.stt_vad_threshold_dbfs, -36)
@@ -107,6 +111,12 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_relative_database_path(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be absolute"):
             Settings.from_env({"MISO_DB_PATH": "relative.sqlite3"})
+
+    def test_rejects_relative_display_wake_path(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigError, "DISPLAY_WAKE_PATH must be absolute"
+        ):
+            Settings.from_env({"MISO_DISPLAY_WAKE_PATH": "display-wake"})
 
     def test_rejects_invalid_port(self) -> None:
         with self.assertRaisesRegex(ConfigError, "between 1 and 65535"):
