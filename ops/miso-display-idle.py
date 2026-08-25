@@ -91,9 +91,12 @@ class DisplayIdleManager:
 
     def run(self) -> None:
         while not self.stop_event.is_set():
-            if self.process is None or self.process.poll() is not None:
-                if self.process is not None:
-                    LOGGER.warning("display idle monitor exited; retrying")
+            if self.process is not None and self.process.poll() is not None:
+                self.process = None
+                LOGGER.warning("display idle monitor exited; retrying in 2 seconds")
+                if self.stop_event.wait(2):
+                    break
+            if self.process is None:
                 self._start_idle_monitor()
             wake_ns = self._wake_mtime()
             if wake_ns > self.last_wake_ns:
