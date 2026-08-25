@@ -1,1 +1,2 @@
 d /run/miso-display 0755 root root -
+f /run/miso-display/wake 0640 miso miso -
