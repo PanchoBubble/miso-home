@@ -28,6 +28,12 @@ from miso.identity import (
     SYSTEM_ACTOR,
     VOICE_ACTOR,
 )
+from miso.live_events import (
+    LiveAuditSink,
+    LiveEventStore,
+    LiveToolResultPublisher,
+    conversation_event_publisher,
+)
 from miso.memory import MemoryStore, SearchResult, utc_now
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError, create_router
@@ -96,6 +102,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         speech_manager: SpeechManager,
         wake_manager: WakeWordManager,
         conversation_manager: ConversationManager,
+        live_events: LiveEventStore,
         identity_policy: HouseholdIdentityPolicy,
         access_verifier: AccessJWTVerifier | None,
         started_at: float,
@@ -110,6 +117,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.speech_manager = speech_manager
         self.wake_manager = wake_manager
         self.conversation_manager = conversation_manager
+        self.live_events = live_events
         self.memory_store = MemoryStore(settings.database_path)
         self.household_store = HouseholdStore(settings.database_path)
         self.identity_policy = identity_policy
@@ -154,6 +162,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.wake_manager.stop()
         self.audio_manager.stop()
         self.scheduled_worker.stop()
+        self.live_events.close()
         super().server_close()
 
     def register_request(
@@ -213,6 +222,10 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/status":
                 self._status()
+            elif parsed.path == "/api/events":
+                self._events(parsed.query)
+            elif parsed.path == "/api/notifications":
+                self._notifications(parsed.query)
             elif parsed.path == "/api/identity":
                 self._identity()
             elif parsed.path == "/api/memory":
@@ -320,6 +333,97 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     "voice_actor": VOICE_ACTOR.public_dict(),
                 },
             )
+
+        def _notifications(self, query: str) -> None:
+            parameters = parse_qs(query)
+            try:
+                limit = _bounded_integer(
+                    parameters.get("limit", ["50"])[0],
+                    minimum=1,
+                    maximum=200,
+                    error="invalid_notification_limit",
+                )
+                after_values = parameters.get("after")
+                if after_values:
+                    after = _bounded_integer(
+                        after_values[0],
+                        minimum=0,
+                        maximum=2**63 - 1,
+                        error="invalid_event_cursor",
+                    )
+                    events = self.miso.live_events.after(
+                        after, actor=self._actor(), limit=limit
+                    )
+                else:
+                    events = self.miso.live_events.recent(
+                        actor=self._actor(), limit=limit
+                    )
+            except ValueError as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "events": [event.as_dict() for event in events],
+                    "cursor": events[-1].event_id if events else 0,
+                },
+            )
+
+        def _events(self, query: str) -> None:
+            parameters = parse_qs(query)
+            raw_cursor = parameters.get(
+                "after", [self.headers.get("Last-Event-ID", "0")]
+            )[0]
+            try:
+                cursor = _bounded_integer(
+                    raw_cursor,
+                    minimum=0,
+                    maximum=2**63 - 1,
+                    error="invalid_event_cursor",
+                )
+            except ValueError as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+            actor = self._actor()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                self.wfile.write(b"retry: 3000\n: connected\n\n")
+                self.wfile.flush()
+                while not self.miso.live_events.closed:
+                    events = self.miso.live_events.wait_after(
+                        cursor,
+                        actor=actor,
+                        timeout=15,
+                        limit=100,
+                    )
+                    if not events:
+                        if self.miso.live_events.closed:
+                            break
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        continue
+                    for event in events:
+                        encoded = json.dumps(
+                            event.as_dict(),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        self.wfile.write(
+                            f"id: {event.event_id}\n".encode("ascii")
+                            + f"event: {event.event_type}\n".encode("ascii")
+                            + b"data: "
+                            + encoded
+                            + b"\n\n"
+                        )
+                        cursor = event.event_id
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                return
 
         def _status(self) -> None:
             self._json(
@@ -449,10 +553,26 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                             actor_source=actor.source,
                         )
                     )
+                    self._publish_live(
+                        "household_message_created",
+                        {"record_id": record_id},
+                        actor=actor,
+                        visibility=cast(str, visibility),
+                        owner_email=(
+                            actor.email if visibility == "private" else None
+                        ),
+                    )
                     self._json(HTTPStatus.CREATED, {"record_id": record_id})
                     return
                 elif action == "message_delete":
                     record_id = _record_id(payload.get("record_id"))
+                    try:
+                        record = self._memory_record(record_id)
+                    except StopIteration:
+                        self._json(
+                            HTTPStatus.NOT_FOUND, {"error": "message_not_found"}
+                        )
+                        return
                     deleted = self.miso.memory_store.delete_records(
                         (("memory", record_id),), actor=actor
                     )
@@ -468,6 +588,15 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                             actor=actor.actor_id,
                             actor_source=actor.source,
                         )
+                    )
+                    self._publish_live(
+                        "household_message_deleted",
+                        {"record_id": record_id},
+                        actor=actor,
+                        visibility=record.visibility,
+                        owner_email=(
+                            actor.email if record.visibility == "private" else None
+                        ),
                     )
                     self._json(HTTPStatus.OK, {"deleted": True})
                     return
@@ -691,6 +820,26 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 "", limit=None, actor=self._actor(), record_types=("memory",)
             )
             return next(item for item in records if item.record_id == memory_id)
+
+        def _publish_live(
+            self,
+            event_type: str,
+            payload: dict[str, object],
+            *,
+            actor: Actor,
+            visibility: str,
+            owner_email: str | None,
+        ) -> None:
+            try:
+                self.miso.live_events.publish(
+                    event_type,
+                    payload,
+                    actor=actor,
+                    visibility=visibility,
+                    owner_email=owner_email,
+                )
+            except Exception:
+                LOGGER.exception("could not publish %s", event_type)
 
         def _activity(self, limit: int) -> None:
             audit_root = self.miso.settings.state_dir / "audit"
@@ -995,6 +1144,22 @@ def _record_id(value: object) -> int:
     return value
 
 
+def _bounded_integer(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+    error: str,
+) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exception:
+        raise ValueError(error) from exception
+    if not minimum <= parsed <= maximum:
+        raise ValueError(error)
+    return parsed
+
+
 def _copy_fields(
     payload: dict[str, object], fields: tuple[str, ...]
 ) -> dict[str, object]:
@@ -1038,6 +1203,9 @@ def create_server(
     access_verifier: AccessJWTVerifier | None = None,
 ) -> MisoHTTPServer:
     identity_policy = HouseholdIdentityPolicy(settings.dashboard_email)
+    memory = MemoryStore(settings.database_path)
+    memory.migrate()
+    live_events = LiveEventStore(settings.database_path)
     if access_verifier is None and settings.access_team_domain is not None:
         access_verifier = AccessJWTVerifier(
             settings.access_team_domain,
@@ -1055,6 +1223,8 @@ def create_server(
     registry = tool_registry or create_runtime_registry(
         settings.state_dir, settings.database_path, calendar_config
     )
+    registry.audit_sink = LiveAuditSink(registry.audit_sink, live_events)
+    registry.add_result_listener(LiveToolResultPublisher(live_events))
     shell = developer_shell or DeveloperShellController(
         (settings.developer_root or settings.state_dir).resolve(),
         settings.developer_commands,
@@ -1144,8 +1314,6 @@ def create_server(
         default_volume=settings.tts_volume,
         result_capacity=settings.tts_result_capacity,
     )
-    memory = MemoryStore(settings.database_path)
-    memory.migrate()
     conversation = conversation_manager or ConversationManager(
         enabled=settings.conversation_enabled,
         wake=wake,
@@ -1161,6 +1329,7 @@ def create_server(
         checkback_timeout_seconds=settings.conversation_checkback_timeout_seconds,
         acknowledgement=settings.conversation_acknowledgement,
     )
+    conversation.add_transition_listener(conversation_event_publisher(live_events))
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(),
@@ -1176,6 +1345,7 @@ def create_server(
         speech_manager=speech,
         wake_manager=wake,
         conversation_manager=conversation,
+        live_events=live_events,
         identity_policy=identity_policy,
         access_verifier=access_verifier,
         started_at=time.monotonic(),

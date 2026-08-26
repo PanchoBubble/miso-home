@@ -15,6 +15,10 @@ const state = {
   memoryTag: "",
   householdLoaded: false,
   householdData: null,
+  lastEventId: Number(localStorage.getItem("miso-live-event-id") || "0"),
+  liveGeneration: 0,
+  liveAbort: null,
+  notifications: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -148,6 +152,165 @@ async function loadStatus() {
     scheduleReconnect();
   } finally {
     state.statusInFlight = false;
+  }
+}
+
+function notificationText(event) {
+  const payload = event.payload || {};
+  if (event.type === "scheduled_item_due") {
+    const kind = payload.kind === "timer" ? "Timer" : "Reminder";
+    return `${kind} due${payload.title ? ` · ${payload.title}` : ""}`;
+  }
+  if (event.type === "household_message_created") return "New household message";
+  if (event.type === "household_message_deleted") return "Household message removed";
+  if (event.type === "tool_outcome") {
+    return `${friendlyToolName(payload.tool || "tool")} · ${payload.status || "finished"}`;
+  }
+  return "Household state updated";
+}
+
+function isInboxEvent(event) {
+  return [
+    "scheduled_item_due",
+    "household_message_created",
+    "household_message_deleted",
+    "tool_outcome",
+  ].includes(event.type);
+}
+
+function renderNotifications() {
+  const visible = state.notifications.filter(isInboxEvent).slice(-30).reverse();
+  $("#notification-count").textContent = String(visible.length);
+  const nodes = visible.map((event) => {
+    const item = document.createElement("article");
+    item.className = "notification-item";
+    const title = document.createElement("strong");
+    title.textContent = notificationText(event);
+    const timestamp = document.createElement("span");
+    timestamp.textContent = new Date(event.created_at).toLocaleString();
+    item.append(title, timestamp);
+    return item;
+  });
+  $("#notification-inbox").replaceChildren(
+    ...(nodes.length ? nodes : [emptyNode("No missed notifications")]),
+  );
+}
+
+async function loadNotifications() {
+  try {
+    const data = await api("/api/notifications?limit=100");
+    state.notifications = data.events;
+    state.lastEventId = data.cursor;
+    localStorage.setItem("miso-live-event-id", String(state.lastEventId));
+    renderNotifications();
+  } catch (error) {
+    $("#notification-inbox").replaceChildren(emptyNode(error.message));
+  }
+}
+
+function parseServerEvent(block) {
+  let eventType = "message";
+  let eventId = 0;
+  const data = [];
+  block.split("\n").forEach((line) => {
+    if (line.startsWith("event:")) eventType = line.slice(6).trim();
+    if (line.startsWith("id:")) eventId = Number(line.slice(3).trim());
+    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  });
+  if (!data.length) return null;
+  const parsed = JSON.parse(data.join("\n"));
+  parsed.type = parsed.type || eventType;
+  parsed.id = parsed.id || eventId;
+  return parsed;
+}
+
+function assistantStateLabel(value) {
+  return {
+    acknowledging: "Waking",
+    listening: "Listening",
+    follow_up: "Listening",
+    checking_back: "Listening",
+    transcribing: "Understanding",
+    routing: "Thinking",
+    using_tool: "Using a tool",
+    speaking: "Speaking",
+    goodbye: "Speaking",
+    error: "Needs attention",
+    idle: "Ready",
+  }[value] || "Online";
+}
+
+function handleLiveEvent(event) {
+  if (!Number.isSafeInteger(event.id) || event.id <= state.lastEventId) return;
+  state.lastEventId = event.id;
+  localStorage.setItem("miso-live-event-id", String(event.id));
+  if (event.type === "assistant_state") {
+    setConnected(true, `Miso · ${assistantStateLabel(event.payload?.state)}`);
+  }
+  if ([
+    "household_changed",
+    "household_message_created",
+    "household_message_deleted",
+    "scheduled_item_due",
+  ].includes(event.type)) {
+    loadHousehold();
+  }
+  if (isInboxEvent(event)) {
+    state.notifications.push(event);
+    state.notifications = state.notifications.slice(-100);
+    renderNotifications();
+  }
+  if (event.type === "tool_outcome" && $("#side-panel").classList.contains("open")) {
+    loadActivity();
+  }
+}
+
+function stopLiveEvents() {
+  state.liveGeneration += 1;
+  state.liveAbort?.abort();
+  state.liveAbort = null;
+}
+
+async function startLiveEvents() {
+  stopLiveEvents();
+  const generation = state.liveGeneration;
+  let delay = 1000;
+  while (generation === state.liveGeneration && navigator.onLine) {
+    const controller = new AbortController();
+    state.liveAbort = controller;
+    try {
+      const response = await fetch(`/api/events?after=${state.lastEventId}`, {
+        headers: headers(),
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        if (response.status === 401) throw new Error("Access needed");
+        throw new Error(`Live events failed (${response.status})`);
+      }
+      setConnected(true, "Live");
+      delay = 1000;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      while (generation === state.liveGeneration) {
+        const { done, value } = await reader.read();
+        pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const blocks = pending.split("\n\n");
+        pending = blocks.pop() || "";
+        blocks.forEach((block) => {
+          const event = parseServerEvent(block);
+          if (event) handleLiveEvent(event);
+        });
+        if (done) throw new Error("Live event stream ended");
+      }
+    } catch (error) {
+      if (controller.signal.aborted || generation !== state.liveGeneration) return;
+      const detail = error.message === "Access needed" ? "Access needed" : "Reconnecting";
+      setConnected(false, detail);
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
+      delay = Math.min(delay * 2, 30000);
+    }
   }
 }
 
@@ -945,7 +1108,10 @@ function activateTab(name) {
   ["activity", "memory", "system"].forEach((view) => {
     $(`#${view}-view`).classList.toggle("hidden", view !== name);
   });
-  if (name === "activity") loadActivity();
+  if (name === "activity") {
+    loadActivity();
+    loadNotifications();
+  }
   if (name === "memory") {
     if (!state.memoryLoaded) searchMemory();
     requestAnimationFrame(() => $("#memory-query").focus());
@@ -1210,6 +1376,7 @@ $("#save-token").addEventListener("click", () => {
   loadStatus();
   loadActivity();
   loadHousehold();
+  loadNotifications().then(startLiveEvents);
 });
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -1223,8 +1390,12 @@ window.addEventListener("appinstalled", () => {
 window.addEventListener("online", () => {
   state.reconnectDelay = 3000;
   loadStatus();
+  startLiveEvents();
 });
-window.addEventListener("offline", () => setConnected(false, "Offline"));
+window.addEventListener("offline", () => {
+  stopLiveEvents();
+  setConnected(false, "Offline");
+});
 
 $("#access-token").value = state.token;
 updateRouteChip();
@@ -1232,10 +1403,5 @@ resizeComposer();
 loadStatus();
 loadActivity();
 loadHousehold();
+loadNotifications().then(startLiveEvents);
 registerServiceWorker();
-setInterval(() => {
-  if (state.connected) {
-    loadStatus();
-    if (!$("#household-view").classList.contains("hidden")) loadHousehold();
-  }
-}, 15000);

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import Callable, Protocol
 
 from miso.memory import MemoryStore
 from miso.identity import VOICE_ACTOR
@@ -19,6 +20,9 @@ from miso.tools import ToolRegistry
 from miso.tools.audit import AuditSink, audit_event
 from miso.transcription import SpeechActivity, TranscriptionResult
 from miso.wake import WakeEvent
+
+
+LOGGER = logging.getLogger("miso.conversation")
 
 
 class ConversationError(RuntimeError):
@@ -204,6 +208,7 @@ class ConversationManager:
         goodbye_english: str = "Goodbye.",
         goodbye_spanish: str = "Hasta luego.",
         transition_capacity: int = 32,
+        transition_listeners: tuple[Callable[[StateTransition], None], ...] = (),
     ) -> None:
         if listen_timeout_seconds <= 0 or checkback_timeout_seconds <= 0:
             raise ValueError("conversation timeouts must be positive")
@@ -234,6 +239,7 @@ class ConversationManager:
             ConversationState.IDLE if self.enabled else ConversationState.DISABLED
         )
         self._transitions: deque[StateTransition] = deque(maxlen=transition_capacity)
+        self._transition_listeners = list(transition_listeners)
         self._conversation_id: str | None = None
         self._active_cancel: threading.Event | None = None
         self._generation = 0
@@ -291,6 +297,12 @@ class ConversationManager:
         with self._lock:
             self._transition_locked(target, reason)
 
+    def add_transition_listener(
+        self, listener: Callable[[StateTransition], None]
+    ) -> None:
+        with self._lock:
+            self._transition_listeners.append(listener)
+
     def _transition_locked(self, target: ConversationState, reason: str) -> None:
         previous = self._state
         if target is previous:
@@ -310,6 +322,13 @@ class ConversationManager:
                 actor_source=VOICE_ACTOR.source,
             )
         )
+        for listener in tuple(self._transition_listeners):
+            try:
+                listener(transition)
+            except Exception:
+                LOGGER.exception(
+                    "conversation transition listener failed for %s", target.value
+                )
 
     def _run(self) -> None:
         while not self._stop.is_set():

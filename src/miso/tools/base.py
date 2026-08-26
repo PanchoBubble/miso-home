@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import queue
 import threading
@@ -64,6 +65,10 @@ class ToolRejected(RuntimeError):
 
 
 ToolHandler = Callable[[Mapping[str, object], ToolContext], Mapping[str, object]]
+ToolResultListener = Callable[["ToolResult", Actor], None]
+
+
+LOGGER = logging.getLogger("miso.tools")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +112,10 @@ class ToolRegistry:
     def __init__(self, audit_sink: AuditSink | None = None) -> None:
         self._tools: dict[str, ToolDefinition] = {}
         self.audit_sink = audit_sink or InMemoryAuditLog()
+        self._result_listeners: list[ToolResultListener] = []
+
+    def add_result_listener(self, listener: ToolResultListener) -> None:
+        self._result_listeners.append(listener)
 
     def register(self, definition: ToolDefinition) -> None:
         if not definition.name or not definition.name.replace("_", "").isalnum():
@@ -321,4 +330,9 @@ class ToolRegistry:
                 actor_source=actor.source,
             )
         )
+        for listener in tuple(self._result_listeners):
+            try:
+                listener(result, actor)
+            except Exception:
+                LOGGER.exception("tool result listener failed for %s", name)
         return result

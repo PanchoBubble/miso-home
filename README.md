@@ -122,6 +122,15 @@ browser edits instead of overwriting newer household or voice changes. Installed
 copies request fullscreen display and fall back to standalone mode where the
 platform does not support it.
 
+Authenticated clients keep one resumable live-event stream open for assistant
+state, scheduled-item notifications, household changes, and safe tool outcomes.
+Events are committed to a bounded SQLite inbox before delivery, so reconnecting
+devices replay missed entries from their last event ID without polling. Shared
+events reach household members; private events are selected by the same
+server-side owner predicate as their source record. Stream and inbox payloads
+exclude transcripts, message content, tool output, credentials, and provider
+internals.
+
 The dependency-free operator console streams
 text and tool results, exposes bounded provider health and routing progress,
 searches SQLite memory, and reads redacted tool/routing activity. Chat history

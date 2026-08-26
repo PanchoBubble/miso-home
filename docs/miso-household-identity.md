@@ -33,6 +33,15 @@ private record. Authorization predicates live in the SQLite store methods so a
 future Calendar, list, reminder, memory, or notification view cannot bypass the
 rule by omitting a browser-side filter.
 
+Schema version 5 adds a bounded durable live-event inbox. Each event carries
+`shared` or `private` visibility and, for private entries, the normalized owner
+email. Both missed-event queries and the resumable event stream apply that
+predicate in SQLite before decoding payloads. Assistant states are shared and
+contain only semantic state names. Web tool outcomes default private; voice
+outcomes default shared. Scheduled items and household mutations inherit their
+source record's visibility. Raw transcripts, message bodies, tool outputs, and
+internal transition reasons are not copied into live events.
+
 Dashboard conversations and dashboard-created timers/reminders default to
 private. Voice conversations and voice-created timers/reminders default to
 shared. Shopping tools are explicitly shared today; the storage boundary also

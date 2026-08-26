@@ -204,6 +204,11 @@
 
       <div class="panel-scroll">
         <section id="activity-view" class="panel-view" role="tabpanel">
+          <div class="section-heading notification-heading">
+            <div><h3>Notification inbox</h3><p>Missed household and assistant events from this device.</p></div>
+            <span id="notification-count" class="count-badge">0</span>
+          </div>
+          <div id="notification-inbox" class="notification-inbox" aria-live="polite"></div>
           <div class="section-heading">
             <div><h3>Recent activity</h3><p>Routing and tool events, with sensitive values removed.</p></div>
             <button id="refresh-activity" class="quiet-button" type="button">Refresh</button>

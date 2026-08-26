@@ -199,6 +199,17 @@ class ConversationManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ConversationError, "idle -> routing"):
             manager.transition(ConversationState.ROUTING, "invalid test")
 
+    def test_transition_listener_receives_committed_state(self) -> None:
+        manager = self.manager()
+        transitions = []
+        manager.add_transition_listener(transitions.append)
+
+        manager.transition(ConversationState.ACKNOWLEDGING, "display test")
+
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(transitions[0].previous, ConversationState.IDLE)
+        self.assertEqual(transitions[0].current, ConversationState.ACKNOWLEDGING)
+
     def test_wake_routes_response_and_opens_follow_up(self) -> None:
         speech = FakeSpeech()
         manager = self.manager(speech)

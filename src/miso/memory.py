@@ -12,7 +12,7 @@ from typing import Iterable, Mapping, Sequence
 
 from miso.identity import Actor, VOICE_ACTOR, normalize_email, private_owner
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATION_1 = """
 CREATE TABLE conversations (
@@ -190,6 +190,21 @@ CREATE TABLE memory_embeddings (
 ) STRICT;
 """
 
+MIGRATION_5 = """
+CREATE TABLE live_events (
+    id INTEGER PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'shared'
+        CHECK (visibility IN ('shared', 'private')),
+    owner_email TEXT,
+    actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX live_events_visibility_owner_id
+    ON live_events(visibility, owner_email, id);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -271,6 +286,11 @@ class MemoryStore:
                 connection.executescript(
                     f"BEGIN IMMEDIATE;\n{MIGRATION_4}\n"
                     "PRAGMA user_version = 4;\nCOMMIT;"
+                )
+            if version < 5:
+                connection.executescript(
+                    f"BEGIN IMMEDIATE;\n{MIGRATION_5}\n"
+                    "PRAGMA user_version = 5;\nCOMMIT;"
                 )
 
     def integrity_check(self) -> str:

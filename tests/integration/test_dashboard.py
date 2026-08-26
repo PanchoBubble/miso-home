@@ -111,6 +111,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="shopping-form"', content)
         self.assertIn(b'id="reminder-form"', content)
         self.assertIn(b'id="message-form"', content)
+        self.assertIn(b'id="notification-inbox"', content)
         self.assertIn(b'http://miso.local/', content)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
         response, javascript = self.request("GET", "/app.js")
@@ -124,6 +125,9 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b"navigator.serviceWorker.register", javascript)
         self.assertIn(b"preview_prune", javascript)
         self.assertIn(b"deleteSelectedMemory", javascript)
+        self.assertIn(b"/api/events?after=", javascript)
+        self.assertIn(b"/api/notifications?limit=100", javascript)
+        self.assertNotIn(b"setInterval", javascript)
 
         response, content = self.request("GET", "/manifest.webmanifest")
         manifest = json.loads(content)
@@ -142,7 +146,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v6', service_worker)
+        self.assertIn(b'miso-shell-v7', service_worker)
         self.assertNotIn(b'caches.match(request)', service_worker)
 
         response, icon = self.request("GET", "/icon-192.png")
@@ -183,6 +187,87 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(identity["actor"]["id"], "local@miso.invalid")
         self.assertEqual(identity["actor"]["source"], "web")
         self.assertEqual(identity["voice_actor"]["id"], "household:voice")
+
+    def test_live_events_replay_missed_notifications_and_stream_without_polling(
+        self,
+    ) -> None:
+        first = self.server.live_events.publish(
+            "assistant_state", {"state": "listening"}, actor=VOICE_ACTOR
+        )
+        second = self.server.live_events.publish(
+            "scheduled_item_due",
+            {"kind": "timer", "title": "Tea"},
+            actor=VOICE_ACTOR,
+        )
+
+        response, content = self.request(
+            "GET", f"/api/notifications?after={first.event_id}&limit=10"
+        )
+        payload = json.loads(content)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            [event["id"] for event in payload["events"]], [second.event_id]
+        )
+        self.assertEqual(payload["events"][0]["payload"]["title"], "Tea")
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_port, timeout=3
+        )
+        connection.request("GET", f"/api/events?after={first.event_id}")
+        stream = connection.getresponse()
+        self.assertEqual(stream.status, 200)
+        self.assertEqual(
+            stream.getheader("Content-Type"), "text/event-stream; charset=utf-8"
+        )
+        lines = []
+        while len(lines) < 8:
+            line = stream.readline().decode("utf-8")
+            lines.append(line)
+            if line == "\n" and any(value.startswith("data:") for value in lines):
+                break
+        connection.close()
+        self.assertIn(f"id: {second.event_id}\n", lines)
+        data = next(value for value in lines if value.startswith("data:"))
+        streamed = json.loads(data.removeprefix("data:").strip())
+        self.assertEqual(streamed["type"], "scheduled_item_due")
+
+    def test_household_and_tool_mutations_publish_durable_safe_events(self) -> None:
+        response, _ = self.request(
+            "POST",
+            "/api/household",
+            {
+                "action": "message_create",
+                "content": "Private medical appointment",
+                "visibility": "private",
+            },
+        )
+        self.assertEqual(response.status, 201)
+        response, _ = self.request(
+            "POST",
+            "/api/household",
+            {
+                "action": "timer_create",
+                "title": "Tea",
+                "duration_seconds": 60,
+                "visibility": "shared",
+            },
+        )
+        self.assertEqual(response.status, 201)
+
+        response, content = self.request("GET", "/api/notifications?limit=20")
+        events = json.loads(content)["events"]
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            [event["type"] for event in events],
+            [
+                "household_message_created",
+                "tool_outcome",
+                "household_changed",
+            ],
+        )
+        encoded = json.dumps(events)
+        self.assertNotIn("Private medical appointment", encoded)
+        self.assertNotIn("output", events[1]["payload"])
 
     def test_household_views_share_live_state_and_reject_stale_edits(self) -> None:
         response, content = self.request(
