@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -51,7 +52,7 @@ class DisplayIdleManagerTests(unittest.TestCase):
         )
         start.assert_called_once_with()
 
-    def test_wake_marker_timestamp_is_observed(self) -> None:
+    def test_each_changed_wake_marker_is_observed(self) -> None:
         with TemporaryDirectory() as directory:
             marker = Path(directory) / "wake"
             marker.touch()
@@ -61,8 +62,24 @@ class DisplayIdleManagerTests(unittest.TestCase):
                 wake_path=marker,
             )
             initial = manager.last_wake_ns
+            os.utime(marker, ns=(initial + 1, initial + 1))
+            self.assertTrue(manager._consume_wake_marker())
+            self.assertFalse(manager._consume_wake_marker())
+            os.utime(marker, ns=(initial + 2, initial + 2))
+            self.assertTrue(manager._consume_wake_marker())
+
+    def test_changed_wake_marker_survives_clock_rollback(self) -> None:
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "wake"
             marker.touch()
-            self.assertGreaterEqual(manager._wake_mtime(), initial)
+            manager = miso_display_idle.DisplayIdleManager(
+                output="DSI-2",
+                idle_seconds=300,
+                wake_path=marker,
+            )
+            initial = manager.last_wake_ns
+            os.utime(marker, ns=(initial - 1, initial - 1))
+            self.assertTrue(manager._consume_wake_marker())
 
 
 if __name__ == "__main__":

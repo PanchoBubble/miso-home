@@ -43,6 +43,16 @@ class DisplayIdleManager:
         except FileNotFoundError:
             return 0
 
+    def _consume_wake_marker(self) -> bool:
+        wake_ns = self._wake_mtime()
+        if wake_ns == 0 or wake_ns == self.last_wake_ns:
+            return False
+        # Accept a changed timestamp even if a clock correction made it older.
+        # The notifier normally makes timestamps monotonic, but this keeps the
+        # consumer robust across upgrades and manual marker updates.
+        self.last_wake_ns = wake_ns
+        return True
+
     def _power_command(self, state: str) -> list[str]:
         return ["/usr/bin/wlopm", f"--{state}", self.output]
 
@@ -98,9 +108,7 @@ class DisplayIdleManager:
                     break
             if self.process is None:
                 self._start_idle_monitor()
-            wake_ns = self._wake_mtime()
-            if wake_ns > self.last_wake_ns:
-                self.last_wake_ns = wake_ns
+            if self._consume_wake_marker():
                 self.wake()
             self.stop_event.wait(0.2)
         self._stop_idle_monitor()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 from miso.wake import WakeEvent
@@ -31,7 +32,15 @@ class DisplayWakeNotifier:
                 0o640,
             )
             try:
-                os.utime(descriptor)
+                metadata = os.fstat(descriptor)
+                # A normal touch can repeat or move backwards when the system
+                # clock is corrected. Keep this marker strictly increasing so
+                # every activation remains observable by the idle service.
+                wake_ns = max(time.time_ns(), metadata.st_mtime_ns + 1)
+                os.utime(
+                    descriptor,
+                    ns=(metadata.st_atime_ns, wake_ns),
+                )
             finally:
                 os.close(descriptor)
         except OSError as error:
