@@ -43,6 +43,10 @@ class DisplayIdleManagerTests(unittest.TestCase):
             patch.object(manager, "_start_idle_monitor") as start,
             patch.object(miso_display_idle.subprocess, "run") as run,
         ):
+            operations: list[str] = []
+            run.side_effect = lambda *args, **kwargs: operations.append("power-on")
+            stop.side_effect = lambda: operations.append("stop-idle")
+            start.side_effect = lambda: operations.append("start-idle")
             manager.wake()
         stop.assert_called_once_with()
         run.assert_called_once_with(
@@ -51,6 +55,7 @@ class DisplayIdleManagerTests(unittest.TestCase):
             timeout=3,
         )
         start.assert_called_once_with()
+        self.assertEqual(operations, ["power-on", "stop-idle", "start-idle"])
 
     def test_each_changed_wake_marker_is_observed(self) -> None:
         with TemporaryDirectory() as directory:

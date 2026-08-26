@@ -88,14 +88,16 @@ class DisplayIdleManager:
             process.wait(timeout=3)
 
     def wake(self) -> None:
-        # Restarting swayidle resets its inactivity countdown. SIGTERM also runs
-        # its pending resume command; the explicit power-on call is a safe backup.
-        self._stop_idle_monitor()
+        # Power on before waiting for swayidle to exit. Its SIGTERM/resume path
+        # may take several seconds, and display wake should not wait behind it.
         subprocess.run(
             self._power_command("on"),
             check=False,
             timeout=3,
         )
+        # Restarting swayidle resets its inactivity countdown. Its pending
+        # resume command may power the output on a second time, which is safe.
+        self._stop_idle_monitor()
         LOGGER.info("display wake requested")
         self._start_idle_monitor()
 
