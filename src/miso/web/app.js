@@ -322,6 +322,53 @@ async function installApp() {
   $("#install-app").classList.add("hidden");
 }
 
+function calibrationErrorMessage(code) {
+  return {
+    wake_calibration_busy: "A recording is already in progress.",
+    wake_calibration_already_completed: "This one-time recording has already completed.",
+    wake_calibration_unavailable: "The local microphone diagnostic is unavailable.",
+    wake_calibration_audio_timeout: "The microphone stream timed out. Please try again.",
+    wake_calibration_transcription_failed: "Offline transcription failed. Please try again.",
+    wake_calibration_consent_required: "Press Start recording to confirm this one-time capture.",
+  }[code] || code;
+}
+
+async function startWakeCalibration() {
+  const button = $("#start-wake-calibration");
+  const status = $("#wake-calibration-status");
+  const output = $("#wake-calibration-result");
+  button.disabled = true;
+  output.classList.add("hidden");
+  output.replaceChildren();
+  for (let count = 3; count > 0; count -= 1) {
+    status.textContent = `Recording starts in ${count}…`;
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  status.textContent = "Recording for five seconds — say “Miso” now.";
+  try {
+    const data = await api("/api/wake-calibration", {
+      method: "POST",
+      body: JSON.stringify({ action: "capture", consent: true }),
+    });
+    const result = data.calibration;
+    const heard = document.createElement("strong");
+    heard.textContent = `Heard: ${result.recognized_text || "(no words recognized)"}`;
+    const detail = document.createElement("span");
+    detail.textContent = `Signal ${result.rms_dbfs} dBFS RMS · ${result.language || "unknown language"}`;
+    const deletion = document.createElement("span");
+    deletion.textContent = result.raw_audio_retained
+      ? "Raw audio deletion could not be confirmed."
+      : "Raw audio deleted · only this result is shown.";
+    output.append(heard, detail, deletion);
+    output.classList.remove("hidden");
+    status.textContent = "Recording complete.";
+    button.textContent = "Recorded";
+  } catch (error) {
+    status.textContent = calibrationErrorMessage(error.message);
+    if (error.message !== "wake_calibration_already_completed") button.disabled = false;
+  }
+}
+
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
   navigator.serviceWorker.register("/service-worker.js", { scope: "/" })
@@ -1356,6 +1403,7 @@ $("#refresh-activity").addEventListener("click", loadActivity);
 $("#service-status").addEventListener("click", loadStatus);
 $("#retry-connection").addEventListener("click", loadStatus);
 $("#install-app").addEventListener("click", installApp);
+$("#start-wake-calibration").addEventListener("click", startWakeCalibration);
 $("#enable-developer").addEventListener("click", () => developerAction("enable"));
 $("#disable-developer").addEventListener("click", () => developerAction("disable"));
 $("#run-developer").addEventListener("click", runDeveloperCommand);

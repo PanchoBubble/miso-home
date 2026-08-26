@@ -68,6 +68,19 @@
 
           <div id="household-notice" class="household-notice hidden" role="status"></div>
 
+          <section class="household-card wake-calibration-card" aria-labelledby="wake-calibration-title">
+            <div class="wake-calibration-copy">
+              <p class="card-kicker">One-time voice diagnostic</p>
+              <h2 id="wake-calibration-title">Let Miso hear your “Miso”</h2>
+              <p>Press start, wait for the countdown, then say “Miso” naturally. The five-second clip stays on this Pi and is deleted immediately after offline analysis.</p>
+            </div>
+            <div class="wake-calibration-action">
+              <button id="start-wake-calibration" type="button">Start recording</button>
+              <p id="wake-calibration-status" role="status" aria-live="assertive">Ready when you are.</p>
+            </div>
+            <output id="wake-calibration-result" class="wake-calibration-result hidden" aria-live="polite"></output>
+          </section>
+
           <div class="household-grid">
             <section class="household-card shopping-card">
               <div class="section-heading">

@@ -18,6 +18,12 @@ from urllib.parse import parse_qs, urlsplit
 from miso import __version__
 from miso.access import AccessJWTError, AccessJWTVerifier
 from miso.audio import AudioManager
+from miso.calibration import (
+    WakeCalibration,
+    WakeCalibrationBusy,
+    WakeCalibrationComplete,
+    WakeCalibrationError,
+)
 from miso.config import Settings
 from miso.conversation import ConversationManager
 from miso.display import DisplayWakeNotifier
@@ -101,6 +107,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         transcription_manager: TranscriptionManager,
         speech_manager: SpeechManager,
         wake_manager: WakeWordManager,
+        wake_calibration: WakeCalibration,
         conversation_manager: ConversationManager,
         live_events: LiveEventStore,
         identity_policy: HouseholdIdentityPolicy,
@@ -116,6 +123,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.transcription_manager = transcription_manager
         self.speech_manager = speech_manager
         self.wake_manager = wake_manager
+        self.wake_calibration = wake_calibration
         self.conversation_manager = conversation_manager
         self.live_events = live_events
         self.memory_store = MemoryStore(settings.database_path)
@@ -288,6 +296,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         HTTPStatus.OK,
                         {"cancelled": self.miso.speech_manager.cancel(request_id)},
                     )
+            elif parsed.path == "/api/wake-calibration":
+                self._wake_calibration(payload)
             elif parsed.path == "/api/memory":
                 self._memory_action(payload)
             elif parsed.path == "/api/household":
@@ -318,6 +328,31 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     LOGGER.warning("Cloudflare Access identity email is invalid")
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
+
+        def _wake_calibration(self, payload: dict[str, object]) -> None:
+            if payload.get("action") != "capture" or payload.get("consent") is not True:
+                self._json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "wake_calibration_consent_required"},
+                )
+                return
+            try:
+                result = self.miso.wake_calibration.capture()
+            except WakeCalibrationBusy as error:
+                self._json(HTTPStatus.CONFLICT, {"error": str(error)})
+                return
+            except WakeCalibrationComplete as error:
+                self._json(HTTPStatus.CONFLICT, {"error": str(error)})
+                return
+            except WakeCalibrationError as error:
+                status = (
+                    HTTPStatus.GATEWAY_TIMEOUT
+                    if str(error) == "wake_calibration_audio_timeout"
+                    else HTTPStatus.SERVICE_UNAVAILABLE
+                )
+                self._json(status, {"error": str(error)})
+                return
+            self._json(HTTPStatus.OK, {"calibration": result})
 
         def _actor(self) -> Actor:
             actor = getattr(self, "_request_actor", None)
@@ -1199,6 +1234,7 @@ def create_server(
     transcription_manager: TranscriptionManager | None = None,
     speech_manager: SpeechManager | None = None,
     wake_manager: WakeWordManager | None = None,
+    wake_calibration: WakeCalibration | None = None,
     conversation_manager: ConversationManager | None = None,
     access_verifier: AccessJWTVerifier | None = None,
 ) -> MisoHTTPServer:
@@ -1287,6 +1323,11 @@ def create_server(
         ),
         result_capacity=settings.stt_result_capacity,
     )
+    calibration = wake_calibration or WakeCalibration(
+        enabled=settings.audio_enabled and settings.stt_enabled,
+        audio=audio,
+        transcriber=transcription.transcriber,
+    )
     speech = speech_manager or SpeechManager(
         enabled=settings.tts_enabled,
         backend=PiperBackend(
@@ -1344,6 +1385,7 @@ def create_server(
         transcription_manager=transcription,
         speech_manager=speech,
         wake_manager=wake,
+        wake_calibration=calibration,
         conversation_manager=conversation,
         live_events=live_events,
         identity_policy=identity_policy,

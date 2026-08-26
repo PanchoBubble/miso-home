@@ -46,6 +46,23 @@ class FakeProvider:
         yield ChatChunk(done=True)
 
 
+class FakeWakeCalibration:
+    def __init__(self):
+        self.calls = 0
+
+    def capture(self):
+        self.calls += 1
+        return {
+            "recognized_text": "Me so.",
+            "language": "en",
+            "confidence": 0.8,
+            "duration_milliseconds": 5000,
+            "peak_dbfs": -20.0,
+            "rms_dbfs": -30.0,
+            "raw_audio_retained": False,
+        }
+
+
 class DashboardIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
@@ -62,6 +79,7 @@ class DashboardIntegrationTests(unittest.TestCase):
             log_level="INFO",
         )
         self.pi_provider = FakeProvider()
+        self.wake_calibration = FakeWakeCalibration()
         router = ProviderRouter(
             ProviderSet(
                 pi=self.pi_provider,
@@ -70,7 +88,12 @@ class DashboardIntegrationTests(unittest.TestCase):
             ),
             InMemoryAuditLog(),
         )
-        self.server = create_server(self.settings, port=0, router=router)
+        self.server = create_server(
+            self.settings,
+            port=0,
+            router=router,
+            wake_calibration=self.wake_calibration,
+        )
         self.thread = Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -112,6 +135,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="reminder-form"', content)
         self.assertIn(b'id="message-form"', content)
         self.assertIn(b'id="notification-inbox"', content)
+        self.assertIn(b'id="start-wake-calibration"', content)
         self.assertIn(b'http://miso.local/', content)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
         response, javascript = self.request("GET", "/app.js")
@@ -146,7 +170,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v7', service_worker)
+        self.assertIn(b'miso-shell-v8', service_worker)
         self.assertNotIn(b'caches.match(request)', service_worker)
 
         response, icon = self.request("GET", "/icon-192.png")
@@ -230,6 +254,28 @@ class DashboardIntegrationTests(unittest.TestCase):
         data = next(value for value in lines if value.startswith("data:"))
         streamed = json.loads(data.removeprefix("data:").strip())
         self.assertEqual(streamed["type"], "scheduled_item_due")
+
+    def test_wake_calibration_requires_consent_and_returns_no_retained_audio(self):
+        response, content = self.request(
+            "POST",
+            "/api/wake-calibration",
+            {"action": "capture", "consent": False},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(
+            json.loads(content)["error"], "wake_calibration_consent_required"
+        )
+
+        response, content = self.request(
+            "POST",
+            "/api/wake-calibration",
+            {"action": "capture", "consent": True},
+        )
+        payload = json.loads(content)["calibration"]
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["recognized_text"], "Me so.")
+        self.assertFalse(payload["raw_audio_retained"])
+        self.assertEqual(self.wake_calibration.calls, 1)
 
     def test_household_and_tool_mutations_publish_durable_safe_events(self) -> None:
         response, _ = self.request(
