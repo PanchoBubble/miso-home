@@ -7,7 +7,7 @@ import time
 import unittest
 
 from miso.audio import AudioFormat, BoundedPCMBuffer
-from miso.wake import OpenWakeWordModel, WakeDetector, WakeWordManager
+from miso.wake import OpenWakeWordModel, WakeDetector, WakeEvent, WakeWordManager
 
 
 def frame(amplitude: int = 4_000) -> bytes:
@@ -160,6 +160,29 @@ class OpenWakeWordModelTests(unittest.TestCase):
 
 
 class WakeManagerTests(unittest.TestCase):
+    def test_trusted_fallback_uses_normal_activation_path(self) -> None:
+        audio = FakeCaptureBus()
+        activations = []
+        manager = WakeWordManager(
+            enabled=True,
+            audio=audio,
+            model=FakeWakeModel([]),
+            phrase="Miso",
+            threshold=0.5,
+            energy_threshold_dbfs=-45,
+            activation_frames=1,
+            cooldown_seconds=0,
+            result_capacity=2,
+            on_activation=activations.append,
+        )
+        event = WakeEvent("Miso", 0.8, 1.0, source="transcription")
+
+        manager.activate(event)
+
+        self.assertEqual(manager.get_event(timeout=0), event)
+        self.assertEqual(activations, [event])
+        self.assertEqual(manager.status()["activations"], 1)
+
     def test_publishes_bounded_events_and_redacted_status(self) -> None:
         audio = FakeCaptureBus()
         model = FakeWakeModel([0.95])

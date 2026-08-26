@@ -171,6 +171,8 @@ class WakeEvents(Protocol):
 
     def get_event(self, timeout: float | None = None) -> WakeEvent | None: ...
 
+    def activate(self, event: WakeEvent) -> None: ...
+
 
 class TranscriptionEvents(Protocol):
     enabled: bool
@@ -416,6 +418,19 @@ class ConversationManager:
     def _handle_transcription(self, result: TranscriptionResult) -> None:
         with self._lock:
             state = self._state
+        if state is ConversationState.IDLE:
+            if self._starts_with_wake_phrase(result.text):
+                LOGGER.info("wake phrase confirmed by transcription fallback")
+                self.wake.activate(
+                    WakeEvent(
+                        self.wake_phrase,
+                        result.confidence or 0.0,
+                        time.time(),
+                        source="transcription",
+                    )
+                )
+            return
+        with self._lock:
             if state not in {
                 ConversationState.ACKNOWLEDGING,
                 ConversationState.LISTENING,
@@ -754,6 +769,10 @@ class ConversationManager:
         phrase = re.escape(self.wake_phrase)
         pattern = rf"^{phrase}(?=$|[\s,.:;!?-])(?:\s*[,.:;!?-]\s*|\s+)?"
         return re.sub(pattern, "", normalized, count=1, flags=re.IGNORECASE).strip()
+
+    def _starts_with_wake_phrase(self, text: str) -> bool:
+        normalized = text.strip()
+        return bool(normalized) and self._without_wake_phrase(normalized) != normalized
 
     @staticmethod
     def _is_goodbye(text: str) -> bool:

@@ -34,6 +34,11 @@ class EventSource:
             self.events.append(WakeEvent("Miso", 1.0, time.time()))
             self.condition.notify_all()
 
+    def activate(self, event: WakeEvent) -> None:
+        with self.condition:
+            self.events.append(event)
+            self.condition.notify_all()
+
     def put_result(self, text: str, language: str = "en") -> None:
         with self.condition:
             self.results.append(transcript(text, language))
@@ -229,6 +234,31 @@ class ConversationManagerTests(unittest.TestCase):
             self.assertTrue(
                 any(event["event"] == "conversation_transition" for event in self.audit.events())
             )
+        finally:
+            manager.stop()
+
+    def test_idle_transcription_of_miso_uses_wake_fallback(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_result("Miso.")
+            wait_for(manager, "listening")
+
+            self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+        finally:
+            manager.stop()
+
+    def test_idle_transcription_without_leading_miso_stays_idle(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_result("The miso soup is ready")
+            time.sleep(0.1)
+
+            self.assertEqual(manager.status()["state"], "idle")
+            self.assertEqual(speech.calls, [])
         finally:
             manager.stop()
 

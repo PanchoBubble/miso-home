@@ -52,12 +52,14 @@ class WakeEvent:
     phrase: str
     score: float
     detected_at: float
+    source: str = "model"
 
     def as_dict(self) -> dict[str, object]:
         return {
             "phrase": self.phrase,
             "score": round(self.score, 4),
             "detected_at": round(self.detected_at, 3),
+            "source": self.source,
         }
 
 
@@ -363,6 +365,21 @@ class WakeWordManager:
                 self._condition.wait(timeout)
             return self._events.popleft() if self._events else None
 
+    def activate(self, event: WakeEvent) -> None:
+        """Publish a wake confirmed by this detector or a trusted local fallback."""
+        if not self.enabled:
+            return
+        if self._on_activation is not None:
+            try:
+                self._on_activation(event)
+            except Exception:
+                LOGGER.exception("wake activation callback failed")
+        with self._condition:
+            self._events.append(event)
+            self._condition.notify_all()
+        with self._state_lock:
+            self._activations += 1
+
     def status(self) -> dict[str, object]:
         with self._state_lock:
             state = self._state
@@ -418,13 +435,4 @@ class WakeWordManager:
                 self._stop.wait(1)
                 continue
             for event in events:
-                if self._on_activation is not None:
-                    try:
-                        self._on_activation(event)
-                    except Exception:
-                        LOGGER.exception("wake activation callback failed")
-                with self._condition:
-                    self._events.append(event)
-                    self._condition.notify_all()
-                with self._state_lock:
-                    self._activations += 1
+                self.activate(event)
