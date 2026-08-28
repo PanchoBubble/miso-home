@@ -216,11 +216,13 @@ class ProviderRouter:
             classification = requested_class
             reason = "explicit route class"
         available = self._providers()
-        preference = (
-            ("lan-ollama", "hosted-gpt", "pi-ollama")
-            if classification is RouteClass.COMPLEX
-            else ("pi-ollama", "lan-ollama", "hosted-gpt")
-        )
+        selected_tools = self._selected_tools(request, classification)
+        if selected_tools:
+            preference = ("pi-ollama", "lan-ollama", "hosted-gpt")
+            reason = f"{reason}; matched local tool"
+        else:
+            preference = ("hosted-gpt", "lan-ollama", "pi-ollama")
+            reason = f"{reason}; no matching local tool"
         candidates = tuple(name for name in preference if name in available)
         if manual_override is not None:
             if manual_override not in available:
@@ -231,7 +233,6 @@ class ProviderRouter:
                 else (manual_override, *(name for name in candidates if name != manual_override))
             )
             reason = f"manual provider override: {manual_override}"
-        selected_tools = self._selected_tools(request, classification)
         return RouteDecision(
             route_id=str(uuid.uuid4()),
             classification=classification,
@@ -404,8 +405,7 @@ class ProviderRouter:
             prefix = "shopping_"
         else:
             return names if classification is RouteClass.ROUTINE else ()
-        selected = tuple(name for name in names if name.startswith(prefix))
-        return selected or names
+        return tuple(name for name in names if name.startswith(prefix))
 
     def _bounded_stream(
         self,

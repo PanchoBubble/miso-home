@@ -79,12 +79,13 @@ class DashboardIntegrationTests(unittest.TestCase):
             log_level="INFO",
         )
         self.pi_provider = FakeProvider()
+        self.hosted_provider = FakeProvider("hosted-gpt", available=False)
         self.wake_calibration = FakeWakeCalibration()
         router = ProviderRouter(
             ProviderSet(
                 pi=self.pi_provider,
                 lan=None,
-                hosted=FakeProvider("hosted-gpt", available=False),
+                hosted=self.hosted_provider,
             ),
             InMemoryAuditLog(),
         )
@@ -459,6 +460,25 @@ class DashboardIntegrationTests(unittest.TestCase):
         expected = ("private", "local@miso.invalid", "local@miso.invalid")
         self.assertEqual(tuple(conversation), expected)
         self.assertEqual(tuple(timer), expected)
+
+    def test_chat_without_matching_tool_uses_hosted_provider(self) -> None:
+        self.hosted_provider.available = True
+        response, content = self.request(
+            "POST",
+            "/api/chat",
+            {
+                "text": "Explain why the sky is blue",
+                "request_id": "hosted-routing-test",
+                "route_class": "auto",
+            },
+        )
+        self.assertEqual(response.status, 200)
+        events = [json.loads(line) for line in content.splitlines()]
+        delta = next(item for item in events if item["type"] == "delta")
+        self.assertEqual(delta["provider"], "hosted-gpt")
+        self.assertEqual(len(self.hosted_provider.requests), 1)
+        self.assertEqual(self.hosted_provider.requests[0].tools, ())
+        self.assertEqual(self.pi_provider.requests, [])
 
     def test_memory_management_api_remembers_exports_previews_and_deletes(self) -> None:
         response, content = self.request(

@@ -474,8 +474,16 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     },
                     "providers": self.miso.router.health_snapshot(),
                     "routing": {
-                        "routine": ["pi-ollama", "lan-ollama", "hosted-gpt"],
-                        "complex": ["lan-ollama", "hosted-gpt", "pi-ollama"],
+                        "matched_tool": [
+                            "pi-ollama",
+                            "lan-ollama",
+                            "hosted-gpt",
+                        ],
+                        "no_matching_tool": [
+                            "hosted-gpt",
+                            "lan-ollama",
+                            "pi-ollama",
+                        ],
                     },
                     "tools": list(self.miso.tool_registry.names()),
                     "audio": self.miso.audio_manager.status(),
