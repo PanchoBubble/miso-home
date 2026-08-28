@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-MISO_URL="${MISO_KIOSK_URL:-http://miso.local/}"
-HEALTH_URL="${MISO_KIOSK_HEALTH_URL:-${MISO_URL%/}/healthz}"
+MISO_URL="${MISO_KIOSK_URL:-http://miso.local/companion}"
+HEALTH_URL="${MISO_KIOSK_HEALTH_URL:-http://miso.local/healthz}"
 WAIT_SECONDS="${MISO_KIOSK_WAIT_SECONDS:-120}"
 
 case "${WAIT_SECONDS}" in

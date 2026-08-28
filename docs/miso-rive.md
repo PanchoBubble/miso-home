@@ -2,6 +2,8 @@
 
 Miso's companion face lives at `/companion`. It is a deliberately simple, original device face using a mint, deep teal, cream, coral, amber, and sky-blue palette inspired by the color language of friendly retro electronics.
 
+The managed Pi kiosk opens this route by default. The dashboard remains available through the companion's exit control or directly at `/`.
+
 ## Runtime and assets
 
 - Rive Web Canvas Lite is pinned to `@rive-app/canvas-lite` 2.41.0 and served locally from `src/miso/web/vendor/rive/`.

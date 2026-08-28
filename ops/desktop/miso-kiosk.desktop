@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Miso Kiosk
-Comment=Launch the local Miso dashboard in fullscreen kiosk mode
+Comment=Launch the local Miso companion in fullscreen kiosk mode
 Exec=/usr/local/bin/miso-kiosk-launch
 X-GNOME-Autostart-enabled=true
 Hidden=false
