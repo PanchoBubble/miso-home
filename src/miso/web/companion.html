@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#78cdb5">
+    <title>Miso · Companion</title>
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/companion.css">
+    <script defer src="/vendor/rive/rive.js"></script>
+    <script defer src="/companion.js"></script>
+  </head>
+  <body data-companion-state="idle" data-connection="connecting">
+    <main class="companion-stage" aria-labelledby="companion-title">
+      <h1 id="companion-title" class="sr-only">Miso companion face</h1>
+      <canvas id="rive-face" class="face-renderer is-hidden" width="720" height="1280" aria-hidden="true"></canvas>
+
+      <svg id="fallback-face" class="face-renderer fallback-face" viewBox="0 0 720 1280" role="img" aria-labelledby="fallback-title fallback-description">
+        <title id="fallback-title">Miso companion face</title>
+        <desc id="fallback-description">A simple mint-green assistant face showing Miso's current state.</desc>
+        <rect width="720" height="1280" fill="#78cdb5"/>
+        <ellipse cx="100" cy="80" rx="325" ry="260" fill="#a9e2cf" opacity="0.22"/>
+        <rect x="65" y="190" width="610" height="680" rx="76" fill="#203a43" opacity="0.2" transform="translate(10 20)"/>
+        <rect x="55" y="170" width="610" height="680" rx="76" fill="#173f46" stroke="#d7f2de" stroke-width="8"/>
+        <rect x="166" y="215" width="388" height="10" rx="5" fill="#ffffff" opacity="0.4"/>
+
+        <g class="fallback-expression">
+          <g class="fallback-normal-eyes">
+            <ellipse class="fallback-eye fallback-eye-left" cx="228" cy="416" rx="32" ry="63" fill="#f1f5d8"/>
+            <ellipse class="fallback-eye fallback-eye-right" cx="492" cy="416" rx="32" ry="63" fill="#f1f5d8"/>
+          </g>
+          <g class="fallback-error-eyes" stroke="#e76f64" stroke-width="15" stroke-linecap="round">
+            <path d="M194 382l68 68m0-68l-68 68"/>
+            <path d="M458 382l68 68m0-68l-68 68"/>
+          </g>
+          <ellipse cx="155" cy="578" rx="27" ry="14" fill="#e76f64" opacity="0.33"/>
+          <ellipse cx="565" cy="578" rx="27" ry="14" fill="#e76f64" opacity="0.33"/>
+          <rect class="fallback-mouth" x="285" y="583" width="150" height="18" rx="9" fill="#f1f5d8"/>
+          <g class="fallback-tool-dots" fill="#f1f5d8">
+            <circle cx="304" cy="592" r="13"/>
+            <circle cx="360" cy="592" r="13"/>
+            <circle cx="416" cy="592" r="13"/>
+          </g>
+          <rect class="fallback-mute-slash" x="251" y="585" width="218" height="15" rx="8" fill="#e76f64" transform="rotate(-16 360 592)"/>
+        </g>
+
+        <g stroke="#ffffff" stroke-opacity="0.27" stroke-width="5">
+          <circle cx="250" cy="980" r="33" fill="#e76f64"/>
+          <circle cx="360" cy="980" r="33" fill="#f1c85b"/>
+          <circle cx="470" cy="980" r="33" fill="#6dc5d1"/>
+        </g>
+        <rect x="235" y="1107" width="250" height="26" rx="13" fill="#173f46" opacity="0.2"/>
+      </svg>
+
+      <div class="companion-status" role="status" aria-live="polite">
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span id="companion-status-copy">Miso · Ready</span>
+      </div>
+      <a class="dashboard-link" href="/">Open dashboard</a>
+    </main>
+  </body>
+</html>

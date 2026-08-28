@@ -77,6 +77,10 @@ MAX_BODY_BYTES = 65536
 STATIC_ASSETS = {
     "/": "index.html",
     "/index.html": "index.html",
+    "/companion": "companion.html",
+    "/companion.html": "companion.html",
+    "/companion.css": "companion.css",
+    "/companion.js": "companion.js",
     "/app.js": "app.js",
     "/styles.css": "styles.css",
     "/manifest.webmanifest": "manifest.webmanifest",
@@ -85,6 +89,10 @@ STATIC_ASSETS = {
     "/icon-192.png": "icon-192.png",
     "/icon-512.png": "icon-512.png",
     "/icon-maskable-512.png": "icon-maskable-512.png",
+    "/assets/miso-face.riv": "assets/miso-face.riv",
+    "/vendor/rive/rive.js": "vendor/rive/rive.js",
+    "/vendor/rive/rive.wasm": "vendor/rive/rive.wasm",
+    "/vendor/rive/rive_fallback.wasm": "vendor/rive/rive_fallback.wasm",
 }
 LOGGER = logging.getLogger("miso.http")
 
@@ -1113,6 +1121,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 ".webmanifest": "application/manifest+json; charset=utf-8",
                 ".svg": "image/svg+xml",
                 ".png": "image/png",
+                ".riv": "application/octet-stream",
+                ".wasm": "application/wasm",
             }[file_path.suffix]
             self._bytes(HTTPStatus.OK, file_path.read_bytes(), content_type)
 
@@ -1140,7 +1150,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
-                "style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+                "style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
+                "frame-ancestors 'none'",
             )
             self.end_headers()
             self.wfile.write(value)

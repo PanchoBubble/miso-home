@@ -13,4 +13,15 @@ dependencies = []
 where = ["src"]
 
 [tool.setuptools.package-data]
-"miso.web" = ["*.html", "*.css", "*.js", "*.webmanifest", "*.svg", "*.png"]
+"miso.web" = [
+  "*.html",
+  "*.css",
+  "*.js",
+  "*.webmanifest",
+  "*.svg",
+  "*.png",
+  "assets/*.riv",
+  "vendor/rive/*.js",
+  "vendor/rive/*.wasm",
+  "vendor/rive/*.txt",
+]

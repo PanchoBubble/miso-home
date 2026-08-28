@@ -1,7 +1,11 @@
-const CACHE_NAME = "miso-shell-v8";
+const CACHE_NAME = "miso-shell-v9";
 const SHELL_PATHS = [
   "/",
   "/index.html",
+  "/companion",
+  "/companion.html",
+  "/companion.css",
+  "/companion.js",
   "/styles.css",
   "/app.js",
   "/manifest.webmanifest",
@@ -9,6 +13,10 @@ const SHELL_PATHS = [
   "/icon-192.png",
   "/icon-512.png",
   "/icon-maskable-512.png",
+  "/assets/miso-face.riv",
+  "/vendor/rive/rive.js",
+  "/vendor/rive/rive.wasm",
+  "/vendor/rive/rive_fallback.wasm",
 ];
 const STATIC_PATHS = new Set(SHELL_PATHS);
 
@@ -47,13 +55,16 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
+    const fallbackPath = url.pathname === "/companion" || url.pathname === "/companion.html"
+      ? "/companion"
+      : "/";
     event.respondWith(
       fetch(request)
         .then((response) => {
           if (response.status < 500) return response;
-          return caches.match("/").then((cached) => cached || response);
+          return caches.match(fallbackPath).then((cached) => cached || response);
         })
-        .catch(() => caches.match("/")),
+        .catch(() => caches.match(fallbackPath)),
     );
     return;
   }

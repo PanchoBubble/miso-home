@@ -139,6 +139,10 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="start-wake-calibration"', content)
         self.assertIn(b'http://miso.local/', content)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
+        self.assertIn(
+            "script-src 'self' 'wasm-unsafe-eval'",
+            response.getheader("Content-Security-Policy"),
+        )
         response, javascript = self.request("GET", "/app.js")
         self.assertEqual(response.status, 200)
         self.assertIn(b"response.body.getReader", javascript)
@@ -171,7 +175,10 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v8', service_worker)
+        self.assertIn(b'miso-shell-v9', service_worker)
+        self.assertIn(b'"/companion"', service_worker)
+        self.assertIn(b'"/assets/miso-face.riv"', service_worker)
+        self.assertIn(b'"/vendor/rive/rive.wasm"', service_worker)
         self.assertNotIn(b'caches.match(request)', service_worker)
 
         response, icon = self.request("GET", "/icon-192.png")
@@ -212,6 +219,34 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(identity["actor"]["id"], "local@miso.invalid")
         self.assertEqual(identity["actor"]["source"], "web")
         self.assertEqual(identity["voice_actor"]["id"], "household:voice")
+
+    def test_companion_face_assets_are_local_and_privacy_bounded(self) -> None:
+        response, content = self.request("GET", "/companion")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'id="rive-face"', content)
+        self.assertIn(b'id="fallback-face"', content)
+        self.assertIn(b'/vendor/rive/rive.js', content)
+        self.assertIn(b'/companion.js', content)
+        self.assertNotIn(b'https://', content)
+
+        response, javascript = self.request("GET", "/companion.js")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'RuntimeLoader.setWasmUrl("/vendor/rive/rive.wasm")', javascript)
+        self.assertIn(b'RuntimeLoader.setWasmFallbackUrl', javascript)
+        self.assertIn(b'stateMachineInputs(RIVE_STATE_MACHINE)', javascript)
+        self.assertIn(b'/api/events?after=', javascript)
+        self.assertNotIn(b"transcript", javascript.lower())
+        self.assertNotIn(b"setInterval", javascript)
+
+        response, asset = self.request("GET", "/assets/miso-face.riv")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "application/octet-stream")
+        self.assertTrue(asset.startswith(b"RIVE"))
+
+        response, wasm = self.request("GET", "/vendor/rive/rive.wasm")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "application/wasm")
+        self.assertTrue(wasm.startswith(b"\x00asm"))
 
     def test_live_events_replay_missed_notifications_and_stream_without_polling(
         self,
