@@ -1,6 +1,7 @@
 const RIVE_ARTBOARD = "Miso";
 const RIVE_STATE_MACHINE = "Miso Face";
 const RIVE_STATE_INPUT = "state";
+const RIVE_MAX_RENDER_PIXELS = 540 * 960;
 
 const COMPANION_STATES = Object.freeze({
   idle: { code: 0, label: "Ready" },
@@ -74,6 +75,13 @@ function useFallback() {
   fallback.classList.remove("is-hidden");
 }
 
+function resizeRiveSurface(instance) {
+  const cssPixels = Math.max(1, canvas.clientWidth * canvas.clientHeight);
+  const boundedRatio = Math.sqrt(RIVE_MAX_RENDER_PIXELS / cssPixels);
+  const renderRatio = Math.max(0.5, Math.min(window.devicePixelRatio || 1, boundedRatio));
+  instance.resizeDrawingSurfaceToCanvas(renderRatio);
+}
+
 function loadRiveFace() {
   useFallback();
   if (reducedMotion.matches || !globalThis.rive) return;
@@ -100,8 +108,8 @@ function loadRiveFace() {
         return;
       }
       companion.riveInstance = instance;
-      instance.resizeDrawingSurfaceToCanvas();
-      companion.resizeObserver = new ResizeObserver(() => instance.resizeDrawingSurfaceToCanvas());
+      resizeRiveSurface(instance);
+      companion.resizeObserver = new ResizeObserver(() => resizeRiveSurface(instance));
       companion.resizeObserver.observe(canvas);
       applyCompanionState(companion.current);
       fallback.classList.add("is-hidden");

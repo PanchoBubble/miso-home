@@ -12,6 +12,8 @@ Miso's companion face lives at `/companion`. It is a deliberately simple, origin
 
 No CDN or runtime network request is required. The PWA shell caches the companion HTML, JavaScript, CSS, `.riv`, and both primary and compatibility WASM binaries for offline startup.
 
+The canvas drawing surface is capped at 540×960 equivalent pixels and scaled to the 720×1280 DSI viewport. The artwork uses broad, flat vector shapes, so this keeps edges visually clean while bounding raster work during concurrent local inference.
+
 ## State contract
 
 The Rive state machine exposes a single numeric input named `state`:

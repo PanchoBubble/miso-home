@@ -233,6 +233,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'RuntimeLoader.setWasmUrl("/vendor/rive/rive.wasm")', javascript)
         self.assertIn(b'RuntimeLoader.setWasmFallbackUrl', javascript)
+        self.assertIn(b"RIVE_MAX_RENDER_PIXELS", javascript)
         self.assertIn(b'stateMachineInputs(RIVE_STATE_MACHINE)', javascript)
         self.assertIn(b'/api/events?after=', javascript)
         self.assertNotIn(b"transcript", javascript.lower())
