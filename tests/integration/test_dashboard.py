@@ -175,7 +175,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v9', service_worker)
+        self.assertIn(b'miso-shell-v10', service_worker)
         self.assertIn(b'"/companion"', service_worker)
         self.assertIn(b'"/assets/miso-face.riv"', service_worker)
         self.assertIn(b'"/vendor/rive/rive.wasm"', service_worker)
