@@ -37,3 +37,15 @@ The Rive state machine exposes a single numeric input named `state`:
 The route starts with an accessible inline SVG equivalent of the face. Rive replaces it only after the local runtime, WASM, asset, artboard, state machine, and `state` input load successfully. A load failure keeps the SVG visible. The same semantic state mapping drives both renderers.
 
 When `prefers-reduced-motion: reduce` is active, the page does not initialize Rive and uses a static SVG expression. This avoids loading or advancing the animation runtime when motion has been disabled by the user.
+
+## Raspberry Pi 5 benchmark
+
+The deployed renderer was exercised on 2026-08-28 in the Pi's real 720×1280 Wayland session while openWakeWord and offline STT remained active and Ollama generated 256 tokens with `qwen3:0.6b`:
+
+- Broadcom V3D 7.1 / OpenGL ES 3.1 provided the GPU renderer.
+- The bounded 540×960 drawing surface sustained 52.8 FPS over 15 seconds.
+- Median frame time was 16.7 ms; p95 and p99 were 33.3 ms and 33.4 ms.
+- The complete temporary Chromium companion process group used about 1.14 GiB RSS and roughly 32% of one CPU core. This includes the browser, renderer, GPU, network, and storage processes rather than only Rive's incremental cost.
+- Temperature stayed between 60.4°C and 62.0°C, and `vcgencmd get_throttled` remained `0x0` throughout.
+
+The temporary benchmark browser ran alongside the normal dashboard kiosk, making these figures conservative. It was removed after the run; the original kiosk and Miso services remained active with zero restarts.
