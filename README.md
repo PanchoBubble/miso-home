@@ -35,8 +35,11 @@ curl --fail http://127.0.0.1:8090/healthz
 ```
 
 The installer places root-owned application code in `/opt/miso/app`, installs
-`miso.service`, publishes `miso.local` with Avahi, and runs the service as the
-unprivileged `miso` system user.
+`miso.service`, publishes `miso.local` with Avahi, configures the `pancho`
+desktop to launch the dashboard after its health check passes, and runs the
+service as the unprivileged `miso` system user. If the legacy Stremio kiosk
+entry exists, the installer archives it with a `.miso-disabled` suffix for
+rollback.
 Optional environment overrides belong in `/etc/miso/miso.env`, never in Git.
 
 After the recovery key exists, install the separate local backup automation:

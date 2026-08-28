@@ -6,6 +6,8 @@ TARGET_ROOT="${TARGET_ROOT:-/opt/miso/app}"
 UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso.service"
 MDNS_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-mdns.service"
 MDNS_PUBLISH_SOURCE="${SOURCE_ROOT}/ops/bin/miso-mdns-publish.sh"
+KIOSK_LAUNCH_SOURCE="${SOURCE_ROOT}/ops/bin/miso-kiosk-launch.sh"
+KIOSK_DESKTOP_SOURCE="${SOURCE_ROOT}/ops/desktop/miso-kiosk.desktop"
 TUNNEL_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-cloudflared.service"
 TUNNEL_BOOTSTRAP_SOURCE="${SOURCE_ROOT}/ops/cloudflared/miso-bootstrap.yml"
 CONVERSATION_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-conversation.env"
@@ -21,13 +23,15 @@ fail() {
 }
 
 [[ "${EUID}" -eq 0 ]] || fail "run as root"
-for command in awk aplay arecord avahi-publish-address cloudflared getent install ip python3 rsync systemctl systemd-tmpfiles usermod; do
+for command in awk aplay arecord avahi-publish-address cloudflared curl getent install ip python3 rsync systemctl systemd-tmpfiles usermod; do
   command -v "${command}" >/dev/null || fail "missing command: ${command}"
 done
 [[ -d "${SOURCE_ROOT}/src/miso" ]] || fail "Miso source not found under ${SOURCE_ROOT}"
 [[ -f "${UNIT_SOURCE}" ]] || fail "systemd unit not found: ${UNIT_SOURCE}"
 [[ -f "${MDNS_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${MDNS_UNIT_SOURCE}"
 [[ -f "${MDNS_PUBLISH_SOURCE}" ]] || fail "helper not found: ${MDNS_PUBLISH_SOURCE}"
+[[ -f "${KIOSK_LAUNCH_SOURCE}" ]] || fail "helper not found: ${KIOSK_LAUNCH_SOURCE}"
+[[ -f "${KIOSK_DESKTOP_SOURCE}" ]] || fail "desktop entry not found: ${KIOSK_DESKTOP_SOURCE}"
 [[ -f "${TUNNEL_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${TUNNEL_UNIT_SOURCE}"
 [[ -f "${TUNNEL_BOOTSTRAP_SOURCE}" ]] || fail "tunnel bootstrap not found: ${TUNNEL_BOOTSTRAP_SOURCE}"
 [[ -f "${CONVERSATION_ENV_SOURCE}" ]] || fail \
@@ -62,6 +66,18 @@ install -o root -g root -m 0644 "${TUNNEL_BOOTSTRAP_SOURCE}" \
   /etc/cloudflared/miso-bootstrap.yml
 install -o root -g root -m 0755 "${MDNS_PUBLISH_SOURCE}" \
   /usr/local/bin/miso-mdns-publish
+install -o root -g root -m 0755 "${KIOSK_LAUNCH_SOURCE}" \
+  /usr/local/bin/miso-kiosk-launch
+if getent passwd pancho >/dev/null; then
+  install -d -o pancho -g pancho -m 0755 /home/pancho/.config/autostart
+  stale_kiosk=/home/pancho/.config/autostart/stremio-tv.desktop
+  stale_kiosk_backup="${stale_kiosk}.miso-disabled"
+  if [[ -e "${stale_kiosk}" ]]; then
+    mv --backup=numbered "${stale_kiosk}" "${stale_kiosk_backup}"
+  fi
+  install -o pancho -g pancho -m 0644 "${KIOSK_DESKTOP_SOURCE}" \
+    /home/pancho/.config/autostart/miso-kiosk.desktop
+fi
 install -d -o root -g root -m 0755 /etc/miso
 install -o root -g root -m 0644 "${CONVERSATION_ENV_SOURCE}" \
   /etc/miso/miso-conversation.env
