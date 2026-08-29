@@ -211,6 +211,7 @@ class ConversationManager:
         goodbye_spanish: str = "Hasta luego.",
         transition_capacity: int = 32,
         transition_listeners: tuple[Callable[[StateTransition], None], ...] = (),
+        response_listeners: tuple[Callable[[str, str], None], ...] = (),
     ) -> None:
         if listen_timeout_seconds <= 0 or checkback_timeout_seconds <= 0:
             raise ValueError("conversation timeouts must be positive")
@@ -242,6 +243,7 @@ class ConversationManager:
         )
         self._transitions: deque[StateTransition] = deque(maxlen=transition_capacity)
         self._transition_listeners = list(transition_listeners)
+        self._response_listeners = list(response_listeners)
         self._conversation_id: str | None = None
         self._active_cancel: threading.Event | None = None
         self._generation = 0
@@ -304,6 +306,19 @@ class ConversationManager:
     ) -> None:
         with self._lock:
             self._transition_listeners.append(listener)
+
+    def add_response_listener(self, listener: Callable[[str, str], None]) -> None:
+        with self._lock:
+            self._response_listeners.append(listener)
+
+    def _publish_response(self, text: str, language: str) -> None:
+        with self._lock:
+            listeners = tuple(self._response_listeners)
+        for listener in listeners:
+            try:
+                listener(text, language)
+            except Exception:
+                LOGGER.exception("conversation response listener failed")
 
     def _transition_locked(self, target: ConversationState, reason: str) -> None:
         previous = self._state
@@ -613,6 +628,7 @@ class ConversationManager:
             self._transition_current(
                 generation, ConversationState.SPEAKING, "response ready"
             )
+            self._publish_response(spoken, language)
             request_id = self.speech.speak(spoken, language)
             result = self._wait_for_speech(request_id, cancel)
             if (
@@ -671,6 +687,9 @@ class ConversationManager:
         reason: str,
     ) -> None:
         try:
+            if cancel.is_set() or not self._is_current(generation):
+                return
+            self._publish_response(text, language)
             request_id = self.speech.speak(text, language)
             result = self._wait_for_speech(request_id, cancel)
             if cancel.is_set() or not self._is_current(generation):

@@ -32,6 +32,7 @@ canvas.face-renderer { display: block; }
 .face-renderer.is-hidden { visibility: hidden; }
 
 .companion-status,
+.companion-caption,
 .dashboard-link {
   position: absolute;
   z-index: 4;
@@ -40,6 +41,33 @@ canvas.face-renderer { display: block; }
   border: 1px solid rgba(215, 242, 222, 0.28);
   box-shadow: 0 8px 30px rgba(23, 63, 70, 0.2);
   backdrop-filter: blur(12px);
+}
+.companion-caption {
+  inset: auto clamp(22px, 6vw, 46px) max(70px, calc(env(safe-area-inset-bottom) + 54px));
+  padding: clamp(16px, 3.4vw, 25px) clamp(18px, 4.2vw, 32px);
+  border-radius: clamp(20px, 4vw, 28px);
+  text-align: center;
+}
+.companion-caption[hidden] { display: none; }
+.caption-speaker {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--mint-light);
+  font-size: clamp(0.68rem, 1.8vw, 0.84rem);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.caption-copy {
+  max-height: min(38vh, 430px);
+  margin: 0;
+  overflow-y: auto;
+  color: var(--cream);
+  font-size: clamp(1.15rem, 4.2vw, 2rem);
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 .companion-status {
   inset: max(18px, env(safe-area-inset-top)) auto auto 50%;

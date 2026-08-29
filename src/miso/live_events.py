@@ -21,6 +21,7 @@ LOGGER = logging.getLogger("miso.live-events")
 EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_EVENT_BYTES = 16 * 1024
 DEFAULT_CAPACITY = 2_000
+MAX_CAPTION_CHARACTERS = 3_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +308,29 @@ def conversation_event_publisher(events: LiveEventStore) -> TransitionListener:
                 "state": current.value,
                 "previous": previous.value,
                 "occurred_at": round(float(getattr(transition, "occurred_at")), 3),
+            },
+            actor=VOICE_ACTOR,
+        )
+
+    return publish
+
+
+def conversation_caption_publisher(
+    events: LiveEventStore,
+) -> Callable[[str, str], None]:
+    """Project text that is spoken aloud to the shared companion display."""
+
+    def publish(text: str, language: str) -> None:
+        normalized = text.strip()
+        if not normalized:
+            return
+        truncated = len(normalized) > MAX_CAPTION_CHARACTERS
+        events.publish(
+            "assistant_caption",
+            {
+                "text": normalized[:MAX_CAPTION_CHARACTERS],
+                "language": language,
+                "truncated": truncated,
             },
             actor=VOICE_ACTOR,
         )

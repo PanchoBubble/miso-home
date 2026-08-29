@@ -175,7 +175,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v10', service_worker)
+        self.assertIn(b'miso-shell-v11', service_worker)
         self.assertIn(b'"/companion"', service_worker)
         self.assertIn(b'"/assets/miso-face.riv"', service_worker)
         self.assertIn(b'"/vendor/rive/rive.wasm"', service_worker)
@@ -227,6 +227,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="fallback-face"', content)
         self.assertIn(b'/vendor/rive/rive.js', content)
         self.assertIn(b'/companion.js', content)
+        self.assertIn(b'id="companion-caption"', content)
         self.assertNotIn(b'https://', content)
 
         response, javascript = self.request("GET", "/companion.js")
@@ -236,7 +237,9 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b"RIVE_MAX_RENDER_PIXELS", javascript)
         self.assertIn(b'stateMachineInputs(RIVE_STATE_MACHINE)', javascript)
         self.assertIn(b'/api/events?after=', javascript)
-        self.assertNotIn(b"transcript", javascript.lower())
+        self.assertIn(b'assistant_caption', javascript)
+        self.assertIn(b'captionCopy.textContent = normalized', javascript)
+        self.assertNotIn(b'innerHTML', javascript)
         self.assertNotIn(b"setInterval", javascript)
 
         response, asset = self.request("GET", "/assets/miso-face.riv")

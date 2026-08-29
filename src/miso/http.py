@@ -38,6 +38,7 @@ from miso.live_events import (
     LiveAuditSink,
     LiveEventStore,
     LiveToolResultPublisher,
+    conversation_caption_publisher,
     conversation_event_publisher,
 )
 from miso.memory import MemoryStore, SearchResult, utc_now
@@ -1390,6 +1391,7 @@ def create_server(
         acknowledgement=settings.conversation_acknowledgement,
     )
     conversation.add_transition_listener(conversation_event_publisher(live_events))
+    conversation.add_response_listener(conversation_caption_publisher(live_events))
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(),

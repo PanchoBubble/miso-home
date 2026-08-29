@@ -225,6 +225,10 @@ class ConversationManagerTests(unittest.TestCase):
     def test_wake_routes_response_and_opens_follow_up(self) -> None:
         speech = FakeSpeech()
         manager = self.manager(speech)
+        responses = []
+        manager.add_response_listener(
+            lambda text, language: responses.append((text, language))
+        )
         manager.start()
         try:
             self.source.put_wake()
@@ -234,6 +238,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "follow_up")
 
             self.assertEqual([item[1] for item in speech.calls], ["Yes?", "First response"])
+            self.assertEqual(responses, [("Yes?", "en"), ("First response", "en")])
             conversation_id = manager.status()["conversation_id"]
             events = self.store.events(str(conversation_id))
             self.assertEqual([event.role for event in events], ["user", "assistant"])

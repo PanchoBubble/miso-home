@@ -2,6 +2,10 @@ const RIVE_ARTBOARD = "Miso";
 const RIVE_STATE_MACHINE = "Miso Face";
 const RIVE_STATE_INPUT = "state";
 const RIVE_MAX_RENDER_PIXELS = 540 * 960;
+const CAPTION_MAX_AGE_MS = 30000;
+const CAPTION_MIN_VISIBLE_MS = 6000;
+const CAPTION_MAX_VISIBLE_MS = 20000;
+const CAPTION_MS_PER_CHARACTER = 55;
 
 const COMPANION_STATES = Object.freeze({
   idle: { code: 0, label: "Ready" },
@@ -40,11 +44,14 @@ const companion = {
   riveInstance: null,
   riveStateInput: null,
   resizeObserver: null,
+  captionTimer: null,
 };
 
 const canvas = document.querySelector("#rive-face");
 const fallback = document.querySelector("#fallback-face");
 const statusCopy = document.querySelector("#companion-status-copy");
+const caption = document.querySelector("#companion-caption");
+const captionCopy = document.querySelector("#companion-caption-copy");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 function requestHeaders() {
@@ -63,6 +70,26 @@ function applyCompanionState(value) {
   document.body.dataset.companionState = name;
   statusCopy.textContent = `Miso · ${definition.label}`;
   if (companion.riveStateInput) companion.riveStateInput.value = definition.code;
+}
+
+function clearCaption() {
+  if (companion.captionTimer) window.clearTimeout(companion.captionTimer);
+  companion.captionTimer = null;
+  caption.hidden = true;
+  captionCopy.textContent = "";
+}
+
+function showCaption(text) {
+  const normalized = text.trim();
+  if (!normalized) return;
+  if (companion.captionTimer) window.clearTimeout(companion.captionTimer);
+  captionCopy.textContent = normalized;
+  caption.hidden = false;
+  const visibleMilliseconds = Math.min(
+    CAPTION_MAX_VISIBLE_MS,
+    Math.max(CAPTION_MIN_VISIBLE_MS, normalized.length * CAPTION_MS_PER_CHARACTER),
+  );
+  companion.captionTimer = window.setTimeout(clearCaption, visibleMilliseconds);
 }
 
 function useFallback() {
@@ -152,6 +179,14 @@ function handleLiveEvent(event) {
   localStorage.setItem("miso-companion-event-id", String(event.id));
   if (event.type === "assistant_state" && typeof event.payload?.state === "string") {
     applyCompanionState(event.payload.state);
+    if (event.payload.state === "acknowledging") clearCaption();
+  }
+  if (
+    event.type === "assistant_caption"
+    && typeof event.payload?.text === "string"
+    && Date.now() - Date.parse(event.created_at) <= CAPTION_MAX_AGE_MS
+  ) {
+    showCaption(event.payload.text);
   }
 }
 
@@ -213,6 +248,7 @@ window.addEventListener("offline", () => {
 });
 window.addEventListener("beforeunload", () => {
   stopLiveEvents();
+  clearCaption();
   useFallback();
 });
 

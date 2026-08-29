@@ -10,6 +10,8 @@ from miso.live_events import (
     LiveAuditSink,
     LiveEventStore,
     LiveToolResultPublisher,
+    MAX_CAPTION_CHARACTERS,
+    conversation_caption_publisher,
     conversation_event_publisher,
 )
 from miso.memory import MemoryStore
@@ -95,6 +97,29 @@ class LiveEventStoreTests(unittest.TestCase):
         self.assertEqual(event.event_type, "assistant_state")
         self.assertEqual(event.payload["state"], "acknowledging")
         self.assertNotIn("reason", event.payload)
+
+    def test_voice_caption_is_shared_bounded_and_contains_no_web_chat(self) -> None:
+        conversation_caption_publisher(self.store)(
+            "  This reply is spoken aloud.  ", "en"
+        )
+        self.store.publish(
+            "assistant_caption",
+            {"text": "private dashboard reply", "language": "en"},
+            actor=self.juan,
+        )
+
+        juan_events = self.store.after(0, actor=self.juan)
+        ana_events = self.store.after(0, actor=self.ana)
+        self.assertEqual(juan_events[0].payload["text"], "This reply is spoken aloud.")
+        self.assertEqual(juan_events[0].payload["language"], "en")
+        self.assertFalse(juan_events[0].payload["truncated"])
+        self.assertEqual(len(ana_events), 1)
+        self.assertNotIn("private dashboard reply", str(ana_events))
+
+        conversation_caption_publisher(self.store)("x" * 4_000, "es")
+        bounded = self.store.recent(actor=self.ana)[-1]
+        self.assertEqual(len(bounded.payload["text"]), MAX_CAPTION_CHARACTERS)
+        self.assertTrue(bounded.payload["truncated"])
 
     def test_scheduled_audit_and_tool_results_are_projected_safely(self) -> None:
         audit = InMemoryAuditLog()
