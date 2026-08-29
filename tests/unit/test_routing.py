@@ -119,10 +119,10 @@ class ProviderRouterTests(unittest.TestCase):
         routine = router.plan(
             self.request("Recuérdame comprar café", reminder_tool)
         )
-        self.assertEqual(routine.classification, RouteClass.ROUTINE)
+        self.assertEqual(routine.classification, RouteClass.STANDARD)
         self.assertEqual(
             routine.candidates,
-            ("pi-ollama", "lan-ollama", "hosted-gpt"),
+            ("hosted-gpt", "lan-ollama", "pi-ollama"),
         )
         complex_route = router.plan(self.request("Analyze and compare these designs"))
         self.assertEqual(complex_route.classification, RouteClass.COMPLEX)
@@ -131,9 +131,8 @@ class ProviderRouterTests(unittest.TestCase):
             ("hosted-gpt", "lan-ollama", "pi-ollama"),
         )
         self.assertIn("complexity marker", complex_route.reason)
-        self.assertIn("no matching local tool", complex_route.reason)
 
-    def test_routine_request_exposes_only_relevant_tool_family(self) -> None:
+    def test_all_request_tools_stay_available_to_the_model(self) -> None:
         tools = tuple(
             {
                 "name": name,
@@ -151,50 +150,19 @@ class ProviderRouterTests(unittest.TestCase):
             )
         )
         router = self.router()
-        timer = router.plan(self.request("Set a timer", tools))
-        self.assertEqual(
-            timer.selected_tools,
-            ("timer_create", "timer_cancel"),
-        )
-        reminder = router.plan(self.request("Recuérdame comprar café", tools))
-        self.assertEqual(reminder.selected_tools, ("reminder_create",))
-        standard = router.plan(self.request("Hello, how are you?", tools))
-        self.assertEqual(standard.selected_tools, ())
-        complex_shopping = router.plan(
-            self.request("Analyze my shopping list", tools)
-        )
-        self.assertEqual(complex_shopping.selected_tools, ("shopping_add",))
-        calendar = router.plan(self.request("Añade una cita al calendario", tools))
-        self.assertEqual(
-            calendar.selected_tools,
-            ("calendar_list", "calendar_event_create"),
-        )
-        weather = router.plan(self.request("¿Qué tiempo hará en Madrid?", tools))
-        self.assertEqual(weather.classification, RouteClass.ROUTINE)
-        self.assertEqual(weather.selected_tools, ("weather_get",))
-        self.assertEqual(
-            weather.candidates,
-            ("pi-ollama", "hosted-gpt"),
-        )
+        for content in (
+            "Set a timer",
+            "Recuérdame comprar café",
+            "Hello, how are you?",
+            "Analyze my shopping list",
+        ):
+            decision = router.plan(self.request(content, tools))
+            self.assertEqual(
+                decision.selected_tools,
+                tuple(tool["name"] for tool in tools),
+            )
 
-    def test_missing_tool_family_prefers_hosted_without_exposing_other_tools(self) -> None:
-        tools = (
-            {
-                "name": "timer_create",
-                "description": "timer_create",
-                "input_schema": {"type": "object", "additionalProperties": False},
-            },
-        )
-        router = self.router(lan=successful("lan-ollama"))
-        decision = router.plan(self.request("Show my calendar", tools))
-        self.assertEqual(decision.selected_tools, ())
-        self.assertEqual(
-            decision.candidates,
-            ("hosted-gpt", "lan-ollama", "pi-ollama"),
-        )
-        self.assertIn("no matching local tool", decision.reason)
-
-    def test_acknowledgement_precedes_health_and_routine_prefers_pi(self) -> None:
+    def test_acknowledgement_precedes_health_and_hosted_is_preferred(self) -> None:
         router = self.router(lan=successful("lan-ollama"))
         timer_tool = (
             {
@@ -209,10 +177,10 @@ class ProviderRouterTests(unittest.TestCase):
         started = time.monotonic()
         acknowledgement = next(stream)
         self.assertLess(time.monotonic() - started, 0.05)
-        self.assertIn("routine", acknowledgement.progress)
+        self.assertIn("standard", acknowledgement.progress)
         chunks = list(stream)
         text = next(chunk for chunk in chunks if chunk.text)
-        self.assertEqual(text.provider, "pi-ollama")
+        self.assertEqual(text.provider, "hosted-gpt")
         self.assertEqual(text.route_id, acknowledgement.route_id)
 
     def test_request_without_matching_tool_prefers_hosted(self) -> None:
@@ -224,7 +192,7 @@ class ProviderRouterTests(unittest.TestCase):
         self.assertEqual(text.provider, "hosted-gpt")
         self.assertEqual(lan.stream_calls, 0)
 
-    def test_matching_tool_prefers_pi_even_for_complex_request(self) -> None:
+    def test_tool_requests_also_prefer_hosted(self) -> None:
         tools = (
             {
                 "name": "shopping_list",
@@ -246,8 +214,8 @@ class ProviderRouterTests(unittest.TestCase):
             )
         )
         text = next(chunk for chunk in chunks if chunk.text)
-        self.assertEqual(text.provider, "pi-ollama")
-        self.assertEqual(hosted.stream_calls, 0)
+        self.assertEqual(text.provider, "hosted-gpt")
+        self.assertEqual(pi.stream_calls, 0)
 
     def test_complex_request_skips_unconfigured_hosted_and_uses_pi(self) -> None:
         hosted = successful("hosted-gpt")
@@ -258,74 +226,100 @@ class ProviderRouterTests(unittest.TestCase):
         self.assertEqual(text.provider, "pi-ollama")
 
     def test_unavailable_and_failed_providers_fall_back(self) -> None:
-        pi = successful("pi-ollama")
-        pi.available = False
+        hosted = successful("hosted-gpt")
+        hosted.available = False
         lan = FakeProvider(
             "lan-ollama",
             stream_error=ProviderError("bounded LAN failure"),
         )
-        hosted = successful("hosted-gpt")
+        pi = successful("pi-ollama")
         router = self.router(pi=pi, lan=lan, hosted=hosted)
-        tools = (
-            {
-                "name": "timer_create",
-                "description": "timer_create",
-                "input_schema": {"type": "object", "additionalProperties": False},
-            },
-        )
-        chunks = list(
-            router.stream(self.request("Set a timer", tools), Event())
-        )
+        chunks = list(router.stream(self.request("Set a timer"), Event()))
         text = next(chunk for chunk in chunks if chunk.text)
-        self.assertEqual(text.provider, "hosted-gpt")
+        self.assertEqual(text.provider, "pi-ollama")
         finished = [
             event
             for event in self.audit.events()
             if event["event"] == "routing_finished"
         ][0]
-        self.assertEqual(finished["selected_provider"], "hosted-gpt")
+        self.assertEqual(finished["selected_provider"], "pi-ollama")
         self.assertEqual(len(finished["failures"]), 2)
 
     def test_attempt_timeout_falls_back_within_bound(self) -> None:
-        pi = FakeProvider("pi-ollama", block=True)
+        hosted = FakeProvider("hosted-gpt", block=True)
         router = self.router(
-            pi=pi,
-            hosted=successful("hosted-gpt"),
+            pi=successful("pi-ollama"),
+            hosted=hosted,
             attempt_timeout_seconds=0.03,
         )
-        tools = (
-            {
-                "name": "timer_create",
-                "description": "timer_create",
-                "input_schema": {"type": "object", "additionalProperties": False},
-            },
-        )
         started = time.monotonic()
-        chunks = list(
-            router.stream(self.request("Set a timer", tools), Event())
-        )
+        chunks = list(router.stream(self.request("Set a timer"), Event()))
         self.assertLess(time.monotonic() - started, 0.2)
         text = next(chunk for chunk in chunks if chunk.text)
-        self.assertEqual(text.provider, "hosted-gpt")
+        self.assertEqual(text.provider, "pi-ollama")
 
     def test_failure_after_visible_output_does_not_mix_providers(self) -> None:
-        pi = FakeProvider(
-            "pi-ollama",
+        hosted = FakeProvider(
+            "hosted-gpt",
             chunks=(ChatChunk(text="partial"),),
             stream_error=ProviderError("failed late"),
         )
-        hosted = successful("hosted-gpt")
+        pi = successful("pi-ollama")
         router = self.router(pi=pi, hosted=hosted)
-        tools = (
-            {
-                "name": "timer_create",
-                "description": "timer_create",
-                "input_schema": {"type": "object", "additionalProperties": False},
-            },
-        )
         with self.assertRaisesRegex(RoutingError, "after streaming began"):
-            list(router.stream(self.request("Set a timer", tools), Event()))
-        self.assertEqual(hosted.stream_calls, 0)
+            list(router.stream(self.request("Set a timer"), Event()))
+        self.assertEqual(pi.stream_calls, 0)
+
+    def test_fresh_health_verdict_is_reused_across_turns(self) -> None:
+        hosted = successful("hosted-gpt")
+        hosted.health_calls = 0
+        original_health = hosted.health
+
+        def counting_health():
+            hosted.health_calls += 1
+            return original_health()
+
+        hosted.health = counting_health
+        router = self.router(hosted=hosted, health_cache_seconds=60.0)
+        for _ in range(3):
+            list(router.stream(self.request("hello"), Event()))
+        self.assertEqual(hosted.health_calls, 1)
+
+    def test_stream_failure_evicts_the_cached_health_verdict(self) -> None:
+        hosted = FakeProvider(
+            "hosted-gpt", stream_error=ProviderError("boom")
+        )
+        hosted.health_calls = 0
+        original_health = hosted.health
+
+        def counting_health():
+            hosted.health_calls += 1
+            return original_health()
+
+        hosted.health = counting_health
+        router = self.router(hosted=hosted, health_cache_seconds=60.0)
+        list(router.stream(self.request("hello"), Event()))
+        list(router.stream(self.request("hello"), Event()))
+        self.assertEqual(hosted.health_calls, 2)
+
+    def test_unavailable_health_is_never_cached(self) -> None:
+        hosted = successful("hosted-gpt")
+        hosted.available = False
+        hosted.health_calls = 0
+        original_health = hosted.health
+
+        def counting_health():
+            hosted.health_calls += 1
+            return original_health()
+
+        hosted.health = counting_health
+        router = self.router(hosted=hosted, health_cache_seconds=60.0)
+        list(router.stream(self.request("hello"), Event()))
+        hosted.available = True
+        chunks = list(router.stream(self.request("hello"), Event()))
+        text = next(chunk for chunk in chunks if chunk.text)
+        self.assertEqual(text.provider, "hosted-gpt")
+        self.assertEqual(hosted.health_calls, 2)
 
     def test_manual_override_is_strict_by_default(self) -> None:
         hosted = successful("hosted-gpt")

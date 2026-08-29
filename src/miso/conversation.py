@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Protocol
 
+from miso.intake import FastLane
 from miso.memory import MemoryStore
 from miso.identity import VOICE_ACTOR
 from miso.providers import ChatRequest, ProviderCancelled
@@ -105,6 +106,10 @@ _TRANSITIONS: dict[ConversationState, frozenset[ConversationState]] = {
     ),
     ConversationState.SPEAKING: frozenset(
         {
+            # Sentence-streaming TTS speaks while the model is still
+            # generating, so a tool call can legitimately arrive mid-speech.
+            ConversationState.USING_TOOL,
+            ConversationState.ROUTING,
             ConversationState.FOLLOW_UP,
             ConversationState.TRANSCRIBING,
             ConversationState.ERROR,
@@ -169,6 +174,11 @@ _OUTPUT_STATES = frozenset(
 # Everywhere else Miso is speaking or working, and on this hardware the VAD
 # fires on its own speaker and on room noise, so treating an onset as a barge-in
 # cancelled real turns mid-answer. The wake phrase stays the way to interrupt.
+def _normalize_for_match(text: str) -> str:
+    """Reduce text to comparable words so recogniser noise does not defeat it."""
+    return " ".join(re.sub(r"[^\w\sáéíóúüñ]+", " ", text.casefold()).split())
+
+
 _VOICE_ADDRESSABLE = frozenset(
     {
         ConversationState.LISTENING,
@@ -213,6 +223,79 @@ class TranscriptionEvents(Protocol):
     ) -> SpeechActivity | None: ...
 
 
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
+
+
+class _SegmentSpeaker:
+    """Speak completed sentences while the rest of the answer still streams.
+
+    Synthesis of sentence N overlaps generation of sentence N+1, so the first
+    audio starts as soon as the first sentence exists instead of after the
+    whole answer. Segments are spoken strictly one at a time because
+    SpeechManager.speak cancels any active request.
+    """
+
+    def __init__(
+        self,
+        manager: "ConversationManager",
+        language: str,
+        generation: int,
+        cancel: threading.Event,
+    ) -> None:
+        self._manager = manager
+        self._language = language
+        self._generation = generation
+        self._cancel = cancel
+        self._buffer = ""
+        self.received = False
+        self.opened_gate = False
+
+    def feed(self, text: str) -> None:
+        self.received = True
+        self._buffer += text
+        parts = _SENTENCE_BOUNDARY.split(self._buffer)
+        if len(parts) <= 1:
+            return
+        self._buffer = parts[-1]
+        for segment in parts[:-1]:
+            self._speak(segment)
+
+    def finish(self) -> None:
+        remainder, self._buffer = self._buffer, ""
+        self._speak(remainder)
+
+    def close(self) -> None:
+        if self.opened_gate:
+            self._manager._close_echo_gate()
+            self.opened_gate = False
+
+    def _speak(self, segment: str) -> None:
+        segment = segment.strip()
+        if not segment:
+            return
+        manager = self._manager
+        manager._transition_current(
+            self._generation, ConversationState.SPEAKING, "speaking response"
+        )
+        if not self.opened_gate:
+            manager._open_echo_gate()
+            self.opened_gate = True
+        manager._remember_spoken(segment)
+        request_id = manager.speech.speak(segment, self._language)
+        result = manager._wait_for_speech(request_id, self._cancel)
+        if result is not None and result.status == "completed":
+            return
+        if self._cancel.is_set() or (
+            result is not None and result.status == "cancelled"
+        ):
+            raise ProviderCancelled("voice turn was interrupted")
+        raise ConversationError(
+            "speech output timed out"
+            if result is None
+            else (result.error or "speech output failed")
+        )
+
+
 class ConversationManager:
     """Coordinate wake, STT, routing, tools, TTS, timeouts, and barge-in."""
 
@@ -226,6 +309,7 @@ class ConversationManager:
         tools: ToolRegistry,
         speech: SpeechManager,
         memory: MemoryStore,
+        fast_lane: FastLane | None = None,
         audit_sink: AuditSink,
         system_prompt: str,
         wake_phrase: str,
@@ -237,6 +321,7 @@ class ConversationManager:
         goodbye_english: str = "Goodbye.",
         goodbye_spanish: str = "Hasta luego.",
         echo_guard_seconds: float = 0.6,
+        echo_memory_seconds: float = 12.0,
         transition_capacity: int = 32,
         transition_listeners: tuple[Callable[[StateTransition], None], ...] = (),
         response_listeners: tuple[Callable[[str, str, bool], None], ...] = (),
@@ -245,6 +330,8 @@ class ConversationManager:
             raise ValueError("conversation timeouts must be positive")
         if not 0 <= echo_guard_seconds <= 10:
             raise ValueError("echo guard must be between 0 and 10 seconds")
+        if not 0 <= echo_memory_seconds <= 120:
+            raise ValueError("echo memory must be between 0 and 120 seconds")
         if not acknowledgement.strip():
             raise ValueError("conversation acknowledgement must not be empty")
         self.enabled = (
@@ -256,12 +343,14 @@ class ConversationManager:
         self.tools = tools
         self.speech = speech
         self.memory = memory
+        self.fast_lane = fast_lane
         self.audit_sink = audit_sink
         self.system_prompt = system_prompt
         self.wake_phrase = wake_phrase.strip()
         self.listen_timeout_seconds = listen_timeout_seconds
         self.checkback_timeout_seconds = checkback_timeout_seconds
         self.echo_guard_seconds = echo_guard_seconds
+        self.echo_memory_seconds = echo_memory_seconds
         self.acknowledgement = acknowledgement.strip()
         self.checkbacks = {"en": checkback_english, "es": checkback_spanish}
         self.goodbyes = {"en": goodbye_english, "es": goodbye_spanish}
@@ -289,7 +378,7 @@ class ConversationManager:
         self._ignore_activity_before = 0.0
         self._cue_speaking = False
         self._cue_gate_until = 0.0
-        self._suppressed_utterances: list[float] = []
+        self._spoken_recently: list[tuple[str, float]] = []
 
     def start(self) -> None:
         if not self.enabled or (self._thread is not None and self._thread.is_alive()):
@@ -346,6 +435,8 @@ class ConversationManager:
             self._response_listeners.append(listener)
 
     def _publish_response(self, text: str, language: str, final: bool = True) -> None:
+        if final:
+            self._remember_spoken(text)
         with self._lock:
             listeners = tuple(self._response_listeners)
         for listener in listeners:
@@ -368,27 +459,33 @@ class ConversationManager:
     def _echo_gated_locked(self, occurred_at: float) -> bool:
         return self._cue_speaking or occurred_at <= self._cue_gate_until
 
-    def _suppress_utterance_locked(self) -> None:
-        # Each suppressed onset consumes the transcript it will produce. The
-        # deadline lets the count self-heal if transcription drops an utterance.
-        self._prune_suppressed_locked()
-        self._suppressed_utterances.append(
-            time.monotonic() + max(5.0, self.echo_guard_seconds * 10)
-        )
-
-    def _prune_suppressed_locked(self) -> None:
-        now = time.monotonic()
-        self._suppressed_utterances = [
-            deadline for deadline in self._suppressed_utterances if deadline > now
-        ]
-
-    def _consume_suppressed(self) -> bool:
+    def _remember_spoken(self, text: str) -> None:
+        normalized = _normalize_for_match(text)
+        if not normalized:
+            return
         with self._lock:
-            self._prune_suppressed_locked()
-            if not self._suppressed_utterances:
-                return False
-            self._suppressed_utterances.pop(0)
-            return True
+            self._spoken_recently.append((normalized, time.monotonic()))
+
+    def _is_own_echo(self, text: str) -> bool:
+        """True when a transcript is Miso hearing itself through the speaker.
+
+        Comparing against what was actually spoken cannot mis-credit the wrong
+        utterance the way a bare counter could, and it needs no timestamp on the
+        transcript, which the recogniser does not provide.
+        """
+        candidate = _normalize_for_match(text)
+        if not candidate:
+            return False
+        horizon = time.monotonic() - self.echo_memory_seconds
+        with self._lock:
+            self._spoken_recently = [
+                item for item in self._spoken_recently if item[1] >= horizon
+            ]
+            recent = [spoken for spoken, _ in self._spoken_recently]
+        return any(
+            candidate == spoken or candidate in spoken or spoken in candidate
+            for spoken in recent
+        )
 
     def _transition_locked(self, target: ConversationState, reason: str) -> None:
         previous = self._state
@@ -471,8 +568,6 @@ class ConversationManager:
 
     def _handle_activity(self, activity: SpeechActivity) -> None:
         if activity.kind == "discarded":
-            if self._consume_suppressed():
-                return
             with self._lock:
                 if self._state is ConversationState.TRANSCRIBING:
                     self._active_cancel = None
@@ -492,10 +587,7 @@ class ConversationManager:
                 # Miso is either speaking or working on a turn. A microphone
                 # onset here is its own echo, room noise, or an impatient
                 # repeat, and destroying the in-flight answer for any of those
-                # leaves the request permanently unanswered. Suppress the
-                # transcript this onset will produce so it is never routed as a
-                # fresh request either.
-                self._suppress_utterance_locked()
+                # leaves the request permanently unanswered.
                 return
             if self._state is state:
                 self._deadline = None
@@ -504,9 +596,6 @@ class ConversationManager:
                 )
 
     def _handle_transcription(self, result: TranscriptionResult) -> None:
-        if self._consume_suppressed():
-            LOGGER.debug("dropped transcript captured from Miso's own cue audio")
-            return
         with self._lock:
             state = self._state
         if state is ConversationState.IDLE:
@@ -539,15 +628,11 @@ class ConversationManager:
             ConversationState.FOLLOW_UP,
             ConversationState.TRANSCRIBING,
         }:
-            self._cancel_active()
-            with self._lock:
-                if self._state is state:
-                    self._interruptions += 1
-                    self._deadline = None
-                    self._transition_locked(
-                        ConversationState.TRANSCRIBING,
-                        "transcription interrupted output",
-                    )
+            # Miso is speaking or working on a turn. Cancelling here cleared the
+            # playback buffer mid-phrase and left only the tail of the answer
+            # audible. The wake phrase is the only interrupt.
+            LOGGER.debug("ignored transcript received while %s", state.value)
+            return
         text = self._without_wake_phrase(result.text)
         if not text:
             with self._lock:
@@ -564,6 +649,15 @@ class ConversationManager:
         )
         with self._lock:
             self._language = language
+        if self._is_own_echo(text):
+            LOGGER.debug("dropped transcript matching Miso's own recent speech")
+            with self._lock:
+                if self._state is ConversationState.TRANSCRIBING:
+                    self._transition_locked(
+                        ConversationState.LISTENING, "own speech ignored"
+                    )
+                self._deadline = time.monotonic() + self.listen_timeout_seconds
+            return
         if self._is_goodbye(text):
             with self._lock:
                 self._transition_locked(ConversationState.GOODBYE, "goodbye requested")
@@ -613,6 +707,7 @@ class ConversationManager:
         language: str,
         transcription: TranscriptionResult,
     ) -> None:
+        speaker = _SegmentSpeaker(self, language, generation, cancel)
         try:
             with self._lock:
                 conversation_id = self._conversation_id
@@ -630,68 +725,89 @@ class ConversationManager:
                 },
                 actor=VOICE_ACTOR,
             )
-            history = self.memory.events(
-                conversation_id, limit=40, actor=VOICE_ACTOR
-            )
-            request = ChatRequest(
-                messages=(
-                    {"role": "system", "content": self.system_prompt},
-                    *(
-                        {"role": event.role, "content": event.content}
-                        for event in history
-                        if event.kind == "message"
-                        and event.role in {"user", "assistant"}
-                        and event.content
-                    ),
-                ),
-                tools=self.tools.schemas(),
-            )
-            response: list[str] = []
-            tool_summaries: list[str] = []
+            fast_reply = None
+            if self.fast_lane is not None:
+                fast_reply = self.fast_lane.try_handle(
+                    text, language, cancel_event=cancel, actor=VOICE_ACTOR
+                )
             used_tool = False
             partial: list[str] = []
-            for chunk in self._stream_turn(
-                request, cancel, generation, response, partial
-            ):
-                if chunk.text:
-                    response.append(chunk.text)
-                    self._publish_response(
-                        "".join(response).strip(), language, False
-                    )
-                if chunk.tool_call is not None:
-                    name = chunk.tool_call.get("name")
-                    arguments = chunk.tool_call.get("arguments")
-                    if not isinstance(name, str) or not isinstance(arguments, dict):
-                        raise RoutingError("provider returned invalid tool call")
-                    self._transition_current(
-                        generation, ConversationState.USING_TOOL, "tool requested"
-                    )
-                    result = self.tools.invoke(
-                        name, arguments, cancel_event=cancel, actor=VOICE_ACTOR
-                    )
-                    self.memory.append_event(
-                        conversation_id,
-                        kind="tool",
-                        role="assistant",
-                        content=name,
-                        payload=result.as_dict(),
-                        actor=VOICE_ACTOR,
-                    )
-                    used_tool = True
-                    if not result.ok and not cancel.is_set():
-                        raise ConversationError(result.error or "tool invocation failed")
-                    if result.summary is not None:
-                        tool_summaries.append(result.summary)
-                    self._transition_current(
-                        generation, ConversationState.ROUTING, "tool completed"
-                    )
-            if cancel.is_set() or not self._is_current(generation):
-                return
-            spoken = "".join(response).strip()
-            if not spoken and tool_summaries:
-                spoken = " ".join(tool_summaries)
-            if not spoken:
-                spoken = "Listo." if language == "es" else "Done."
+            if fast_reply is not None:
+                self._transition_current(
+                    generation, ConversationState.USING_TOOL, "fast intent matched"
+                )
+                self.memory.append_event(
+                    conversation_id,
+                    kind="tool",
+                    role="assistant",
+                    content=fast_reply.tool,
+                    payload=fast_reply.result.as_dict(),
+                    actor=VOICE_ACTOR,
+                )
+                used_tool = True
+                spoken = fast_reply.spoken
+            else:
+                history = self.memory.events(
+                    conversation_id, limit=40, actor=VOICE_ACTOR
+                )
+                request = ChatRequest(
+                    messages=(
+                        {"role": "system", "content": self.system_prompt},
+                        *(
+                            {"role": event.role, "content": event.content}
+                            for event in history
+                            if event.kind == "message"
+                            and event.role in {"user", "assistant"}
+                            and event.content
+                        ),
+                    ),
+                    tools=self.tools.schemas(),
+                )
+                response: list[str] = []
+                tool_summaries: list[str] = []
+                for chunk in self._stream_turn(
+                    request, cancel, generation, response, partial
+                ):
+                    if chunk.text:
+                        response.append(chunk.text)
+                        self._publish_response(
+                            "".join(response).strip(), language, False
+                        )
+                        speaker.feed(chunk.text)
+                    if chunk.tool_call is not None:
+                        name = chunk.tool_call.get("name")
+                        arguments = chunk.tool_call.get("arguments")
+                        if not isinstance(name, str) or not isinstance(arguments, dict):
+                            raise RoutingError("provider returned invalid tool call")
+                        self._transition_current(
+                            generation, ConversationState.USING_TOOL, "tool requested"
+                        )
+                        result = self.tools.invoke(
+                            name, arguments, cancel_event=cancel, actor=VOICE_ACTOR
+                        )
+                        self.memory.append_event(
+                            conversation_id,
+                            kind="tool",
+                            role="assistant",
+                            content=name,
+                            payload=result.as_dict(),
+                            actor=VOICE_ACTOR,
+                        )
+                        used_tool = True
+                        if not result.ok and not cancel.is_set():
+                            raise ConversationError(result.error or "tool invocation failed")
+                        if result.summary is not None:
+                            tool_summaries.append(result.summary)
+                        self._transition_current(
+                            generation, ConversationState.ROUTING, "tool completed"
+                        )
+                if cancel.is_set() or not self._is_current(generation):
+                    return
+                spoken = "".join(response).strip()
+                if not spoken and tool_summaries:
+                    spoken = " ".join(tool_summaries)
+                if not spoken:
+                    spoken = "Listo." if language == "es" else "Done."
             self.memory.append_event(
                 conversation_id,
                 kind="message",
@@ -700,25 +816,16 @@ class ConversationManager:
                 payload={
                     "source": "voice",
                     "used_tool": used_tool,
+                    **({"fast_intent": fast_reply.intent} if fast_reply else {}),
                     **({"partial": partial[0]} if partial else {}),
                 },
                 actor=VOICE_ACTOR,
             )
-            self._transition_current(
-                generation, ConversationState.SPEAKING, "response ready"
-            )
             self._publish_response(spoken, language)
-            self._open_echo_gate()
-            try:
-                request_id = self.speech.speak(spoken, language)
-                result = self._wait_for_speech(request_id, cancel)
-            finally:
-                self._close_echo_gate()
-            if (
-                result is not None
-                and result.status == "completed"
-                and self._is_current(generation)
-            ):
+            if not speaker.received:
+                speaker.feed(spoken)
+            speaker.finish()
+            if not cancel.is_set() and self._is_current(generation):
                 with self._lock:
                     self._checked_back = False
                     self._deadline = time.monotonic() + self.listen_timeout_seconds
@@ -726,17 +833,13 @@ class ConversationManager:
                     self._transition_locked(
                         ConversationState.FOLLOW_UP, "response completed"
                     )
-            elif (
-                result is not None
-                and result.status == "error"
-                and not cancel.is_set()
-            ):
-                raise ConversationError(result.error or "speech output failed")
         except ProviderCancelled:
             return
         except Exception as error:
             if not cancel.is_set() and self._is_current(generation):
                 self._recover(error)
+        finally:
+            speaker.close()
 
     def _stream_turn(
         self,

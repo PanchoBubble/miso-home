@@ -99,17 +99,24 @@ with `MISO_OPENAI_MODEL`. Put these values in root-owned `/etc/miso/miso.env`
 `store: false`, translate strict tool schemas to function definitions, and do
 not include credentials in request bodies or settings representations.
 
-Routing classifies requests as routine, standard, or complex with deterministic
-bilingual markers, then matches the request against the available household tool
-families. Requests with a matching tool prefer the Pi; requests without one
-prefer hosted GPT. Configured LAN Ollama and the remaining provider tiers stay in
-the bounded availability fallback chain. Health failures and pre-output timeouts
-fall through safely, while failures after visible output do not mix providers.
-Every decision, attempt latency, fallback reason, tool match, and final selection
-is written to `state_dir / "audit" / "routing.jsonl"`. Provider overrides are
-strict by default, and progress chunks are emitted before health checks or model
-loading. Household schemas are narrowed to the relevant tool family and omitted
-entirely from unrelated prompts.
+Message intake is two-tiered. A deterministic fast lane (`intake.py`) matches
+common bilingual household intents (timers, shopping list, weather) with strict
+parsers and invokes the tool directly, answering in milliseconds without any
+model; an ambiguous parse always falls through rather than guessing arguments.
+It can be disabled with `MISO_FAST_LANE_ENABLED=false`. Everything else goes to
+the model lane, which always prefers hosted GPT, then LAN Ollama, keeping the
+Pi model only as the offline fallback of last resort. Positive provider health
+verdicts are cached (`MISO_ROUTING_HEALTH_CACHE_SECONDS`, default 20, `0`
+disables) so repeat turns start streaming immediately; a mid-stream failure
+evicts the cached verdict and an unavailable verdict is never cached. Health
+failures and pre-output timeouts fall through safely, while failures after
+visible output do not mix providers. Every decision, fast-lane match, attempt
+latency, fallback reason, and final selection is written to
+`state_dir / "audit" / "routing.jsonl"` and the tool audit log. Provider
+overrides are strict by default, and progress chunks are emitted before health
+checks or model loading. Voice replies now speak sentence by sentence: synthesis
+of the first sentence overlaps generation of the rest, so long answers start
+sounding almost immediately.
 
 Each completed Pi attempt records a `generation` block in
 `routing.jsonl` with prompt tokens, prompt-evaluation milliseconds, generated
@@ -433,8 +440,16 @@ hardware the VAD fires on its own speaker and on ordinary noise. Treating those
 as a barge-in cancelled real turns: a request that had already been transcribed
 and routed was destroyed several seconds into generation by an impatient repeat,
 leaving it permanently unanswered. Onsets outside those two states are therefore
-ignored, and the transcript the onset produces is dropped rather than routed as a
-fresh request.
+ignored, and a transcript that arrives while Miso is speaking or working is
+dropped rather than cancelling the turn: cancelling there cleared the playback
+buffer mid-phrase and left only the tail of the answer audible.
+
+A transcript that does reach a listening state is compared against what Miso
+actually spoke in the last `MISO_CONVERSATION_ECHO_MEMORY_SECONDS`, so its own
+acknowledgement heard through the speaker is never routed as a request. Matching
+the spoken text cannot mis-credit the wrong utterance the way a bare counter
+could, and needs no timestamp on the transcript, which the recogniser does not
+provide.
 
 The wake phrase remains the way to interrupt: openWakeWord is far more selective
 than the VAD and does not fire on Miso's own voice or on room noise, so saying it
@@ -465,4 +480,5 @@ MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS=8
 MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS=5
 MISO_CONVERSATION_ACKNOWLEDGEMENT=Yes?
 MISO_CONVERSATION_ECHO_GUARD_SECONDS=0.6
+MISO_CONVERSATION_ECHO_MEMORY_SECONDS=12
 ```

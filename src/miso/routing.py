@@ -77,41 +77,12 @@ _COMPLEX_MARKERS = (
         "código",
         "codigo",
 )
-_ROUTINE_MARKERS = (
-        "timer",
-        "temporizador",
-        "remind",
-        "reminder",
-        "recuérd",
-        "recordatorio",
-        "shopping list",
-        "lista de compra",
-        "lista de la compra",
-        "add milk",
-        "añade",
-        "agrega",
-        "comprar",
-        "calendar",
-        "calendario",
-        "agenda",
-        "appointment",
-        "event",
-        "evento",
-        "cita",
-        "reunión",
-        "reunion",
-        "weather",
-        "forecast",
-        "temperature",
-        "rain",
-        "clima",
-        "pronóstico",
-        "pronostico",
-        "qué tiempo",
-        "que tiempo",
-        "temperatura",
-        "lluvia",
-)
+
+# Requests that reach the router always prefer the strongest fast providers:
+# deterministic tool intents are answered by the fast lane before routing, so
+# the model lane no longer detours through the small on-device model, which is
+# kept only as the offline fallback of last resort.
+_PROVIDER_PREFERENCE = ("hosted-gpt", "lan-ollama", "pi-ollama")
 
 
 class ProviderRouter:
@@ -123,9 +94,12 @@ class ProviderRouter:
         health_timeout_seconds: float = 2.0,
         attempt_timeout_seconds: float = 45.0,
         stream_timeout_seconds: float = 300.0,
+        health_cache_seconds: float = 20.0,
     ) -> None:
         if not 0 < health_timeout_seconds <= 30:
             raise ValueError("health timeout must be between 0 and 30 seconds")
+        if not 0 <= health_cache_seconds <= 300:
+            raise ValueError("health cache must be between 0 and 300 seconds")
         if not 0 < attempt_timeout_seconds <= 600:
             raise ValueError("attempt timeout must be between 0 and 600 seconds")
         if not 0 < stream_timeout_seconds <= 3_600:
@@ -137,6 +111,9 @@ class ProviderRouter:
         self.health_timeout_seconds = health_timeout_seconds
         self.attempt_timeout_seconds = attempt_timeout_seconds
         self.stream_timeout_seconds = stream_timeout_seconds
+        self.health_cache_seconds = health_cache_seconds
+        self._health_cache: dict[str, tuple[ProviderHealth, float]] = {}
+        self._health_cache_lock = threading.Lock()
 
     def classify(self, request: ChatRequest) -> tuple[RouteClass, str]:
         latest = self._latest_user(request)
@@ -145,10 +122,7 @@ class ProviderRouter:
         marker = next((item for item in _COMPLEX_MARKERS if item in latest), None)
         if marker is not None:
             return RouteClass.COMPLEX, f"complexity marker: {marker}"
-        marker = next((item for item in _ROUTINE_MARKERS if item in latest), None)
-        if marker is not None:
-            return RouteClass.ROUTINE, f"household marker: {marker}"
-        return RouteClass.STANDARD, "default local-first policy"
+        return RouteClass.STANDARD, "default hosted-first policy"
 
     def health_snapshot(self) -> list[dict[str, object]]:
         providers = list(self._providers().values())
@@ -186,6 +160,7 @@ class ProviderRouter:
             except queue.Empty:
                 break
             if isinstance(result, ProviderHealth):
+                self._store_health(name, result)
                 results[name] = {
                     "name": name,
                     "available": result.available,
@@ -234,14 +209,14 @@ class ProviderRouter:
             classification = requested_class
             reason = "explicit route class"
         available = self._providers()
-        selected_tools = self._selected_tools(request, classification)
-        if selected_tools:
-            preference = ("pi-ollama", "lan-ollama", "hosted-gpt")
-            reason = f"{reason}; matched local tool"
-        else:
-            preference = ("hosted-gpt", "lan-ollama", "pi-ollama")
-            reason = f"{reason}; no matching local tool"
-        candidates = tuple(name for name in preference if name in available)
+        selected_tools = tuple(
+            str(tool["name"])
+            for tool in request.tools
+            if isinstance(tool.get("name"), str)
+        )
+        candidates = tuple(
+            name for name in _PROVIDER_PREFERENCE if name in available
+        )
         if manual_override is not None:
             if manual_override not in available:
                 raise RoutingError(f"unknown provider override: {manual_override}")
@@ -286,13 +261,6 @@ class ProviderRouter:
             f"Routing {decision.classification.value} request ({decision.reason})",
         )
         failures: list[str] = []
-        selected = set(decision.selected_tools)
-        routed_request = replace(
-            request,
-            tools=tuple(
-                tool for tool in request.tools if tool.get("name") in selected
-            ),
-        )
         for provider_name in decision.candidates:
             if cancel.is_set():
                 self._record_finish(decision, started, "cancelled", None, failures)
@@ -302,20 +270,13 @@ class ProviderRouter:
             attempt_started = time.monotonic()
             output_started = False
             try:
-                health = self._bounded_call(
-                    provider.health,
-                    self.health_timeout_seconds,
-                    cancel,
-                    "provider health check",
-                )
-                if not isinstance(health, ProviderHealth):
-                    raise ProviderProtocolError("provider returned invalid health")
+                health = self._cached_health(provider, cancel)
                 if not health.available:
                     raise ProviderError(f"health:{health.detail}")
                 yield self._progress(decision, f"Using {provider_name}", provider_name)
                 completed = False
                 metrics = None
-                for chunk in self._bounded_stream(provider, routed_request, cancel):
+                for chunk in self._bounded_stream(provider, request, cancel):
                     if chunk.text or chunk.tool_call is not None:
                         output_started = True
                     if chunk.done:
@@ -353,6 +314,7 @@ class ProviderRouter:
                 )
                 raise
             except Exception as error:
+                self._forget_health(provider_name)
                 reason = self._bounded_error(error)
                 failures.append(f"{provider_name}:{reason}")
                 self._record_attempt(
@@ -379,6 +341,41 @@ class ProviderRouter:
             for provider in self.providers.configured()
         }
 
+    def _cached_health(
+        self, provider: ModelProvider, cancel: threading.Event
+    ) -> ProviderHealth:
+        """Reuse a recent health verdict so a turn starts streaming immediately.
+
+        Only a positive verdict is cached: an unavailable provider must be
+        re-checked next turn so recovery is noticed within one request, and a
+        mid-stream failure evicts the entry via _forget_health.
+        """
+        if self.health_cache_seconds > 0:
+            with self._health_cache_lock:
+                cached = self._health_cache.get(provider.name)
+            if cached is not None and time.monotonic() - cached[1] < self.health_cache_seconds:
+                return cached[0]
+        health = self._bounded_call(
+            provider.health,
+            self.health_timeout_seconds,
+            cancel,
+            "provider health check",
+        )
+        if not isinstance(health, ProviderHealth):
+            raise ProviderProtocolError("provider returned invalid health")
+        self._store_health(provider.name, health)
+        return health
+
+    def _store_health(self, name: str, health: ProviderHealth) -> None:
+        if self.health_cache_seconds <= 0 or not health.available:
+            return
+        with self._health_cache_lock:
+            self._health_cache[name] = (health, time.monotonic())
+
+    def _forget_health(self, name: str) -> None:
+        with self._health_cache_lock:
+            self._health_cache.pop(name, None)
+
     @staticmethod
     def _latest_user(request: ChatRequest) -> str:
         return next(
@@ -389,53 +386,6 @@ class ProviderRouter:
             ),
             "",
         ).casefold()
-
-    def _selected_tools(
-        self,
-        request: ChatRequest,
-        classification: RouteClass,
-    ) -> tuple[str, ...]:
-        names = tuple(
-            str(tool["name"])
-            for tool in request.tools
-            if isinstance(tool.get("name"), str)
-        )
-        latest = self._latest_user(request)
-        if any(marker in latest for marker in ("timer", "temporizador")):
-            prefix = "timer_"
-        elif any(
-            marker in latest
-            for marker in ("remind", "reminder", "recuérd", "recordatorio")
-        ):
-            prefix = "reminder_"
-        elif any(
-            marker in latest
-            for marker in (
-                "calendar", "calendario", "agenda", "appointment", "event",
-                "evento", "cita", "reunión", "reunion",
-            )
-        ):
-            prefix = "calendar_"
-        elif any(
-            marker in latest
-            for marker in (
-                "weather", "forecast", "temperature", "rain", "clima",
-                "pronóstico", "pronostico", "qué tiempo", "que tiempo",
-                "temperatura", "lluvia",
-            )
-        ):
-            prefix = "weather_"
-        elif any(
-            marker in latest
-            for marker in (
-                "shopping list", "lista de compra", "lista de la compra",
-                "add milk", "añade", "agrega", "comprar",
-            )
-        ):
-            prefix = "shopping_"
-        else:
-            return names if classification is RouteClass.ROUTINE else ()
-        return tuple(name for name in names if name.startswith(prefix))
 
     def _bounded_stream(
         self,
@@ -596,4 +546,5 @@ def create_router(settings: Settings) -> ProviderRouter:
         health_timeout_seconds=settings.routing_health_timeout_seconds,
         attempt_timeout_seconds=settings.routing_attempt_timeout_seconds,
         stream_timeout_seconds=settings.routing_stream_timeout_seconds,
+        health_cache_seconds=settings.routing_health_cache_seconds,
     )

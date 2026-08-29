@@ -51,6 +51,8 @@ class Settings:
     routing_health_timeout_seconds: float = 2.0
     routing_attempt_timeout_seconds: float = 45.0
     routing_stream_timeout_seconds: float = 300.0
+    routing_health_cache_seconds: float = 20.0
+    fast_lane_enabled: bool = True
     dashboard_token: str | None = field(default=None, repr=False)
     dashboard_email: str = "local@miso.invalid"
     access_team_domain: str | None = None
@@ -132,6 +134,7 @@ class Settings:
     conversation_checkback_timeout_seconds: float = 5.0
     conversation_acknowledgement: str = "Yes?"
     conversation_echo_guard_seconds: float = 0.6
+    conversation_echo_memory_seconds: float = 12.0
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -154,6 +157,9 @@ class Settings:
             )
             routing_stream_timeout = float(
                 source.get("MISO_ROUTING_STREAM_TIMEOUT", "300")
+            )
+            routing_health_cache = float(
+                source.get("MISO_ROUTING_HEALTH_CACHE_SECONDS", "20")
             )
         except ValueError as error:
             raise ConfigError("MISO routing timeouts must be numeric") from error
@@ -226,6 +232,9 @@ class Settings:
             conversation_echo_guard_seconds = float(
                 source.get("MISO_CONVERSATION_ECHO_GUARD_SECONDS", "0.6")
             )
+            conversation_echo_memory_seconds = float(
+                source.get("MISO_CONVERSATION_ECHO_MEMORY_SECONDS", "12")
+            )
         except ValueError as error:
             raise ConfigError("MISO audio numeric settings are invalid") from error
 
@@ -251,6 +260,11 @@ class Settings:
             routing_health_timeout_seconds=routing_health_timeout,
             routing_attempt_timeout_seconds=routing_attempt_timeout,
             routing_stream_timeout_seconds=routing_stream_timeout,
+            routing_health_cache_seconds=routing_health_cache,
+            fast_lane_enabled=_boolean(
+                source.get("MISO_FAST_LANE_ENABLED", "true"),
+                "MISO_FAST_LANE_ENABLED",
+            ),
             dashboard_token=source.get("MISO_DASHBOARD_TOKEN", "").strip() or None,
             dashboard_email=_email(
                 source.get("MISO_DASHBOARD_EMAIL", "local@miso.invalid"),
@@ -442,6 +456,7 @@ class Settings:
                 "MISO_CONVERSATION_ACKNOWLEDGEMENT", "Yes?"
             ).strip(),
             conversation_echo_guard_seconds=conversation_echo_guard_seconds,
+            conversation_echo_memory_seconds=conversation_echo_memory_seconds,
         )
         settings.validate()
         return settings
@@ -482,6 +497,10 @@ class Settings:
         if self.routing_stream_timeout_seconds < self.routing_attempt_timeout_seconds:
             raise ConfigError(
                 "MISO_ROUTING_STREAM_TIMEOUT must not be below MISO_ROUTING_ATTEMPT_TIMEOUT"
+            )
+        if not 0 <= self.routing_health_cache_seconds <= 300:
+            raise ConfigError(
+                "MISO_ROUTING_HEALTH_CACHE_SECONDS must be between 0 and 300"
             )
         if self.host not in {"127.0.0.1", "::1", "localhost"} and not self.dashboard_token:
             raise ConfigError("MISO_DASHBOARD_TOKEN is required for a non-loopback host")
@@ -697,6 +716,10 @@ class Settings:
         if not 1 <= self.conversation_checkback_timeout_seconds <= 120:
             raise ConfigError(
                 "MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS must be between 1 and 120"
+            )
+        if not 0 <= self.conversation_echo_memory_seconds <= 120:
+            raise ConfigError(
+                "MISO_CONVERSATION_ECHO_MEMORY_SECONDS must be between 0 and 120"
             )
         if not 0 <= self.conversation_echo_guard_seconds <= 10:
             raise ConfigError(

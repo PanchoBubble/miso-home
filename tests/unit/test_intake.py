@@ -1,0 +1,105 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+from miso.intake import FastLane, guess_language
+from miso.tools import InMemoryAuditLog, ToolRegistry, register_household_tools
+
+
+class FastLaneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.audit = InMemoryAuditLog()
+        self.registry = ToolRegistry(self.audit)
+        register_household_tools(
+            self.registry, Path(self.temporary.name) / "miso.sqlite3"
+        )
+        self.lane = FastLane(self.registry, self.audit)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_timer_request_is_answered_without_a_model(self) -> None:
+        reply = self.lane.try_handle("Set a timer for 5 minutes", "en")
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.tool, "timer_create")
+        self.assertTrue(reply.result.ok)
+        self.assertEqual(reply.spoken, "Timer set for 5 minutes.")
+
+    def test_spanish_timer_with_number_words(self) -> None:
+        reply = self.lane.try_handle(
+            "Pon un temporizador de diez minutos", "es"
+        )
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.spoken, "Temporizador de 10 minutos en marcha.")
+
+    def test_compound_duration_is_summed(self) -> None:
+        reply = self.lane.try_handle(
+            "set a timer for 1 hour 30 minutes", "en"
+        )
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.spoken, "Timer set for 1 hour and 30 minutes.")
+
+    def test_timer_without_a_duration_falls_through(self) -> None:
+        self.assertIsNone(self.lane.try_handle("Set a timer", "en"))
+
+    def test_timer_cancel_phrasing_falls_through(self) -> None:
+        self.assertIsNone(
+            self.lane.try_handle("Cancel the 5 minute timer", "en")
+        )
+
+    def test_shopping_round_trip(self) -> None:
+        added = self.lane.try_handle("Add milk to the shopping list", "en")
+        self.assertIsNotNone(added)
+        self.assertEqual(added.tool, "shopping_add")
+        self.assertEqual(added.spoken, "Added milk.")
+        listed = self.lane.try_handle("What's on the shopping list", "en")
+        self.assertIsNotNone(listed)
+        self.assertEqual(listed.tool, "shopping_list")
+        self.assertEqual(listed.spoken, "On the list: milk.")
+
+    def test_spanish_shopping_add(self) -> None:
+        reply = self.lane.try_handle(
+            "Añade leche a la lista de la compra", "es"
+        )
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.spoken, "He añadido leche.")
+
+    def test_timer_list_reports_remaining_time(self) -> None:
+        self.lane.try_handle("Set a timer for 10 minutes", "en")
+        reply = self.lane.try_handle("How long is left on the timer", "en")
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.tool, "timer_list")
+        self.assertIn("left", reply.spoken)
+
+    def test_unrelated_text_falls_through(self) -> None:
+        self.assertIsNone(self.lane.try_handle("Tell me a joke", "en"))
+        self.assertIsNone(
+            self.lane.try_handle("Analyze my shopping habits over time", "en")
+        )
+
+    def test_unregistered_tool_falls_through(self) -> None:
+        lane = FastLane(ToolRegistry(self.audit), self.audit)
+        self.assertIsNone(lane.try_handle("Set a timer for 5 minutes", "en"))
+
+    def test_disabled_lane_never_matches(self) -> None:
+        lane = FastLane(self.registry, self.audit, enabled=False)
+        self.assertIsNone(lane.try_handle("Set a timer for 5 minutes", "en"))
+
+    def test_matches_are_audited(self) -> None:
+        self.lane.try_handle("Set a timer for 5 minutes", "en")
+        events = [
+            event for event in self.audit.events() if event["event"] == "fast_intent"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["intent"], "timer_create")
+        self.assertEqual(events[0]["status"], "success")
+
+    def test_language_guess_for_typed_text(self) -> None:
+        self.assertEqual(guess_language("¿Qué tiempo hace?"), "es")
+        self.assertEqual(guess_language("pon un temporizador de 5 minutos"), "es")
+        self.assertEqual(guess_language("what's the weather like"), "en")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -26,6 +26,7 @@ from miso.calibration import (
 )
 from miso.config import Settings
 from miso.conversation import ConversationManager
+from miso.intake import FastLane, guess_language
 from miso.display import DisplayWakeNotifier
 from miso.identity import (
     Actor,
@@ -123,6 +124,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         identity_policy: HouseholdIdentityPolicy,
         access_verifier: AccessJWTVerifier | None,
         started_at: float,
+        fast_lane: FastLane | None = None,
     ) -> None:
         self.settings = settings
         self.tool_registry = tool_registry
@@ -135,6 +137,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.wake_manager = wake_manager
         self.wake_calibration = wake_calibration
         self.conversation_manager = conversation_manager
+        self.fast_lane = fast_lane
         self.live_events = live_events
         self.memory_store = MemoryStore(settings.database_path)
         self.household_store = HouseholdStore(settings.database_path)
@@ -954,6 +957,70 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 payload={"request_id": request_id},
                 actor=actor,
             )
+            fast = None
+            if self.miso.fast_lane is not None:
+                fast = self.miso.fast_lane.try_handle(
+                    text.strip(),
+                    guess_language(text),
+                    cancel_event=cancel,
+                    actor=actor,
+                )
+            if fast is not None:
+                self.send_response(HTTPStatus.OK)
+                self.send_header(
+                    "Content-Type", "application/x-ndjson; charset=utf-8"
+                )
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                try:
+                    self.miso.memory_store.append_event(
+                        conversation_id,
+                        kind="tool",
+                        role="assistant",
+                        content=fast.tool,
+                        payload=fast.result.as_dict(),
+                        actor=actor,
+                    )
+                    self.miso.memory_store.append_event(
+                        conversation_id,
+                        kind="message",
+                        role="assistant",
+                        content=fast.spoken,
+                        payload={
+                            "request_id": request_id,
+                            "fast_intent": fast.intent,
+                        },
+                        actor=actor,
+                    )
+                    self._ndjson(
+                        {
+                            "type": "tool_result",
+                            "result": fast.result.as_dict(),
+                            "provider": "fast-lane",
+                            "route_id": None,
+                        }
+                    )
+                    self._ndjson(
+                        {
+                            "type": "delta",
+                            "text": fast.spoken,
+                            "provider": "fast-lane",
+                            "route_id": None,
+                        }
+                    )
+                    self._ndjson(
+                        {
+                            "type": "complete",
+                            "conversation_id": conversation_id,
+                            "request_id": request_id,
+                        }
+                    )
+                except (BrokenPipeError, ConnectionResetError):
+                    cancel.set()
+                finally:
+                    self.miso.unregister_request(request_id)
+                return
             history = self.miso.memory_store.events(
                 conversation_id, limit=40, actor=actor
             )
@@ -1401,6 +1468,11 @@ def create_server(
         default_volume=settings.tts_volume,
         result_capacity=settings.tts_result_capacity,
     )
+    fast_lane = FastLane(
+        registry,
+        registry.audit_sink,
+        enabled=settings.fast_lane_enabled,
+    )
     conversation = conversation_manager or ConversationManager(
         enabled=settings.conversation_enabled,
         wake=wake,
@@ -1409,6 +1481,7 @@ def create_server(
         tools=registry,
         speech=speech,
         memory=memory,
+        fast_lane=fast_lane,
         audit_sink=registry.audit_sink,
         system_prompt=MISO_SYSTEM_PROMPT,
         wake_phrase=settings.wake_phrase,
@@ -1416,6 +1489,7 @@ def create_server(
         checkback_timeout_seconds=settings.conversation_checkback_timeout_seconds,
         acknowledgement=settings.conversation_acknowledgement,
         echo_guard_seconds=settings.conversation_echo_guard_seconds,
+        echo_memory_seconds=settings.conversation_echo_memory_seconds,
     )
     conversation.add_transition_listener(conversation_event_publisher(live_events))
     conversation.add_response_listener(conversation_caption_publisher(live_events))
@@ -1439,4 +1513,5 @@ def create_server(
         identity_policy=identity_policy,
         access_verifier=access_verifier,
         started_at=time.monotonic(),
+        fast_lane=fast_lane,
     )

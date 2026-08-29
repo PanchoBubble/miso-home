@@ -191,7 +191,7 @@ class ConversationManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def manager(self, speech=None, listen=1, checkback=1, tools=None):
+    def manager(self, speech=None, listen=1, checkback=1, tools=None, fast_lane=None):
         router = ProviderRouter(
             ProviderSet(pi=self.provider, lan=None, hosted=None), self.audit
         )
@@ -203,12 +203,86 @@ class ConversationManagerTests(unittest.TestCase):
             tools=tools or ToolRegistry(self.audit),
             speech=speech or FakeSpeech(),
             memory=self.store,
+            fast_lane=fast_lane,
             audit_sink=self.audit,
             system_prompt="You are Miso.",
             wake_phrase="Miso",
             listen_timeout_seconds=listen,
             checkback_timeout_seconds=checkback,
         )
+
+    def test_fast_lane_answers_without_consulting_a_provider(self) -> None:
+        from miso.intake import FastLane
+        from miso.tools import register_household_tools
+
+        registry = ToolRegistry(self.audit)
+        register_household_tools(
+            registry, Path(self.temporary.name) / "fastlane.sqlite3"
+        )
+        self.provider.fail = True
+        speech = FakeSpeech()
+        manager = self.manager(
+            speech,
+            tools=registry,
+            fast_lane=FastLane(registry, self.audit),
+        )
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, set a timer for 5 minutes")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual(
+                [item[1] for item in speech.calls],
+                ["Yes?", "Timer set for 5 minutes."],
+            )
+            conversation_id = manager.status()["conversation_id"]
+            events = self.store.events(str(conversation_id))
+            self.assertEqual(
+                [(event.kind, event.role) for event in events],
+                [("message", "user"), ("tool", "assistant"), ("message", "assistant")],
+            )
+            self.assertEqual(events[1].content, "timer_create")
+        finally:
+            manager.stop()
+
+    def test_streamed_sentences_are_spoken_before_the_answer_completes(self) -> None:
+        class SentenceProvider:
+            name = "pi-ollama"
+
+            def health(self):
+                return ProviderHealth(True, "ready", "fake")
+
+            def stream(self, request, cancel):
+                for piece in ("First sentence. Sec", "ond sentence. And", " a third."):
+                    yield ChatChunk(text=piece)
+                yield ChatChunk(done=True)
+
+        self.provider = SentenceProvider()
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me a story")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual(
+                [item[1] for item in speech.calls],
+                ["Yes?", "First sentence.", "Second sentence.", "And a third."],
+            )
+            conversation_id = manager.status()["conversation_id"]
+            events = self.store.events(str(conversation_id))
+            self.assertEqual(
+                events[-1].content,
+                "First sentence. Second sentence. And a third.",
+            )
+        finally:
+            manager.stop()
 
     def test_rejects_invalid_transition(self) -> None:
         manager = self.manager()
@@ -559,6 +633,44 @@ class ConversationManagerTests(unittest.TestCase):
             self.assertEqual(manager.status()["state"], "speaking")
             self.assertEqual(speech.cancelled, [])
             self.assertEqual(manager.status()["interruptions"], 0)
+        finally:
+            manager.stop()
+
+    def test_transcript_arriving_mid_answer_never_cancels_playback(self) -> None:
+        # The regression this guards: a transcript delivered while Miso was
+        # speaking called _cancel_active(), which cleared the playback buffer,
+        # so only the tail of the phrase reached the speaker.
+        speech = FakeSpeech(blocked_texts={"First response"})
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_result("first request")
+            wait_for(manager, "speaking")
+
+            self.source.put_result("some noise the mic picked up")
+            time.sleep(0.25)
+
+            self.assertEqual(manager.status()["state"], "speaking")
+            self.assertEqual(speech.cancelled, [])
+        finally:
+            manager.stop()
+
+    def test_miso_hearing_its_own_words_is_not_treated_as_a_request(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+
+            # Whisper returns Miso's own acknowledgement, heard via the speaker.
+            self.source.put_result("Yes")
+            time.sleep(0.25)
+
+            self.assertEqual(manager.status()["turns"], 0)
+            self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
         finally:
             manager.stop()
 
