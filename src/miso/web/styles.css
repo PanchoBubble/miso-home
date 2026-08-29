@@ -137,6 +137,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .icon-button, .quiet-button { min-height: 36px; padding: 0 11px; border-radius: 10px; color: var(--muted); font-size: 0.76rem; }
 .install-button { min-height: 34px; padding: 0 12px; border-color: rgba(230, 162, 103, 0.45); border-radius: 10px; color: var(--accent-bright); background: var(--accent-soft); font-size: 0.72rem; font-weight: 700; }
 .install-button:hover { border-color: var(--accent); background: rgba(230, 162, 103, 0.2); }
+/* Return to the kiosk face. The companion links here, so without this the Pi
+   display has no way back once someone opens the dashboard. */
+.companion-link {
+  min-height: 36px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 999px;
+  color: var(--muted-strong);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+.companion-link:hover { color: var(--ink); background: var(--surface-hover); }
 
 .main-stage { min-height: 100vh; padding-top: 70px; }
 .household-dashboard {

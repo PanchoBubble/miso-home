@@ -1,6 +1,9 @@
 from array import array
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
+import socket
+import struct
 import threading
 import time
 import unittest
@@ -13,6 +16,7 @@ from miso.audio import (
     AudioSelector,
     BoundedPCMBuffer,
     PCMLevelMeter,
+    PulseProxyBackend,
     discover_alsa_devices,
     select_audio_device,
 )
@@ -21,6 +25,64 @@ from miso.audio import (
 def pcm(*samples: int) -> bytes:
     values = array("h", samples)
     return values.tobytes()
+
+
+class FakePulseProxy:
+    def __init__(self, root: Path, sinks: list[dict[str, str]]) -> None:
+        self.path = root / "playback.sock"
+        self.sinks = sinks
+        self.played = bytearray()
+        self.cancelled = threading.Event()
+        self._stopped = threading.Event()
+        self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._listener.bind(str(self.path))
+        self._listener.listen()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stopped.is_set():
+            connection, _address = self._listener.accept()
+            try:
+                stream = connection.makefile("rb")
+                request = json.loads(stream.readline())
+                if request.get("action") == "stop":
+                    return
+                if request.get("action") == "devices":
+                    response = {"ok": True, "sinks": self.sinks}
+                    connection.sendall(json.dumps(response).encode() + b"\n")
+                    continue
+                connection.sendall(b'{"ok":true}\n')
+                while True:
+                    try:
+                        header = connection.recv(4)
+                    except ConnectionResetError:
+                        self.cancelled.set()
+                        break
+                    if not header:
+                        break
+                    size = struct.unpack("!I", header)[0]
+                    if size == 0xFFFFFFFF:
+                        self.cancelled.set()
+                        break
+                    if size == 0:
+                        connection.sendall(b'{"ok":true}\n')
+                        break
+                    chunk = bytearray()
+                    while len(chunk) < size:
+                        chunk.extend(connection.recv(size - len(chunk)))
+                    self.played.extend(chunk)
+            finally:
+                connection.close()
+
+    def close(self) -> None:
+        self._stopped.set()
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.connect(str(self.path))
+        connection.sendall(b'{"action":"stop"}\n')
+        connection.close()
+        self._thread.join(timeout=1)
+        self._listener.close()
 
 
 class AudioDiscoveryTests(unittest.TestCase):
@@ -65,6 +127,47 @@ class AudioDiscoveryTests(unittest.TestCase):
         self.assertIn("--file-type", command)
         self.assertIn("raw", command)
         self.assertNotIn("hw:7", command)
+
+    def test_pulse_proxy_discovers_only_live_sinks_and_reports_unavailable(self) -> None:
+        with TemporaryDirectory() as directory:
+            proxy = FakePulseProxy(
+                Path(directory),
+                [{"name": "bluez_output.test.1", "description": "JBL Clip 3"}],
+            )
+            backend = PulseProxyBackend(proxy.path)
+            try:
+                devices = backend.devices()
+                self.assertTrue(backend.available())
+                self.assertEqual(len(devices), 1)
+                self.assertEqual(devices[0].card_id, "bluez_output.test.1")
+                self.assertEqual(devices[0].name, "JBL Clip 3")
+                self.assertEqual(devices[0].backend, "pulse")
+                proxy.sinks = []
+                self.assertEqual(backend.devices(), ())
+            finally:
+                proxy.close()
+
+    def test_pulse_proxy_plays_pcm_and_cancels_abortively(self) -> None:
+        with TemporaryDirectory() as directory:
+            proxy = FakePulseProxy(
+                Path(directory),
+                [{"name": "bluez_output.test.1", "description": "JBL Clip 3"}],
+            )
+            backend = PulseProxyBackend(proxy.path)
+            device = backend.devices()[0]
+            try:
+                playback = backend.open_playback(device, AudioFormat())
+                playback.write(b"audible pcm")
+                playback.close()
+                self.assertEqual(proxy.played, b"audible pcm")
+
+                playback = backend.open_playback(device, AudioFormat())
+                playback.write(b"barge in")
+                cancel = getattr(playback, "cancel")
+                cancel()
+                self.assertTrue(proxy.cancelled.wait(1))
+            finally:
+                proxy.close()
 
 
 class BufferAndLevelTests(unittest.TestCase):
@@ -172,7 +275,110 @@ class RecoveringBackend:
         return FakePlayback(self.written)
 
 
+class ReconnectingPlaybackBackend(RecoveringBackend):
+    device = AudioDevice(
+        "bluez_output.test.1", 0, 0, "JBL Clip 3", False, True, "pulse"
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connected = threading.Event()
+
+    def devices(self) -> tuple[AudioDevice, ...]:
+        return (self.device,) if self.connected.is_set() else ()
+
+
 class AudioManagerTests(unittest.TestCase):
+    def test_playback_waits_for_configured_sink_and_reconnects_without_fallback(self) -> None:
+        capture_backend = RecoveringBackend()
+        playback_backend = ReconnectingPlaybackBackend()
+        manager = AudioManager(
+            enabled=True,
+            capture_card="MisoUSB",
+            playback_card="bluez_output.test.1",
+            device_index=0,
+            sample_rate=16_000,
+            channels=1,
+            chunk_milliseconds=20,
+            buffer_milliseconds=40,
+            reconnect_seconds=0.01,
+            silence_dbfs=-50,
+            clipping_ratio=0.98,
+            backend=capture_backend,
+            playback_backend=playback_backend,
+        )
+        manager.start()
+        manager.play(pcm(1_000, -1_000))
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if manager.status()["playback"]["state"] == "unavailable":
+                break
+            time.sleep(0.01)
+        self.assertEqual(playback_backend.written, [])
+        self.assertIsNone(manager.status()["playback"]["available_device"])
+
+        playback_backend.connected.set()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not playback_backend.written:
+            time.sleep(0.01)
+        manager.stop()
+
+        self.assertEqual(playback_backend.written, [pcm(1_000, -1_000)])
+        self.assertEqual(
+            manager.status()["playback"]["available_device"]["card_id"],
+            "bluez_output.test.1",
+        )
+
+    def test_brief_underrun_keeps_the_bluetooth_sink_open(self) -> None:
+        # Piper cannot always stay ahead of playback on the Pi. Reopening a
+        # Bluetooth sink per chunk costs hundreds of milliseconds of link
+        # setup, so a short gap must not close the device.
+        capture_backend = RecoveringBackend()
+        playback_backend = ReconnectingPlaybackBackend()
+        playback_backend.connected.set()
+        manager = AudioManager(
+            enabled=True,
+            capture_card="MisoUSB",
+            playback_card="bluez_output.test.1",
+            device_index=0,
+            sample_rate=16_000,
+            channels=1,
+            chunk_milliseconds=20,
+            buffer_milliseconds=200,
+            reconnect_seconds=0.01,
+            silence_dbfs=-50,
+            clipping_ratio=0.98,
+            backend=capture_backend,
+            playback_backend=playback_backend,
+        )
+        manager.start()
+        try:
+            first = pcm(1_000, -1_000)
+            second = pcm(2_000, -2_000)
+            manager.play(first)
+            self._wait_for_written(playback_backend, 1)
+            opens_after_first = playback_backend.playback_opens
+
+            time.sleep(0.15)  # a gap longer than one chunk, well under the grace
+            manager.play(second)
+            self._wait_for_written(playback_backend, 2)
+
+            self.assertEqual(playback_backend.written, [first, second])
+            self.assertEqual(playback_backend.playback_opens, opens_after_first)
+            self.assertGreaterEqual(
+                manager.status()["playback"]["underruns"], 1
+            )
+        finally:
+            manager.stop()
+
+    def _wait_for_written(self, backend, count, timeout=2.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(backend.written) >= count:
+                return
+            time.sleep(0.005)
+        raise AssertionError(f"only {len(backend.written)} chunks written")
+
     def test_streams_reports_levels_and_recovers_capture(self) -> None:
         backend = RecoveringBackend()
         manager = AudioManager(

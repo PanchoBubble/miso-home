@@ -111,11 +111,26 @@ strict by default, and progress chunks are emitted before health checks or model
 loading. Household schemas are narrowed to the relevant tool family and omitted
 entirely from unrelated prompts.
 
+`MISO_ROUTING_ATTEMPT_TIMEOUT` (default 45s) bounds *silence between chunks*,
+not the length of an answer: a small local model may stream for minutes and must
+not be cut off while it is still producing tokens. `MISO_ROUTING_STREAM_TIMEOUT`
+(default 300s) is the hard ceiling on one attempt and must not be lower than the
+attempt timeout. When a provider dies after emitting usable text, the voice turn
+speaks what it already had rather than falling silent, and records the reason on
+the stored assistant message.
+
 Google Calendar is an optional validated tool family with per-user local OAuth
 tokens, timezone-aware events, recurrence, and a deliberately explicit mapping
 for unidentified voice requests. See
 [`docs/miso-google-calendar.md`](docs/miso-google-calendar.md) for Google Cloud,
 authorization, security, and Pi deployment steps.
+
+Current conditions and short forecasts use the validated Open-Meteo tool. It
+uses fixed HTTPS endpoints, redacts requested locations from tool audit records,
+caches responses for ten minutes, and returns attributed English or Spanish
+summaries suitable for text and voice. See
+[`docs/miso-weather.md`](docs/miso-weather.md) for configuration and privacy
+details.
 
 ## Local dashboard
 
@@ -199,17 +214,32 @@ authorization matrix and migration behavior.
 
 ## Linux audio
 
-Miso discovers PCM endpoints from `/proc/asound` and opens them through ALSA's
-`arecord` and `aplay`. It addresses hardware with stable card IDs such as
+Miso discovers capture PCM endpoints from `/proc/asound` and opens them through
+ALSA's `arecord`. It addresses hardware with stable card IDs such as
 `plughw:CARD=Device,DEV=0`, so Linux card-number changes after reboot or USB
 reconnection do not change the configured identity. The installer adds the
 service account to the `audio` group and grants the systemd unit access only to
 sound devices.
 
+Bluetooth playback uses a separate, hardened `miso-audio-playback.service` as
+the `pancho` desktop user. It exposes only a group-restricted Unix socket to the
+main `miso` service and forwards raw PCM to a specifically configured
+PipeWire/Pulse sink. The assistant therefore never inherits the desktop user's
+session or home access, and a missing Bluetooth sink is reported unavailable
+instead of silently falling back to HDMI. The proxy and playback worker both
+survive late desktop-session startup and rediscover the sink after reconnect.
+
 Capture and playback use bounded raw S16_LE queues. `/api/status` reports the
 resolved device, connection/reconnection state, buffer overruns, playback
 underruns, peak and RMS levels, clipping, and consecutive silent chunks. A lost
 device is rediscovered and reopened without restarting Miso.
+
+The playback worker holds the sink open across short underruns rather than
+closing it whenever the queue drains. Piper cannot always stay ahead of playback
+on the Pi, and reopening a Bluetooth sink per chunk costs hundreds of
+milliseconds of link setup, which turns an ordinary underrun into audible
+dropouts. Only a gap longer than the grace window ends the utterance and
+releases the device.
 
 The defaults are mono 16 kHz with 20 ms chunks and one second of buffering.
 Set these optional values in `/etc/miso/miso.env`:
@@ -218,6 +248,8 @@ Set these optional values in `/etc/miso/miso.env`:
 MISO_AUDIO_ENABLED=true
 MISO_AUDIO_CAPTURE_CARD=Device
 MISO_AUDIO_PLAYBACK_CARD=Device
+MISO_AUDIO_PLAYBACK_BACKEND=alsa
+MISO_AUDIO_PLAYBACK_PROXY=/run/miso-audio/playback.sock
 MISO_AUDIO_DEVICE_INDEX=0
 MISO_AUDIO_SAMPLE_RATE=16000
 MISO_AUDIO_CHANNELS=1
@@ -228,10 +260,13 @@ MISO_AUDIO_SILENCE_DBFS=-50
 MISO_AUDIO_CLIPPING_RATIO=0.98
 ```
 
-Leave either card ID empty to select the first compatible PCM. Find stable IDs
+Leave an ALSA card ID empty to select the first compatible PCM. Find stable IDs
 in brackets in `/proc/asound/cards`; do not configure volatile numeric names
-such as `hw:2`. Audio can remain enabled while hardware is absent: status will
-show `unavailable`, and the worker will attach when the device appears.
+such as `hw:2`. For Bluetooth, set `MISO_AUDIO_PLAYBACK_BACKEND=pulse` and set
+`MISO_AUDIO_PLAYBACK_CARD` to the exact sink from `pactl list short sinks`; a
+sink is mandatory in this mode to prevent fallback. Audio can remain enabled
+while hardware is absent: status will show `unavailable`, and the worker will
+attach when the device appears.
 
 ## Offline Miso wake word
 
@@ -378,7 +413,17 @@ second timeout. Explicit goodbye phrases close it immediately.
 
 VAD speech-onset events are separate from completed transcripts. This lets new
 speech cancel provider work, tool work, synthesis, and ALSA playback promptly,
-then route the interrupting utterance as the next turn. Invalid state transitions
+then route the interrupting utterance as the next turn.
+
+Short spoken cues are an exception. The Pi shares a room with its speaker and
+has no acoustic echo cancellation, so the microphone hears Miso's own "Yes?",
+check-back, and goodbye. Without a guard the VAD treats that as a barge-in,
+transcribes Miso's own words, and routes them as the request, which swallows the
+one the user actually made. Mic input is therefore ignored for the duration of a
+cue plus a short tail, and the transcript that onset produces is dropped.
+Barge-in during a real answer is unaffected. Tune the tail with
+`MISO_CONVERSATION_ECHO_GUARD_SECONDS` if the speaker is unusually loud or
+distant. Invalid state transitions
 are rejected, and bounded provider, tool, or speech errors clear the active
 conversation and return safely to idle. `/api/status` exposes the current state,
 turn/interruption/timeout/error counts, and the latest transition without
@@ -391,4 +436,5 @@ MISO_CONVERSATION_ENABLED=true
 MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS=8
 MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS=5
 MISO_CONVERSATION_ACKNOWLEDGEMENT=Yes?
+MISO_CONVERSATION_ECHO_GUARD_SECONDS=0.6
 ```

@@ -41,6 +41,7 @@ class HealthIntegrationTests(unittest.TestCase):
                 self.assertNotIn("database_path", payload)
                 self.assertIn("timer_create", server.tool_registry.names())
                 self.assertIn("shopping_add", server.tool_registry.names())
+                self.assertIn("weather_get", server.tool_registry.names())
                 decision = server.router.plan(
                     ChatRequest(
                         messages=({"role": "user", "content": "Set a timer"},)

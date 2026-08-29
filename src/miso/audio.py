@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import math
+import json
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -49,9 +52,12 @@ class AudioDevice:
     name: str
     capture: bool
     playback: bool
+    backend: str = "alsa"
 
     @property
     def pcm_name(self) -> str:
+        if self.backend != "alsa":
+            return self.card_id
         return f"plughw:CARD={self.card_id},DEV={self.device_index}"
 
     def public_dict(self) -> dict[str, object]:
@@ -62,6 +68,7 @@ class AudioDevice:
             "capture": self.capture,
             "playback": self.playback,
             "pcm_name": self.pcm_name,
+            "backend": self.backend,
         }
 
 
@@ -418,6 +425,151 @@ class ALSABackend:
         return _SubprocessPlayback(process)
 
 
+class _SocketPlayback:
+    """Raw PCM stream sent to the least-privilege desktop audio proxy."""
+
+    def __init__(self, connection: socket.socket) -> None:
+        self.connection = connection
+        self._closed = False
+
+    def write(self, chunk: bytes) -> None:
+        if self._closed:
+            raise BrokenPipeError("Pulse playback proxy stream is closed")
+        if not chunk:
+            return
+        self.connection.sendall(struct.pack("!I", len(chunk)) + chunk)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.connection.sendall(struct.pack("!I", 0))
+            response = _receive_json_line(self.connection)
+            if not response.get("ok"):
+                raise OSError(str(response.get("error", "Pulse playback failed")))
+        finally:
+            self.connection.close()
+
+    def cancel(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.connection.sendall(struct.pack("!I", 0xFFFFFFFF))
+        except OSError:
+            pass
+        finally:
+            self.connection.close()
+
+
+def _receive_json_line(connection: socket.socket) -> dict[str, object]:
+    payload = bytearray()
+    while len(payload) <= 65_536:
+        chunk = connection.recv(1)
+        if not chunk:
+            raise OSError("Pulse playback proxy closed the connection")
+        if chunk == b"\n":
+            try:
+                value = json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise OSError("Pulse playback proxy returned invalid data") from error
+            if not isinstance(value, dict):
+                raise OSError("Pulse playback proxy returned invalid data")
+            return value
+        payload.extend(chunk)
+    raise OSError("Pulse playback proxy response is too large")
+
+
+class PulseProxyBackend:
+    """Playback-only backend for a user-session Pulse server via a Unix proxy."""
+
+    def __init__(self, socket_path: Path) -> None:
+        self.socket_path = socket_path
+
+    def _connect(self) -> socket.socket:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(2.0)
+        try:
+            connection.connect(str(self.socket_path))
+        except OSError:
+            connection.close()
+            raise
+        return connection
+
+    def _request(self, request: dict[str, object]) -> tuple[socket.socket, dict[str, object]]:
+        connection = self._connect()
+        try:
+            connection.sendall(
+                json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+            )
+            response = _receive_json_line(connection)
+            if not response.get("ok"):
+                raise OSError(str(response.get("error", "Pulse proxy request failed")))
+            return connection, response
+        except Exception:
+            connection.close()
+            raise
+
+    def available(self) -> bool:
+        try:
+            connection, _response = self._request({"action": "devices"})
+        except OSError:
+            return False
+        connection.close()
+        return True
+
+    def devices(self) -> tuple[AudioDevice, ...]:
+        try:
+            connection, response = self._request({"action": "devices"})
+        except OSError:
+            return ()
+        connection.close()
+        sinks = response.get("sinks", [])
+        if not isinstance(sinks, list):
+            return ()
+        devices = []
+        for index, sink in enumerate(sinks):
+            if not isinstance(sink, dict):
+                continue
+            name = sink.get("name")
+            description = sink.get("description", name)
+            if not isinstance(name, str) or not name:
+                continue
+            devices.append(
+                AudioDevice(
+                    name,
+                    index,
+                    0,
+                    description if isinstance(description, str) else name,
+                    False,
+                    True,
+                    "pulse",
+                )
+            )
+        return tuple(devices)
+
+    def open_capture(
+        self, _device: AudioDevice, _audio_format: AudioFormat
+    ) -> CaptureHandle:
+        raise OSError("Pulse proxy does not provide capture")
+
+    def open_playback(
+        self, device: AudioDevice, audio_format: AudioFormat
+    ) -> PlaybackHandle:
+        connection, _response = self._request(
+            {
+                "action": "play",
+                "sink": device.card_id,
+                "sample_rate": audio_format.sample_rate,
+                "channels": audio_format.channels,
+                "sample_width": audio_format.sample_width,
+            }
+        )
+        connection.settimeout(None)
+        return _SocketPlayback(connection)
+
+
 class _EndpointState:
     def __init__(self, initial: str) -> None:
         self._lock = threading.Lock()
@@ -571,6 +723,7 @@ class _PlaybackEndpoint(_AudioEndpoint):
         buffer: BoundedPCMBuffer,
         meter: PCMLevelMeter,
         reconnect_seconds: float,
+        underrun_grace_seconds: float = 1.5,
     ) -> None:
         super().__init__()
         self.backend = backend
@@ -579,6 +732,7 @@ class _PlaybackEndpoint(_AudioEndpoint):
         self.buffer = buffer
         self.meter = meter
         self.reconnect_seconds = reconnect_seconds
+        self.underrun_grace_seconds = underrun_grace_seconds
         self.state = _EndpointState("idle")
         self._interrupt_lock = threading.Lock()
         self._interrupt_serial = 0
@@ -596,6 +750,23 @@ class _PlaybackEndpoint(_AudioEndpoint):
     def _current_interrupt_serial(self) -> int:
         with self._interrupt_lock:
             return self._interrupt_serial
+
+    def _await_refill(self, interrupt_serial: int) -> bool:
+        """Wait briefly for the synthesizer to catch up, keeping the sink open.
+
+        Returns False once the gap is long enough to treat the utterance as
+        finished, or as soon as playback is interrupted.
+        """
+        deadline = time.monotonic() + self.underrun_grace_seconds
+        while time.monotonic() < deadline:
+            if self.stop_event.is_set():
+                return False
+            if interrupt_serial != self._current_interrupt_serial():
+                return False
+            if self.buffer.snapshot()["queued_chunks"]:
+                return True
+            self.stop_event.wait(0.01)
+        return False
 
     def _run(self) -> None:
         pending: bytes | None = None
@@ -626,14 +797,32 @@ class _PlaybackEndpoint(_AudioEndpoint):
                 handle = self.backend.open_playback(device, self.audio_format)
                 self._set_handle(handle)
                 self.state.connected(device)
-                while pending is not None and not self.stop_event.is_set():
-                    handle.write(pending)
-                    self.meter.observe(pending)
-                    pending = self.buffer.get(
-                        timeout=max(0.05, self.audio_format.chunk_milliseconds / 500.0)
-                    )
+                # Hold the device open across short gaps. Piper cannot always
+                # stay ahead of playback on the Pi, and reopening a Bluetooth
+                # sink per chunk costs hundreds of milliseconds of link setup,
+                # which turns a normal underrun into audible dropouts.
+                chunk_timeout = max(
+                    0.05, self.audio_format.chunk_milliseconds / 500.0
+                )
+                interrupted = False
+                while not self.stop_event.is_set():
+                    if pending is None:
+                        pending = self.buffer.get(timeout=chunk_timeout)
                     if pending is None:
                         self.state.underrun()
+                        if not self._await_refill(interrupt_serial):
+                            break
+                        continue
+                    if interrupt_serial != self._current_interrupt_serial():
+                        interrupted = True
+                        break
+                    handle.write(pending)
+                    self.meter.observe(pending)
+                    pending = None
+                if interrupted:
+                    pending = None
+                    self.state.idle()
+                    continue
                 self.state.set_state("draining")
                 drained = True
             except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -671,9 +860,11 @@ class AudioManager:
         clipping_ratio: float,
         playback_sample_rate: int | None = None,
         backend: AudioBackend | None = None,
+        playback_backend: AudioBackend | None = None,
     ) -> None:
         self.enabled = enabled
         self.backend = backend or ALSABackend()
+        self.playback_backend = playback_backend or self.backend
         self.audio_format = AudioFormat(sample_rate, channels, 2, chunk_milliseconds)
         self.playback_format = AudioFormat(
             playback_sample_rate or sample_rate,
@@ -699,7 +890,7 @@ class AudioManager:
             reconnect_seconds,
         )
         self.playback = _PlaybackEndpoint(
-            self.backend,
+            self.playback_backend,
             self.playback_selector,
             self.playback_format,
             self.playback_buffer,
@@ -777,16 +968,21 @@ class AudioManager:
         return False
 
     def status(self) -> dict[str, object]:
-        devices = self.backend.devices() if self.enabled else ()
+        capture_devices = self.backend.devices() if self.enabled else ()
+        playback_devices = self.playback_backend.devices() if self.enabled else ()
         capture_device = select_audio_device(
-            devices, self.capture_selector, direction="capture"
+            capture_devices, self.capture_selector, direction="capture"
         )
         playback_device = select_audio_device(
-            devices, self.playback_selector, direction="playback"
+            playback_devices, self.playback_selector, direction="playback"
         )
         return {
             "enabled": self.enabled,
-            "backend_available": self.backend.available() if self.enabled else False,
+            "backend_available": (
+                self.backend.available() and self.playback_backend.available()
+                if self.enabled
+                else False
+            ),
             "format": {
                 "encoding": "S16_LE",
                 "sample_rate": self.audio_format.sample_rate,
@@ -794,6 +990,9 @@ class AudioManager:
                 "chunk_milliseconds": self.audio_format.chunk_milliseconds,
             },
             "capture": {
+                "backend_available": (
+                    self.backend.available() if self.enabled else False
+                ),
                 "configured_card": self.capture_selector.configured,
                 "available_device": (
                     None if capture_device is None else capture_device.public_dict()
@@ -803,6 +1002,9 @@ class AudioManager:
                 "levels": self.capture_meter.snapshot(),
             },
             "playback": {
+                "backend_available": (
+                    self.playback_backend.available() if self.enabled else False
+                ),
                 "format": {
                     "encoding": "S16_LE",
                     "sample_rate": self.playback_format.sample_rate,

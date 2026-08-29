@@ -49,6 +49,13 @@ canvas.face-renderer { display: block; }
   text-align: center;
 }
 .companion-caption[hidden] { display: none; }
+/* A draft caption is still being generated: dim it slightly and pulse the
+   speaker label so a half-written sentence never reads as the final answer. */
+.companion-caption[data-caption-state="draft"] .caption-copy { opacity: 0.76; }
+.companion-caption[data-caption-state="draft"] .caption-speaker::after {
+  content: " · typing";
+  animation: fallback-pulse 1.4s ease-in-out infinite;
+}
 .caption-speaker {
   display: block;
   margin-bottom: 7px;
@@ -107,7 +114,8 @@ body[data-connection="offline"] .connection-dot { background: var(--coral); box-
 
 body[data-companion-state="waking"] .fallback-eye { animation: fallback-wake 700ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
 body[data-companion-state="listening"] .fallback-eye { animation: fallback-listen 1.8s ease-in-out infinite; }
-body[data-companion-state="thinking"] .fallback-normal-eyes { animation: fallback-think 2.5s ease-in-out infinite; }
+body[data-companion-state="thinking"] .fallback-normal-eyes { animation: none; }
+body[data-companion-state="thinking"] .fallback-eye { animation: fallback-think-eyes 2.6s ease-in-out infinite; }
 body[data-companion-state="thinking"] .fallback-mouth { transform: scaleX(0.82) rotate(-4deg); }
 body[data-companion-state="tool"] .fallback-mouth { opacity: 0; }
 body[data-companion-state="tool"] .fallback-tool-dots { opacity: 1; }
@@ -130,7 +138,9 @@ body[data-companion-state="error"] .fallback-mouth { transform: scaleX(0.7); }
 @keyframes fallback-blink { 0%, 39%, 46%, 100% { transform: scaleY(1); } 42% { transform: scaleY(0.08); } }
 @keyframes fallback-wake { from { transform: scaleY(0.08); } 70% { transform: scaleY(1.18); } to { transform: scaleY(1); } }
 @keyframes fallback-listen { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12, 1.08); } }
-@keyframes fallback-think { 0%, 100% { transform: translateX(0); } 33% { transform: translateX(-28px); } 66% { transform: translateX(28px); } }
+/* Eyes settle closed while Miso thinks, with a slow breathing squeeze so the
+   face still reads as awake rather than asleep or offline. */
+@keyframes fallback-think-eyes { 0%, 100% { transform: scaleY(0.1); } 50% { transform: scaleY(0.16); } }
 @keyframes fallback-dot { 0%, 100% { transform: scaleY(0.62); } 45% { transform: scaleY(1.28); } }
 @keyframes fallback-talk { 0%, 100% { transform: scale(0.82, 1); } 22% { transform: scale(0.82, 4.8); } 56% { transform: scale(0.82, 1.6); } 78% { transform: scale(0.82, 3.7); } }
 @keyframes fallback-pulse { 0%, 100% { opacity: 0.48; } 50% { opacity: 0.72; } }

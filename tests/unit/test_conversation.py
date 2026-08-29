@@ -114,6 +114,7 @@ class FakeProvider:
     def __init__(self) -> None:
         self.fail = False
         self.block = False
+        self.partial = False
         self.entered = threading.Event()
 
     def health(self):
@@ -122,6 +123,9 @@ class FakeProvider:
     def stream(self, request, cancel):
         if self.fail:
             raise RuntimeError("provider exploded")
+        if self.partial:
+            yield ChatChunk(text="Half an answer")
+            raise RuntimeError("provider died mid-answer")
         if self.block:
             self.entered.set()
             cancel.wait(1)
@@ -226,8 +230,11 @@ class ConversationManagerTests(unittest.TestCase):
         speech = FakeSpeech()
         manager = self.manager(speech)
         responses = []
+        drafts = []
         manager.add_response_listener(
-            lambda text, language: responses.append((text, language))
+            lambda text, language, final: (
+                responses if final else drafts
+            ).append((text, language))
         )
         manager.start()
         try:
@@ -239,6 +246,7 @@ class ConversationManagerTests(unittest.TestCase):
 
             self.assertEqual([item[1] for item in speech.calls], ["Yes?", "First response"])
             self.assertEqual(responses, [("Yes?", "en"), ("First response", "en")])
+            self.assertEqual(drafts, [("First response", "en")])
             conversation_id = manager.status()["conversation_id"]
             events = self.store.events(str(conversation_id))
             self.assertEqual([event.role for event in events], ["user", "assistant"])
@@ -360,6 +368,36 @@ class ConversationManagerTests(unittest.TestCase):
         finally:
             manager.stop()
 
+    def test_tool_summary_is_spoken_instead_of_generic_confirmation(self) -> None:
+        tools = ToolRegistry(self.audit)
+        tools.register(
+            ToolDefinition(
+                name="test_action",
+                description="Return a speakable result.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+                handler=lambda _arguments, _context: {
+                    "summary": "It is cloudy and 18 degrees."
+                },
+            )
+        )
+        speech = FakeSpeech()
+        manager = self.manager(speech, tools=tools)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_result("run tool")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual(speech.calls[-1][1], "It is cloudy and 18 degrees.")
+        finally:
+            manager.stop()
+
     def test_explicit_spanish_goodbye_closes_follow_up(self) -> None:
         speech = FakeSpeech()
         manager = self.manager(speech)
@@ -405,6 +443,94 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "idle")
             self.assertEqual(manager.status()["errors"], 1)
             self.assertIn("provider", str(manager.status()["last_error"]))
+        finally:
+            manager.stop()
+    def wait_for_cue(self, speech, text, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(item[1] == text for item in speech.calls):
+                return
+            time.sleep(0.005)
+        raise AssertionError(f"cue {text!r} was never spoken: {speech.calls}")
+
+    def test_cue_heard_by_the_microphone_does_not_become_a_request(self) -> None:
+        # The Pi speaker shares a room with the mic and there is no echo
+        # cancellation, so the VAD hears Miso say "Yes?" and used to route it
+        # as the user's request, swallowing the real one.
+        speech = FakeSpeech(blocked_texts={"Yes?"})
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            self.wait_for_cue(speech, "Yes?")
+
+            self.source.put_activity()
+            self.source.put_result("Yes")
+            time.sleep(0.2)
+
+            status = manager.status()
+            self.assertEqual(status["state"], "acknowledging")
+            self.assertEqual(status["interruptions"], 0)
+            self.assertEqual(status["turns"], 0)
+            self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+        finally:
+            manager.stop()
+
+    def test_real_request_after_the_cue_is_still_heard(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            time.sleep(0.7)  # let the post-cue echo guard lapse
+
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual(
+                [item[1] for item in speech.calls], ["Yes?", "First response"]
+            )
+            self.assertEqual(manager.status()["turns"], 1)
+        finally:
+            manager.stop()
+
+    def test_provider_failing_mid_answer_still_speaks_what_it_produced(self) -> None:
+        self.provider.partial = True
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            time.sleep(0.7)
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual(
+                [item[1] for item in speech.calls], ["Yes?", "Half an answer"]
+            )
+            self.assertEqual(manager.status()["errors"], 0)
+        finally:
+            manager.stop()
+
+    def test_provider_failing_before_any_text_still_recovers_to_idle(self) -> None:
+        self.provider.fail = True
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            time.sleep(0.7)
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "idle")
+
+            self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+            self.assertGreaterEqual(manager.status()["errors"], 1)
         finally:
             manager.stop()
 

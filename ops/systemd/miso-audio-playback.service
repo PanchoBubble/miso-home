@@ -1,0 +1,41 @@
+[Unit]
+Description=Miso desktop-session audio playback proxy
+After=systemd-user-sessions.service bluetooth.service
+Wants=bluetooth.service
+Before=miso.service
+
+[Service]
+Type=simple
+User=pancho
+Group=miso
+WorkingDirectory=/opt/miso/app
+Environment=PYTHONPATH=/opt/miso/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m miso.audio_proxy --socket /run/miso-audio/playback.sock
+Restart=always
+RestartSec=2s
+RuntimeDirectory=miso-audio
+RuntimeDirectoryMode=0750
+UMask=0007
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+# ProtectHome=true would blank /home and /run/user, taking the Pulse cookie in
+# ~/.config/pulse with it and leaving paplay unable to authenticate. read-only
+# keeps the cookie and the session socket reachable while staying unwritable;
+# connecting to a Unix socket does not require a writable mount.
+ProtectHome=read-only
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

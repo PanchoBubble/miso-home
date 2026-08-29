@@ -84,6 +84,7 @@ function friendlyToolName(name) {
     shopping_add: "Shopping list updated",
     shopping_list: "Shopping list checked",
     shopping_complete: "Shopping item completed",
+    weather_get: "Weather checked",
     developer_command: "Developer command",
   }[name] || name.replaceAll("_", " ");
 }

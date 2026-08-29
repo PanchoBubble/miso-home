@@ -10,6 +10,7 @@ class SettingsTests(unittest.TestCase):
     def test_wake_defaults_match_bundled_model(self) -> None:
         settings = Settings.from_env({})
         self.assertEqual(settings.ollama_model, "qwen3:1.7b")
+        self.assertIsNone(settings.weather_default_location)
         self.assertEqual(settings.wake_threshold, 0.999)
         self.assertEqual(settings.wake_vad_threshold, 0.5)
         self.assertEqual(settings.wake_energy_threshold_dbfs, -60)
@@ -37,6 +38,7 @@ class SettingsTests(unittest.TestCase):
                     "MISO_OPENAI_MODEL": "gpt-5-mini",
                     "MISO_ROUTING_HEALTH_TIMEOUT": "1.5",
                     "MISO_ROUTING_ATTEMPT_TIMEOUT": "30",
+                    "MISO_ROUTING_STREAM_TIMEOUT": "240",
                     "MISO_DASHBOARD_EMAIL": "Juan@Example.com",
                     "MISO_ACCESS_TEAM_DOMAIN": (
                         "https://sowe-tech.cloudflareaccess.com/"
@@ -76,6 +78,7 @@ class SettingsTests(unittest.TestCase):
             self.assertNotIn("test-secret-key", repr(settings))
             self.assertEqual(settings.routing_health_timeout_seconds, 1.5)
             self.assertEqual(settings.routing_attempt_timeout_seconds, 30)
+            self.assertEqual(settings.routing_stream_timeout_seconds, 240)
             self.assertEqual(settings.dashboard_email, "juan@example.com")
             self.assertEqual(
                 settings.access_team_domain,
@@ -86,6 +89,7 @@ class SettingsTests(unittest.TestCase):
             )
             self.assertEqual(settings.audio_capture_card, "MisoUSB")
             self.assertEqual(settings.audio_playback_card, "USB_Speaker")
+            self.assertEqual(settings.audio_playback_backend, "alsa")
             self.assertEqual(settings.audio_buffer_milliseconds, 800)
             self.assertTrue(settings.wake_enabled)
             self.assertEqual(settings.wake_phrase, "Hola Miso")
@@ -123,6 +127,12 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "between 1 and 65535"):
             Settings.from_env({"MISO_PORT": "70000"})
 
+    def test_weather_default_location_is_optional_and_bounded(self) -> None:
+        settings = Settings.from_env({"MISO_WEATHER_DEFAULT_LOCATION": " Madrid "})
+        self.assertEqual(settings.weather_default_location, "Madrid")
+        with self.assertRaisesRegex(ConfigError, "WEATHER_DEFAULT_LOCATION"):
+            Settings.from_env({"MISO_WEATHER_DEFAULT_LOCATION": "x" * 121})
+
     def test_rejects_invalid_provider_timeout(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be numeric"):
             Settings.from_env({"MISO_PROVIDER_TIMEOUT": "slow"})
@@ -134,6 +144,15 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_routing_timeout(self) -> None:
         with self.assertRaisesRegex(ConfigError, "routing timeouts must be numeric"):
             Settings.from_env({"MISO_ROUTING_ATTEMPT_TIMEOUT": "eventually"})
+
+    def test_stream_budget_must_not_undercut_the_idle_timeout(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "must not be below"):
+            Settings.from_env(
+                {
+                    "MISO_ROUTING_ATTEMPT_TIMEOUT": "60",
+                    "MISO_ROUTING_STREAM_TIMEOUT": "30",
+                }
+            )
 
     def test_non_loopback_dashboard_requires_secret_token(self) -> None:
         with self.assertRaisesRegex(ConfigError, "DASHBOARD_TOKEN is required"):
@@ -190,6 +209,18 @@ class SettingsTests(unittest.TestCase):
                     "MISO_AUDIO_BUFFER_MILLISECONDS": "20",
                 }
             )
+
+    def test_accepts_named_pulse_sink_and_requires_explicit_sink(self) -> None:
+        settings = Settings.from_env(
+            {
+                "MISO_AUDIO_PLAYBACK_BACKEND": "pulse",
+                "MISO_AUDIO_PLAYBACK_CARD": "bluez_output.F8_5C_7D_19_EE_9E.1",
+                "MISO_AUDIO_PLAYBACK_PROXY": "/run/miso-audio/playback.sock",
+            }
+        )
+        self.assertEqual(settings.audio_playback_backend, "pulse")
+        with self.assertRaisesRegex(ConfigError, "must name a Pulse sink"):
+            Settings.from_env({"MISO_AUDIO_PLAYBACK_BACKEND": "pulse"})
 
     def test_reports_missing_runtime_directories(self) -> None:
         settings = Settings(

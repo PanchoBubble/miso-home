@@ -61,6 +61,32 @@ def successful(name):
     )
 
 
+class SlowProvider:
+    """Streams text with a gap between chunks, then completes."""
+
+    def __init__(self, name, gap_seconds, chunk_count):
+        self._name = name
+        self.gap_seconds = gap_seconds
+        self.chunk_count = chunk_count
+
+    @property
+    def name(self):
+        return self._name
+
+    def health(self):
+        return ProviderHealth(True, "ready", "test")
+
+    def stream(self, _request, cancel):
+        for index in range(self.chunk_count):
+            deadline = time.monotonic() + self.gap_seconds
+            while time.monotonic() < deadline:
+                if cancel.is_set():
+                    raise ProviderCancelled("cancelled")
+                time.sleep(0.002)
+            yield ChatChunk(text=f"token{index} ")
+        yield ChatChunk(done=True)
+
+
 class ProviderRouterTests(unittest.TestCase):
     def router(self, pi=None, lan=None, hosted=None, **timeouts):
         self.audit = InMemoryAuditLog()
@@ -121,6 +147,7 @@ class ProviderRouterTests(unittest.TestCase):
                 "shopping_add",
                 "calendar_list",
                 "calendar_event_create",
+                "weather_get",
             )
         )
         router = self.router()
@@ -141,6 +168,13 @@ class ProviderRouterTests(unittest.TestCase):
         self.assertEqual(
             calendar.selected_tools,
             ("calendar_list", "calendar_event_create"),
+        )
+        weather = router.plan(self.request("¿Qué tiempo hará en Madrid?", tools))
+        self.assertEqual(weather.classification, RouteClass.ROUTINE)
+        self.assertEqual(weather.selected_tools, ("weather_get",))
+        self.assertEqual(
+            weather.candidates,
+            ("pi-ollama", "hosted-gpt"),
         )
 
     def test_missing_tool_family_prefers_hosted_without_exposing_other_tools(self) -> None:
@@ -318,6 +352,54 @@ class ProviderRouterTests(unittest.TestCase):
         cancel.set()
         with self.assertRaises(ProviderCancelled):
             next(stream)
+
+
+    def test_slow_stream_survives_when_each_gap_is_within_the_attempt_timeout(
+        self,
+    ) -> None:
+        # Four 40ms gaps total 160ms, far past a 100ms attempt timeout. The
+        # timeout bounds silence between chunks, so the answer must survive.
+        router = self.router(
+            pi=SlowProvider("pi-ollama", 0.04, 4),
+            attempt_timeout_seconds=0.1,
+            stream_timeout_seconds=5.0,
+        )
+        chunks = list(
+            router.stream(self.request("hola"), Event(), manual_override="pi-ollama")
+        )
+        text = "".join(chunk.text for chunk in chunks if chunk.text)
+        self.assertEqual(text, "token0 token1 token2 token3 ")
+
+    def test_stream_that_stalls_past_the_attempt_timeout_still_fails(self) -> None:
+        router = self.router(
+            pi=SlowProvider("pi-ollama", 0.3, 2),
+            attempt_timeout_seconds=0.05,
+            stream_timeout_seconds=5.0,
+        )
+        with self.assertRaises(RoutingError):
+            list(
+                router.stream(
+                    self.request("hola"), Event(), manual_override="pi-ollama"
+                )
+            )
+
+    def test_total_stream_budget_bounds_an_endlessly_dribbling_provider(self) -> None:
+        router = self.router(
+            pi=SlowProvider("pi-ollama", 0.01, 10_000),
+            attempt_timeout_seconds=0.05,
+            stream_timeout_seconds=0.12,
+        )
+        with self.assertRaises(RoutingError) as caught:
+            list(
+                router.stream(
+                    self.request("hola"), Event(), manual_override="pi-ollama"
+                )
+            )
+        self.assertIn("total budget", str(caught.exception))
+
+    def test_stream_timeout_below_attempt_timeout_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.router(attempt_timeout_seconds=10.0, stream_timeout_seconds=1.0)
 
 
 if __name__ == "__main__":

@@ -76,15 +76,21 @@ function clearCaption() {
   if (companion.captionTimer) window.clearTimeout(companion.captionTimer);
   companion.captionTimer = null;
   caption.hidden = true;
+  caption.dataset.captionState = "final";
   captionCopy.textContent = "";
 }
 
-function showCaption(text) {
+function showCaption(text, final = true) {
   const normalized = text.trim();
   if (!normalized) return;
   if (companion.captionTimer) window.clearTimeout(companion.captionTimer);
+  companion.captionTimer = null;
   captionCopy.textContent = normalized;
   caption.hidden = false;
+  // A draft caption is the answer still being generated. It must not time out
+  // mid-sentence, so the auto-hide only starts once the text is settled.
+  caption.dataset.captionState = final ? "final" : "draft";
+  if (!final) return;
   const visibleMilliseconds = Math.min(
     CAPTION_MAX_VISIBLE_MS,
     Math.max(CAPTION_MIN_VISIBLE_MS, normalized.length * CAPTION_MS_PER_CHARACTER),
@@ -186,7 +192,7 @@ function handleLiveEvent(event) {
     && typeof event.payload?.text === "string"
     && Date.now() - Date.parse(event.created_at) <= CAPTION_MAX_AGE_MS
   ) {
-    showCaption(event.payload.text);
+    showCaption(event.payload.text, event.payload.final !== false);
   }
 }
 

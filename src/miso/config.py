@@ -50,6 +50,7 @@ class Settings:
     openai_base_url: str = "https://api.openai.com/v1"
     routing_health_timeout_seconds: float = 2.0
     routing_attempt_timeout_seconds: float = 45.0
+    routing_stream_timeout_seconds: float = 300.0
     dashboard_token: str | None = field(default=None, repr=False)
     dashboard_email: str = "local@miso.invalid"
     access_team_domain: str | None = None
@@ -62,11 +63,14 @@ class Settings:
     google_calendar_default_timezone: str = "Europe/London"
     google_calendar_default_id: str = "primary"
     google_calendar_voice_email: str | None = None
+    weather_default_location: str | None = None
     developer_root: Path | None = None
     developer_commands: tuple[str, ...] = ("python3", "git", "rg", "ls")
     audio_enabled: bool = True
     audio_capture_card: str | None = None
     audio_playback_card: str | None = None
+    audio_playback_backend: str = "alsa"
+    audio_playback_proxy: Path = Path("/run/miso-audio/playback.sock")
     audio_device_index: int = 0
     audio_sample_rate: int = 16_000
     audio_playback_sample_rate: int = 22_050
@@ -127,6 +131,7 @@ class Settings:
     conversation_listen_timeout_seconds: float = 8.0
     conversation_checkback_timeout_seconds: float = 5.0
     conversation_acknowledgement: str = "Yes?"
+    conversation_echo_guard_seconds: float = 0.6
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -146,6 +151,9 @@ class Settings:
             )
             routing_attempt_timeout = float(
                 source.get("MISO_ROUTING_ATTEMPT_TIMEOUT", "45")
+            )
+            routing_stream_timeout = float(
+                source.get("MISO_ROUTING_STREAM_TIMEOUT", "300")
             )
         except ValueError as error:
             raise ConfigError("MISO routing timeouts must be numeric") from error
@@ -215,6 +223,9 @@ class Settings:
             conversation_checkback_timeout_seconds = float(
                 source.get("MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS", "5")
             )
+            conversation_echo_guard_seconds = float(
+                source.get("MISO_CONVERSATION_ECHO_GUARD_SECONDS", "0.6")
+            )
         except ValueError as error:
             raise ConfigError("MISO audio numeric settings are invalid") from error
 
@@ -239,6 +250,7 @@ class Settings:
             ),
             routing_health_timeout_seconds=routing_health_timeout,
             routing_attempt_timeout_seconds=routing_attempt_timeout,
+            routing_stream_timeout_seconds=routing_stream_timeout,
             dashboard_token=source.get("MISO_DASHBOARD_TOKEN", "").strip() or None,
             dashboard_email=_email(
                 source.get("MISO_DASHBOARD_EMAIL", "local@miso.invalid"),
@@ -278,6 +290,9 @@ class Settings:
                 if source.get("MISO_GOOGLE_CALENDAR_VOICE_EMAIL", "").strip()
                 else None
             ),
+            weather_default_location=(
+                source.get("MISO_WEATHER_DEFAULT_LOCATION", "").strip() or None
+            ),
             developer_root=(
                 Path(source["MISO_DEVELOPER_ROOT"])
                 if source.get("MISO_DEVELOPER_ROOT")
@@ -298,6 +313,15 @@ class Settings:
             ),
             audio_playback_card=(
                 source.get("MISO_AUDIO_PLAYBACK_CARD", "").strip() or None
+            ),
+            audio_playback_backend=source.get(
+                "MISO_AUDIO_PLAYBACK_BACKEND", "alsa"
+            ).strip().casefold(),
+            audio_playback_proxy=Path(
+                source.get(
+                    "MISO_AUDIO_PLAYBACK_PROXY",
+                    "/run/miso-audio/playback.sock",
+                )
             ),
             audio_device_index=audio_device_index,
             audio_sample_rate=audio_sample_rate,
@@ -417,6 +441,7 @@ class Settings:
             conversation_acknowledgement=source.get(
                 "MISO_CONVERSATION_ACKNOWLEDGEMENT", "Yes?"
             ).strip(),
+            conversation_echo_guard_seconds=conversation_echo_guard_seconds,
         )
         settings.validate()
         return settings
@@ -452,6 +477,12 @@ class Settings:
             raise ConfigError("MISO_ROUTING_HEALTH_TIMEOUT must be between 0 and 30")
         if not 0 < self.routing_attempt_timeout_seconds <= 600:
             raise ConfigError("MISO_ROUTING_ATTEMPT_TIMEOUT must be between 0 and 600")
+        if not 0 < self.routing_stream_timeout_seconds <= 3_600:
+            raise ConfigError("MISO_ROUTING_STREAM_TIMEOUT must be between 0 and 3600")
+        if self.routing_stream_timeout_seconds < self.routing_attempt_timeout_seconds:
+            raise ConfigError(
+                "MISO_ROUTING_STREAM_TIMEOUT must not be below MISO_ROUTING_ATTEMPT_TIMEOUT"
+            )
         if self.host not in {"127.0.0.1", "::1", "localhost"} and not self.dashboard_token:
             raise ConfigError("MISO_DASHBOARD_TOKEN is required for a non-loopback host")
         if self.dashboard_token is not None and len(self.dashboard_token) < 32:
@@ -504,23 +535,49 @@ class Settings:
             or any(ord(character) < 32 for character in self.google_calendar_default_id)
         ):
             raise ConfigError("MISO_GOOGLE_CALENDAR_DEFAULT_ID is invalid")
+        if self.weather_default_location is not None and (
+            len(self.weather_default_location) > 120
+            or any(ord(character) < 32 for character in self.weather_default_location)
+        ):
+            raise ConfigError(
+                "MISO_WEATHER_DEFAULT_LOCATION must be at most 120 printable characters"
+            )
         if self.developer_root is not None and not self.developer_root.is_absolute():
             raise ConfigError("MISO_DEVELOPER_ROOT must be absolute")
         if not self.developer_commands:
             raise ConfigError("MISO_DEVELOPER_COMMANDS must not be empty")
         if any(Path(command).name != command for command in self.developer_commands):
             raise ConfigError("MISO_DEVELOPER_COMMANDS must contain command names")
-        for name, card_id in (
-            ("MISO_AUDIO_CAPTURE_CARD", self.audio_capture_card),
-            ("MISO_AUDIO_PLAYBACK_CARD", self.audio_playback_card),
+        if self.audio_capture_card is not None and (
+            len(self.audio_capture_card) > 32
+            or not all(
+                character.isalnum() or character in "_-"
+                for character in self.audio_capture_card
+            )
         ):
-            if card_id is not None and (
-                len(card_id) > 32
-                or not all(
-                    character.isalnum() or character in "_-" for character in card_id
+            raise ConfigError("MISO_AUDIO_CAPTURE_CARD must be a stable ALSA card ID")
+        if self.audio_playback_backend not in {"alsa", "pulse"}:
+            raise ConfigError("MISO_AUDIO_PLAYBACK_BACKEND must be alsa or pulse")
+        if self.audio_playback_proxy.is_absolute() is False:
+            raise ConfigError("MISO_AUDIO_PLAYBACK_PROXY must be absolute")
+        if self.audio_playback_backend == "pulse":
+            sink = self.audio_playback_card
+            if sink is None:
+                raise ConfigError(
+                    "MISO_AUDIO_PLAYBACK_CARD must name a Pulse sink when Pulse playback is enabled"
                 )
+            if len(sink) > 255 or not all(
+                character.isalnum() or character in "_.:-" for character in sink
             ):
-                raise ConfigError(f"{name} must be a stable ALSA card ID")
+                raise ConfigError("MISO_AUDIO_PLAYBACK_CARD is not a valid Pulse sink")
+        elif self.audio_playback_card is not None and (
+            len(self.audio_playback_card) > 32
+            or not all(
+                character.isalnum() or character in "_-"
+                for character in self.audio_playback_card
+            )
+        ):
+            raise ConfigError("MISO_AUDIO_PLAYBACK_CARD must be a stable ALSA card ID")
         if not 0 <= self.audio_device_index <= 255:
             raise ConfigError("MISO_AUDIO_DEVICE_INDEX must be between 0 and 255")
         if not 8_000 <= self.audio_sample_rate <= 192_000:
@@ -640,6 +697,10 @@ class Settings:
         if not 1 <= self.conversation_checkback_timeout_seconds <= 120:
             raise ConfigError(
                 "MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS must be between 1 and 120"
+            )
+        if not 0 <= self.conversation_echo_guard_seconds <= 10:
+            raise ConfigError(
+                "MISO_CONVERSATION_ECHO_GUARD_SECONDS must be between 0 and 10"
             )
         if not 1 <= len(self.conversation_acknowledgement) <= 100:
             raise ConfigError(

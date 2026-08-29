@@ -99,6 +99,17 @@ _ROUTINE_MARKERS = (
         "cita",
         "reunión",
         "reunion",
+        "weather",
+        "forecast",
+        "temperature",
+        "rain",
+        "clima",
+        "pronóstico",
+        "pronostico",
+        "qué tiempo",
+        "que tiempo",
+        "temperatura",
+        "lluvia",
 )
 
 
@@ -110,15 +121,21 @@ class ProviderRouter:
         *,
         health_timeout_seconds: float = 2.0,
         attempt_timeout_seconds: float = 45.0,
+        stream_timeout_seconds: float = 300.0,
     ) -> None:
         if not 0 < health_timeout_seconds <= 30:
             raise ValueError("health timeout must be between 0 and 30 seconds")
         if not 0 < attempt_timeout_seconds <= 600:
             raise ValueError("attempt timeout must be between 0 and 600 seconds")
+        if not 0 < stream_timeout_seconds <= 3_600:
+            raise ValueError("stream timeout must be between 0 and 3600 seconds")
+        if stream_timeout_seconds < attempt_timeout_seconds:
+            raise ValueError("stream timeout must not be below the attempt timeout")
         self.providers = providers
         self.audit_sink = audit_sink
         self.health_timeout_seconds = health_timeout_seconds
         self.attempt_timeout_seconds = attempt_timeout_seconds
+        self.stream_timeout_seconds = stream_timeout_seconds
 
     def classify(self, request: ChatRequest) -> tuple[RouteClass, str]:
         latest = self._latest_user(request)
@@ -398,6 +415,15 @@ class ProviderRouter:
         elif any(
             marker in latest
             for marker in (
+                "weather", "forecast", "temperature", "rain", "clima",
+                "pronóstico", "pronostico", "qué tiempo", "que tiempo",
+                "temperatura", "lluvia",
+            )
+        ):
+            prefix = "weather_"
+        elif any(
+            marker in latest
+            for marker in (
                 "shopping list", "lista de compra", "lista de la compra",
                 "add milk", "añade", "agrega", "comprar",
             )
@@ -429,12 +455,20 @@ class ProviderRouter:
             name=f"miso-provider-{provider.name}",
             daemon=True,
         ).start()
+        # The attempt timeout bounds silence between chunks, not the whole answer:
+        # a small local model can stream for minutes and must not be killed while
+        # it is still producing tokens. stream_timeout_seconds is the hard ceiling.
+        ceiling = time.monotonic() + self.stream_timeout_seconds
         deadline = time.monotonic() + self.attempt_timeout_seconds
         while True:
             if caller_cancel.is_set():
                 attempt_cancel.set()
                 raise ProviderCancelled("routed request was cancelled")
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            if ceiling - now <= 0:
+                attempt_cancel.set()
+                raise ProviderError("provider stream exceeded its total budget")
+            remaining = min(deadline, ceiling) - now
             if remaining <= 0:
                 attempt_cancel.set()
                 raise ProviderError("provider attempt timed out")
@@ -445,6 +479,7 @@ class ProviderRouter:
             if kind == "chunk":
                 if not isinstance(value, ChatChunk):
                     raise ProviderProtocolError("provider yielded invalid chunk")
+                deadline = time.monotonic() + self.attempt_timeout_seconds
                 yield value
             elif kind == "error":
                 if isinstance(value, BaseException):
@@ -554,4 +589,5 @@ def create_router(settings: Settings) -> ProviderRouter:
         JsonlAuditLog(settings.state_dir / "audit" / "routing.jsonl"),
         health_timeout_seconds=settings.routing_health_timeout_seconds,
         attempt_timeout_seconds=settings.routing_attempt_timeout_seconds,
+        stream_timeout_seconds=settings.routing_stream_timeout_seconds,
     )

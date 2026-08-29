@@ -8,10 +8,10 @@ import unittest
 from miso.access import AccessJWTError
 from miso.config import Settings
 from miso.http import create_server
-from miso.identity import VOICE_ACTOR
+from miso.identity import VOICE_ACTOR, web_actor
 from miso.providers import ChatChunk, ProviderHealth, ProviderSet
 from miso.routing import ProviderRouter
-from miso.tools import InMemoryAuditLog
+from miso.tools import InMemoryAuditLog, ToolDefinition
 
 
 class FakeProvider:
@@ -34,7 +34,11 @@ class FakeProvider:
     def stream(self, request, _cancel):
         self.requests.append(request)
         content = request.messages[-1]["content"]
-        if "timer" in content.casefold():
+        if "summary timer" in content.casefold():
+            yield ChatChunk(
+                tool_call={"name": "timer_summary", "arguments": {}}
+            )
+        elif "timer" in content.casefold():
             yield ChatChunk(
                 tool_call={
                     "name": "timer_create",
@@ -94,6 +98,20 @@ class DashboardIntegrationTests(unittest.TestCase):
             port=0,
             router=router,
             wake_calibration=self.wake_calibration,
+        )
+        self.server.tool_registry.register(
+            ToolDefinition(
+                name="timer_summary",
+                description="Return a speakable timer summary.",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                handler=lambda _arguments, _context: {
+                    "summary": "The weather is cloudy and 18 degrees."
+                },
+            )
         )
         self.thread = Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -175,7 +193,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v11', service_worker)
+        self.assertIn(b'miso-shell-v12', service_worker)
         self.assertIn(b'"/companion"', service_worker)
         self.assertIn(b'"/assets/miso-face.riv"', service_worker)
         self.assertIn(b'"/vendor/rive/rive.wasm"', service_worker)
@@ -226,8 +244,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="rive-face"', content)
         self.assertIn(b'id="fallback-face"', content)
         self.assertIn(b'/vendor/rive/rive.js', content)
-        self.assertIn(b'/companion.js?v=11', content)
-        self.assertIn(b'/companion.css?v=11', content)
+        self.assertIn(b'/companion.js?v=12', content)
+        self.assertIn(b'/companion.css?v=12', content)
         self.assertIn(b'id="companion-caption"', content)
         self.assertNotIn(b'https://', content)
 
@@ -240,6 +258,15 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'/api/events?after=', javascript)
         self.assertIn(b'assistant_caption', javascript)
         self.assertIn(b'captionCopy.textContent = normalized', javascript)
+        self.assertIn(b'caption.dataset.captionState', javascript)
+
+        response, companion = self.request("GET", "/companion")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'href="/"', companion)
+
+        response, dashboard = self.request("GET", "/")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'href="/companion"', dashboard)
         self.assertNotIn(b'innerHTML', javascript)
         self.assertNotIn(b"setInterval", javascript)
 
@@ -500,6 +527,28 @@ class DashboardIntegrationTests(unittest.TestCase):
         expected = ("private", "local@miso.invalid", "local@miso.invalid")
         self.assertEqual(tuple(conversation), expected)
         self.assertEqual(tuple(timer), expected)
+
+    def test_speakable_tool_summary_is_streamed_and_persisted(self) -> None:
+        response, content = self.request(
+            "POST",
+            "/api/chat",
+            {
+                "text": "Run the summary timer tool",
+                "request_id": "tool-summary-test",
+                "route_class": "auto",
+            },
+        )
+        self.assertEqual(response.status, 200)
+        events = [json.loads(line) for line in content.splitlines()]
+        tool = next(item for item in events if item["type"] == "tool_result")
+        delta = next(item for item in events if item["type"] == "delta")
+        self.assertEqual(tool["result"]["tool"], "timer_summary")
+        self.assertEqual(delta["text"], "The weather is cloudy and 18 degrees.")
+        completed = next(item for item in events if item["type"] == "complete")
+        messages = self.server.memory_store.events(
+            completed["conversation_id"], actor=web_actor(self.settings.dashboard_email)
+        )
+        self.assertEqual(messages[-1].content, delta["text"])
 
     def test_chat_without_matching_tool_uses_hosted_provider(self) -> None:
         self.hosted_provider.available = True

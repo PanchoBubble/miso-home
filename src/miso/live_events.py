@@ -317,10 +317,15 @@ def conversation_event_publisher(events: LiveEventStore) -> TransitionListener:
 
 def conversation_caption_publisher(
     events: LiveEventStore,
-) -> Callable[[str, str], None]:
-    """Project text that is spoken aloud to the shared companion display."""
+) -> Callable[[str, str, bool], None]:
+    """Project text that is spoken aloud to the shared companion display.
 
-    def publish(text: str, language: str) -> None:
+    Non-final captions carry the answer as it is generated so the display has
+    something to show during the model's thinking delay. Each one replaces the
+    previous text rather than appending to it.
+    """
+
+    def publish(text: str, language: str, final: bool = True) -> None:
         normalized = text.strip()
         if not normalized:
             return
@@ -331,6 +336,7 @@ def conversation_caption_publisher(
                 "text": normalized[:MAX_CAPTION_CHARACTERS],
                 "language": language,
                 "truncated": truncated,
+                "final": final,
             },
             actor=VOICE_ACTOR,
         )

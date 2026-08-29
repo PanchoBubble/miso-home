@@ -1,6 +1,7 @@
 [Unit]
 Description=Miso local assistant runtime
-After=network.target
+After=network.target miso-audio-playback.service
+Wants=miso-audio-playback.service
 
 [Service]
 Type=simple
@@ -19,6 +20,7 @@ Environment=MISO_DB_PATH=/var/lib/miso/db/miso.sqlite3
 Environment=MISO_STATE_DIR=/var/lib/miso/state
 Environment=MISO_MODEL_DIR=/var/lib/miso/models
 Environment=MISO_DEVELOPER_ROOT=/opt/miso/app
+EnvironmentFile=-/etc/miso/miso-audio.env
 EnvironmentFile=-/etc/miso/miso-stt.env
 EnvironmentFile=-/etc/miso/miso-tts.env
 EnvironmentFile=-/etc/miso/miso-wake.env

@@ -94,6 +94,13 @@ class ToolResult:
     def ok(self) -> bool:
         return self.status is ToolStatus.SUCCESS
 
+    @property
+    def summary(self) -> str | None:
+        if self.output is None:
+            return None
+        value = self.output.get("summary")
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
     def as_dict(self) -> dict[str, object]:
         return {
             "invocation_id": self.invocation_id,

@@ -1,5 +1,6 @@
 import io
 import json
+from urllib.error import HTTPError
 from threading import Event
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from miso.providers import (
     LanOllamaProvider,
     OllamaProvider,
     ProviderCancelled,
+    ProviderError,
 )
 
 
@@ -89,3 +91,93 @@ class OllamaProviderTests(unittest.TestCase):
     def test_lan_provider_has_distinct_identity(self) -> None:
         provider = LanOllamaProvider("http://192.168.0.50:11434", "qwen3:8b")
         self.assertEqual(provider.name, "lan-ollama")
+
+
+class OllamaThinkFilterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.provider = OllamaProvider("http://127.0.0.1:11434", "qwen3:1.7b")
+
+    def _stream(self, contents):
+        chunks = [{"message": {"content": item}, "done": False} for item in contents]
+        chunks.append({"message": {"content": ""}, "done": True})
+        payload = b"".join(json.dumps(chunk).encode() + b"\n" for chunk in chunks)
+        with patch("miso.providers.ollama.urlopen") as mocked_urlopen:
+            mocked_urlopen.return_value = FakeResponse(payload)
+            output = list(
+                self.provider.stream(
+                    ChatRequest(messages=({"role": "user", "content": "hi"},)),
+                    Event(),
+                )
+            )
+        return "".join(chunk.text for chunk in output if chunk.text)
+
+    def test_reasoning_span_is_never_spoken(self) -> None:
+        self.assertEqual(
+            self._stream(["<think>weigh the options</think>", "It is sunny."]),
+            "It is sunny.",
+        )
+
+    def test_reasoning_span_split_across_chunks_is_removed(self) -> None:
+        self.assertEqual(
+            self._stream(["<thi", "nk>hmm</thi", "nk>Ready.", " Done."]),
+            "Ready. Done.",
+        )
+
+    def test_visible_text_is_not_withheld_waiting_for_a_tag(self) -> None:
+        self.assertEqual(self._stream(["Hola ", "Juan"]), "Hola Juan")
+
+    def test_unterminated_reasoning_span_yields_no_speech(self) -> None:
+        self.assertEqual(self._stream(["<think>still reasoning"]), "")
+
+
+class OllamaThinkRetryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.provider = OllamaProvider("http://127.0.0.1:11434", "qwen3:1.7b")
+
+    def test_rejected_think_field_is_retried_without_it(self) -> None:
+        chunks = [
+            {"message": {"content": "Hi there."}, "done": False},
+            {"message": {"content": ""}, "done": True},
+        ]
+        body = b"".join(json.dumps(chunk).encode() + b"\n" for chunk in chunks)
+        sent = []
+
+        def fake_urlopen(request, timeout=None):
+            sent.append(json.loads(request.data))
+            if len(sent) == 1:
+                raise HTTPError(
+                    request.full_url, 400, "does not support thinking", {}, None
+                )
+            return FakeResponse(body)
+
+        with patch("miso.providers.ollama.urlopen", fake_urlopen):
+            output = list(
+                self.provider.stream(
+                    ChatRequest(messages=({"role": "user", "content": "hi"},)),
+                    Event(),
+                )
+            )
+
+        self.assertEqual(len(sent), 2)
+        self.assertIs(sent[0]["think"], False)
+        self.assertNotIn("think", sent[1])
+        self.assertEqual(
+            "".join(chunk.text for chunk in output if chunk.text), "Hi there."
+        )
+
+    def test_other_http_errors_are_not_retried(self) -> None:
+        calls = []
+
+        def fake_urlopen(request, timeout=None):
+            calls.append(request)
+            raise HTTPError(request.full_url, 500, "boom", {}, None)
+
+        with patch("miso.providers.ollama.urlopen", fake_urlopen):
+            with self.assertRaises(ProviderError):
+                list(
+                    self.provider.stream(
+                        ChatRequest(messages=({"role": "user", "content": "hi"},)),
+                        Event(),
+                    )
+                )
+        self.assertEqual(len(calls), 1)

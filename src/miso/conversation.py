@@ -150,6 +150,15 @@ _TRANSITIONS: dict[ConversationState, frozenset[ConversationState]] = {
 }
 
 
+_CUE_STATES = frozenset(
+    {
+        ConversationState.ACKNOWLEDGING,
+        ConversationState.CHECKING_BACK,
+        ConversationState.GOODBYE,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class StateTransition:
     previous: ConversationState
@@ -209,12 +218,15 @@ class ConversationManager:
         checkback_spanish: str = "¿Algo más?",
         goodbye_english: str = "Goodbye.",
         goodbye_spanish: str = "Hasta luego.",
+        echo_guard_seconds: float = 0.6,
         transition_capacity: int = 32,
         transition_listeners: tuple[Callable[[StateTransition], None], ...] = (),
-        response_listeners: tuple[Callable[[str, str], None], ...] = (),
+        response_listeners: tuple[Callable[[str, str, bool], None], ...] = (),
     ) -> None:
         if listen_timeout_seconds <= 0 or checkback_timeout_seconds <= 0:
             raise ValueError("conversation timeouts must be positive")
+        if not 0 <= echo_guard_seconds <= 10:
+            raise ValueError("echo guard must be between 0 and 10 seconds")
         if not acknowledgement.strip():
             raise ValueError("conversation acknowledgement must not be empty")
         self.enabled = (
@@ -231,6 +243,7 @@ class ConversationManager:
         self.wake_phrase = wake_phrase.strip()
         self.listen_timeout_seconds = listen_timeout_seconds
         self.checkback_timeout_seconds = checkback_timeout_seconds
+        self.echo_guard_seconds = echo_guard_seconds
         self.acknowledgement = acknowledgement.strip()
         self.checkbacks = {"en": checkback_english, "es": checkback_spanish}
         self.goodbyes = {"en": goodbye_english, "es": goodbye_spanish}
@@ -256,6 +269,9 @@ class ConversationManager:
         self._errors = 0
         self._last_error: str | None = None
         self._ignore_activity_before = 0.0
+        self._cue_speaking = False
+        self._cue_gate_until = 0.0
+        self._suppressed_utterances: list[float] = []
 
     def start(self) -> None:
         if not self.enabled or (self._thread is not None and self._thread.is_alive()):
@@ -307,18 +323,60 @@ class ConversationManager:
         with self._lock:
             self._transition_listeners.append(listener)
 
-    def add_response_listener(self, listener: Callable[[str, str], None]) -> None:
+    def add_response_listener(self, listener: Callable[[str, str, bool], None]) -> None:
         with self._lock:
             self._response_listeners.append(listener)
 
-    def _publish_response(self, text: str, language: str) -> None:
+    def _publish_response(self, text: str, language: str, final: bool = True) -> None:
         with self._lock:
             listeners = tuple(self._response_listeners)
         for listener in listeners:
             try:
-                listener(text, language)
+                listener(text, language, final)
             except Exception:
                 LOGGER.exception("conversation response listener failed")
+
+    def _open_echo_gate(self) -> None:
+        """Ignore the microphone while a short spoken cue is on the speaker.
+
+        The Pi shares a room with its speaker and has no acoustic echo
+        cancellation, so the VAD hears Miso's own acknowledgement and treats it
+        as a barge-in. Cues are short and never worth interrupting; barge-in
+        during a real answer is left untouched.
+        """
+        with self._lock:
+            self._cue_speaking = True
+            self._cue_gate_until = time.time() + self.echo_guard_seconds
+
+    def _close_echo_gate(self) -> None:
+        with self._lock:
+            self._cue_speaking = False
+            self._cue_gate_until = time.time() + self.echo_guard_seconds
+
+    def _echo_gated_locked(self, occurred_at: float) -> bool:
+        return self._cue_speaking or occurred_at <= self._cue_gate_until
+
+    def _suppress_utterance_locked(self) -> None:
+        # Each suppressed onset consumes the transcript it will produce. The
+        # deadline lets the count self-heal if transcription drops an utterance.
+        self._prune_suppressed_locked()
+        self._suppressed_utterances.append(
+            time.monotonic() + max(5.0, self.echo_guard_seconds * 10)
+        )
+
+    def _prune_suppressed_locked(self) -> None:
+        now = time.monotonic()
+        self._suppressed_utterances = [
+            deadline for deadline in self._suppressed_utterances if deadline > now
+        ]
+
+    def _consume_suppressed(self) -> bool:
+        with self._lock:
+            self._prune_suppressed_locked()
+            if not self._suppressed_utterances:
+                return False
+            self._suppressed_utterances.pop(0)
+            return True
 
     def _transition_locked(self, target: ConversationState, reason: str) -> None:
         previous = self._state
@@ -401,6 +459,8 @@ class ConversationManager:
 
     def _handle_activity(self, activity: SpeechActivity) -> None:
         if activity.kind == "discarded":
+            if self._consume_suppressed():
+                return
             with self._lock:
                 if self._state is ConversationState.TRANSCRIBING:
                     self._active_cancel = None
@@ -416,6 +476,9 @@ class ConversationManager:
             if activity.occurred_at <= self._ignore_activity_before:
                 return
             state = self._state
+            if state in _CUE_STATES and self._echo_gated_locked(activity.occurred_at):
+                self._suppress_utterance_locked()
+                return
         if state in {
             ConversationState.ACKNOWLEDGING,
             ConversationState.ROUTING,
@@ -441,6 +504,9 @@ class ConversationManager:
                     )
 
     def _handle_transcription(self, result: TranscriptionResult) -> None:
+        if self._consume_suppressed():
+            LOGGER.debug("dropped transcript captured from Miso's own cue audio")
+            return
         with self._lock:
             state = self._state
         if state is ConversationState.IDLE:
@@ -581,12 +647,17 @@ class ConversationManager:
                 tools=self.tools.schemas(),
             )
             response: list[str] = []
+            tool_summaries: list[str] = []
             used_tool = False
-            for chunk in self.router.stream(request, cancel, actor=VOICE_ACTOR):
-                if cancel.is_set() or not self._is_current(generation):
-                    raise ProviderCancelled("voice turn was interrupted")
+            partial: list[str] = []
+            for chunk in self._stream_turn(
+                request, cancel, generation, response, partial
+            ):
                 if chunk.text:
                     response.append(chunk.text)
+                    self._publish_response(
+                        "".join(response).strip(), language, False
+                    )
                 if chunk.tool_call is not None:
                     name = chunk.tool_call.get("name")
                     arguments = chunk.tool_call.get("arguments")
@@ -609,12 +680,16 @@ class ConversationManager:
                     used_tool = True
                     if not result.ok and not cancel.is_set():
                         raise ConversationError(result.error or "tool invocation failed")
+                    if result.summary is not None:
+                        tool_summaries.append(result.summary)
                     self._transition_current(
                         generation, ConversationState.ROUTING, "tool completed"
                     )
             if cancel.is_set() or not self._is_current(generation):
                 return
             spoken = "".join(response).strip()
+            if not spoken and tool_summaries:
+                spoken = " ".join(tool_summaries)
             if not spoken:
                 spoken = "Listo." if language == "es" else "Done."
             self.memory.append_event(
@@ -622,7 +697,11 @@ class ConversationManager:
                 kind="message",
                 role="assistant",
                 content=spoken,
-                payload={"source": "voice", "used_tool": used_tool},
+                payload={
+                    "source": "voice",
+                    "used_tool": used_tool,
+                    **({"partial": partial[0]} if partial else {}),
+                },
                 actor=VOICE_ACTOR,
             )
             self._transition_current(
@@ -654,6 +733,31 @@ class ConversationManager:
         except Exception as error:
             if not cancel.is_set() and self._is_current(generation):
                 self._recover(error)
+
+    def _stream_turn(
+        self,
+        request: ChatRequest,
+        cancel: threading.Event,
+        generation: int,
+        produced: list[str],
+        failure: list[str],
+    ):
+        """Yield routed chunks, tolerating a provider that dies mid-answer.
+
+        A small local model can stall or drop the connection after emitting
+        usable text. Re-raising there discards the whole answer and Miso goes
+        silent, so partial text is kept and the reason recorded instead.
+        """
+        try:
+            for chunk in self.router.stream(request, cancel, actor=VOICE_ACTOR):
+                if cancel.is_set() or not self._is_current(generation):
+                    raise ProviderCancelled("voice turn was interrupted")
+                yield chunk
+        except RoutingError as error:
+            if not produced or cancel.is_set() or not self._is_current(generation):
+                raise
+            failure.append(str(error)[:200])
+            LOGGER.warning("speaking partial voice answer: %s", error)
 
     def _start_cue(
         self,
@@ -690,8 +794,12 @@ class ConversationManager:
             if cancel.is_set() or not self._is_current(generation):
                 return
             self._publish_response(text, language)
-            request_id = self.speech.speak(text, language)
-            result = self._wait_for_speech(request_id, cancel)
+            self._open_echo_gate()
+            try:
+                request_id = self.speech.speak(text, language)
+                result = self._wait_for_speech(request_id, cancel)
+            finally:
+                self._close_echo_gate()
             if cancel.is_set() or not self._is_current(generation):
                 return
             if result is None or result.status != "completed":

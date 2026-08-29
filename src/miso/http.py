@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from miso import __version__
 from miso.access import AccessJWTError, AccessJWTVerifier
-from miso.audio import AudioManager
+from miso.audio import AudioManager, PulseProxyBackend
 from miso.calibration import (
     WakeCalibration,
     WakeCalibrationBusy,
@@ -58,6 +58,7 @@ from miso.tools import (
     HouseholdStore,
     ScheduledItemWorker,
     ToolRegistry,
+    WeatherConfig,
     create_runtime_registry,
 )
 from miso.tools.audit import audit_event
@@ -973,6 +974,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             assistant_text: list[str] = []
+            tool_summaries: list[tuple[str, str | None, str | None]] = []
             try:
                 stream = self.miso.router.stream(
                     request,
@@ -1009,6 +1011,10 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         result = self.miso.tool_registry.invoke(
                             name, arguments, cancel_event=cancel, actor=actor
                         )
+                        if result.summary is not None:
+                            tool_summaries.append(
+                                (result.summary, chunk.provider, chunk.route_id)
+                            )
                         encoded_result = result.as_dict()
                         self.miso.memory_store.append_event(
                             conversation_id,
@@ -1026,6 +1032,17 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                                 "route_id": chunk.route_id,
                             }
                         )
+                if not assistant_text and tool_summaries:
+                    summary = " ".join(item[0] for item in tool_summaries)
+                    assistant_text.append(summary)
+                    self._ndjson(
+                        {
+                            "type": "delta",
+                            "text": summary,
+                            "provider": tool_summaries[-1][1],
+                            "route_id": tool_summaries[-1][2],
+                        }
+                    )
                 combined = "".join(assistant_text)
                 if combined:
                     self.miso.memory_store.append_event(
@@ -1277,7 +1294,10 @@ def create_server(
             voice_account_email=settings.google_calendar_voice_email,
         )
     registry = tool_registry or create_runtime_registry(
-        settings.state_dir, settings.database_path, calendar_config
+        settings.state_dir,
+        settings.database_path,
+        calendar_config,
+        WeatherConfig(default_location=settings.weather_default_location),
     )
     registry.audit_sink = LiveAuditSink(registry.audit_sink, live_events)
     registry.add_result_listener(LiveToolResultPublisher(live_events))
@@ -1288,6 +1308,11 @@ def create_server(
     )
     if "developer_command" not in registry.names():
         registry.register(shell.tool_definition())
+    playback_backend = (
+        PulseProxyBackend(settings.audio_playback_proxy)
+        if settings.audio_playback_backend == "pulse"
+        else None
+    )
     audio = audio_manager or AudioManager(
         enabled=settings.audio_enabled,
         capture_card=settings.audio_capture_card,
@@ -1301,6 +1326,7 @@ def create_server(
         reconnect_seconds=settings.audio_reconnect_seconds,
         silence_dbfs=settings.audio_silence_dbfs,
         clipping_ratio=settings.audio_clipping_ratio,
+        playback_backend=playback_backend,
     )
     wake = wake_manager or WakeWordManager(
         enabled=settings.wake_enabled,
@@ -1389,6 +1415,7 @@ def create_server(
         listen_timeout_seconds=settings.conversation_listen_timeout_seconds,
         checkback_timeout_seconds=settings.conversation_checkback_timeout_seconds,
         acknowledgement=settings.conversation_acknowledgement,
+        echo_guard_seconds=settings.conversation_echo_guard_seconds,
     )
     conversation.add_transition_listener(conversation_event_publisher(live_events))
     conversation.add_response_listener(conversation_caption_publisher(live_events))
