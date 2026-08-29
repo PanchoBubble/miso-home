@@ -43,14 +43,16 @@ class Utterance:
 
 @dataclass(frozen=True, slots=True)
 class SpeechActivity:
-    """A VAD edge used to interrupt conversational output before STT finishes."""
+    """A VAD event used to coordinate conversational output with STT."""
 
     kind: str
     occurred_at: float
 
     def __post_init__(self) -> None:
-        if self.kind not in {"started", "ended"}:
-            raise ValueError("speech activity kind must be started or ended")
+        if self.kind not in {"started", "ended", "discarded"}:
+            raise ValueError(
+                "speech activity kind must be started, ended, or discarded"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,10 +535,13 @@ class TranscriptionManager:
             )
             is_active = self.assembler.active
             if is_active != was_active:
+                kind = (
+                    "started"
+                    if is_active
+                    else ("discarded" if utterance is None else "ended")
+                )
                 with self._condition:
-                    self._activity.append(
-                        SpeechActivity("started" if is_active else "ended", time.time())
-                    )
+                    self._activity.append(SpeechActivity(kind, time.time()))
                     self._condition.notify_all()
             if utterance is None:
                 continue

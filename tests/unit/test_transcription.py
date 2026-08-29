@@ -161,8 +161,12 @@ class WhisperCppTranscriberTests(unittest.TestCase):
 class FakeAudio:
     audio_format = AudioFormat(chunk_milliseconds=20)
 
-    def __init__(self) -> None:
-        self.chunks = deque((pcm(4_000), pcm(4_000), pcm(0), pcm(0)))
+    def __init__(self, chunks=None) -> None:
+        self.chunks = deque(
+            (pcm(4_000), pcm(4_000), pcm(0), pcm(0))
+            if chunks is None
+            else chunks
+        )
 
     def read_capture(self, timeout: float | None = None) -> bytes | None:
         if self.chunks:
@@ -225,6 +229,35 @@ class TranscriptionManagerTests(unittest.TestCase):
         status = manager.status()
         self.assertEqual(status["processed"], 1)
         self.assertNotIn("enciende", json.dumps(status))
+
+    def test_reports_short_discarded_utterance_without_transcribing(self) -> None:
+        audio = FakeAudio((pcm(4_000), pcm(0), pcm(0)))
+        manager = TranscriptionManager(
+            enabled=True,
+            audio=audio,
+            transcriber=FakeTranscriber(),
+            detector=EnergySpeechDetector(-40),
+            assembler=UtteranceAssembler(
+                audio.audio_format,
+                minimum_speech_milliseconds=40,
+                end_silence_milliseconds=40,
+                maximum_utterance_milliseconds=1_000,
+                pre_roll_milliseconds=0,
+            ),
+            result_capacity=2,
+        )
+        manager.start()
+        started = manager.get_activity(timeout=1)
+        discarded = manager.get_activity(timeout=1)
+        result = manager.get_result(timeout=0.05)
+        manager.stop()
+
+        self.assertIsNotNone(started)
+        self.assertIsNotNone(discarded)
+        assert started is not None and discarded is not None
+        self.assertEqual((started.kind, discarded.kind), ("started", "discarded"))
+        self.assertIsNone(result)
+        self.assertEqual(manager.status()["processed"], 0)
 
 
 class BenchmarkMetricTests(unittest.TestCase):

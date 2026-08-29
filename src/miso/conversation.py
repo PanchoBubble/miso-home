@@ -385,6 +385,16 @@ class ConversationManager:
         )
 
     def _handle_activity(self, activity: SpeechActivity) -> None:
+        if activity.kind == "discarded":
+            with self._lock:
+                if self._state is ConversationState.TRANSCRIBING:
+                    self._active_cancel = None
+                    self._deadline = time.monotonic() + self.listen_timeout_seconds
+                    self._transition_locked(
+                        ConversationState.LISTENING,
+                        "short utterance discarded",
+                    )
+            return
         if activity.kind != "started":
             return
         with self._lock:

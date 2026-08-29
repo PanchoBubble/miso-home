@@ -113,6 +113,8 @@ class FakeProvider:
 
     def __init__(self) -> None:
         self.fail = False
+        self.block = False
+        self.entered = threading.Event()
 
     def health(self):
         return ProviderHealth(True, "ready", "fake")
@@ -120,6 +122,11 @@ class FakeProvider:
     def stream(self, request, cancel):
         if self.fail:
             raise RuntimeError("provider exploded")
+        if self.block:
+            self.entered.set()
+            cancel.wait(1)
+            if cancel.is_set():
+                return
         latest = request.messages[-1]["content"]
         if "tool" in latest:
             yield ChatChunk(
@@ -279,6 +286,33 @@ class ConversationManagerTests(unittest.TestCase):
             self.assertTrue(speech.cancelled)
             self.assertEqual(speech.calls[-1][1], "Second response")
             self.assertEqual(manager.status()["interruptions"], 1)
+        finally:
+            manager.stop()
+
+    def test_short_discarded_interruption_returns_to_bounded_listening(self) -> None:
+        self.provider.block = True
+        speech = FakeSpeech()
+        manager = self.manager(speech, listen=1)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_result("first request")
+            self.assertTrue(self.provider.entered.wait(1))
+            wait_for(manager, "routing")
+
+            self.source.put_activity("started")
+            wait_for(manager, "transcribing")
+            self.source.put_activity("discarded")
+            wait_for(manager, "listening")
+
+            status = manager.status()
+            self.assertEqual(
+                status["latest_transition"]["reason"],
+                "short utterance discarded",
+            )
+            self.assertEqual(status["errors"], 0)
+            self.assertIsNotNone(status["conversation_id"])
         finally:
             manager.stop()
 
