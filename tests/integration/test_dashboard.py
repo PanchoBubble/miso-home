@@ -226,7 +226,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="rive-face"', content)
         self.assertIn(b'id="fallback-face"', content)
         self.assertIn(b'/vendor/rive/rive.js', content)
-        self.assertIn(b'/companion.js', content)
+        self.assertIn(b'/companion.js?v=11', content)
+        self.assertIn(b'/companion.css?v=11', content)
         self.assertIn(b'id="companion-caption"', content)
         self.assertNotIn(b'https://', content)
 
