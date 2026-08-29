@@ -426,9 +426,19 @@ the detected English or Spanish language. The conversation remains open for a
 follow-up, gives one bilingual check-back cue, and closes with a goodbye after the
 second timeout. Explicit goodbye phrases close it immediately.
 
-VAD speech-onset events are separate from completed transcripts. This lets new
-speech cancel provider work, tool work, synthesis, and ALSA playback promptly,
-then route the interrupting utterance as the next turn.
+VAD speech-onset events are separate from completed transcripts, but a microphone
+onset only starts a turn while Miso is listening or waiting for a follow-up.
+Everywhere else Miso is either speaking or working on a turn, and on shared-room
+hardware the VAD fires on its own speaker and on ordinary noise. Treating those
+as a barge-in cancelled real turns: a request that had already been transcribed
+and routed was destroyed several seconds into generation by an impatient repeat,
+leaving it permanently unanswered. Onsets outside those two states are therefore
+ignored, and the transcript the onset produces is dropped rather than routed as a
+fresh request.
+
+The wake phrase remains the way to interrupt: openWakeWord is far more selective
+than the VAD and does not fire on Miso's own voice or on room noise, so saying it
+cancels whatever is in flight and starts a new turn.
 
 Miso's own audio is an exception. The Pi shares a room with its speaker and has
 no acoustic echo cancellation, so the microphone hears every acknowledgement,
@@ -439,9 +449,7 @@ clears the buffer so only the tail of the phrase is ever heard. Mic-driven
 interruption is therefore ignored while Miso is speaking, plus a short tail, and
 the transcript that onset produces is dropped.
 
-Wake-word barge-in still works throughout: openWakeWord is far more selective
-than the VAD and does not fire on Miso's own voice, so saying the wake phrase
-interrupts an answer as before. Tune the tail with
+Tune the tail with
 `MISO_CONVERSATION_ECHO_GUARD_SECONDS` if the speaker is unusually loud or
 distant. Invalid state transitions
 are rejected, and bounded provider, tool, or speech errors clear the active
