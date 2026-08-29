@@ -18,8 +18,9 @@ text output and completed the tool call in 1.662 s. The 1.7B model had
 model hit the 96-token cap in every case (22.489–27.701 s total), ignored the
 requested concise form, and failed to call the timer tool.
 
-`qwen3:0.6b` remains the routine Pi default because it is the fastest candidate
-and passed the strict tool case. `qwen3:1.7b` remains installed for manual and
-future quality evaluation. `qwen3:4b` is rejected for this CPU-only routing
-profile and was removed after benchmarking. Complex work routes to configured
-LAN Ollama first and hosted GPT second; the Pi remains the offline fallback.
+`qwen3:1.7b` is the production Pi tool model because it passed the strict tool
+case and has more capacity for choosing among Miso's expanding tool families.
+`qwen3:0.6b` remains installed as the faster low-latency recovery option.
+`qwen3:4b` is rejected for this CPU-only routing profile and was removed after
+benchmarking. Requests without a matching local tool prefer hosted GPT, while
+the Pi remains the offline fallback.

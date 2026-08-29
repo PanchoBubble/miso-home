@@ -9,6 +9,7 @@ from miso.config import ConfigError, Settings
 class SettingsTests(unittest.TestCase):
     def test_wake_defaults_match_bundled_model(self) -> None:
         settings = Settings.from_env({})
+        self.assertEqual(settings.ollama_model, "qwen3:1.7b")
         self.assertEqual(settings.wake_threshold, 0.999)
         self.assertEqual(settings.wake_vad_threshold, 0.5)
         self.assertEqual(settings.wake_energy_threshold_dbfs, -60)

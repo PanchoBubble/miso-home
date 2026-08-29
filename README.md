@@ -58,10 +58,10 @@ and 20 GiB so Miso cannot silently consume the media allocation. See
 space thresholds, recovery procedure, and override settings.
 
 The first Pi provider is Ollama on `127.0.0.1:11434`. Its systemd drop-in keeps
-downloaded models under `/var/lib/miso/models/ollama`; the initial deployment
-uses `qwen3:0.6b` as a small ARM64 smoke-test model. Larger-model benchmarking
-and routing are tracked separately because the 0.6B model is useful for proving
-streaming and tool-call mechanics, not for final assistant quality.
+downloaded models under `/var/lib/miso/models/ollama`; the production default is
+`qwen3:1.7b`, selected for greater tool-choice capacity after passing the strict
+ARM64 tool-call benchmark. The faster `qwen3:0.6b` remains installed as a
+low-latency recovery option.
 
 ## Tool security boundary
 

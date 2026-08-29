@@ -227,7 +227,7 @@ class Settings:
             state_dir=Path(source.get("MISO_STATE_DIR", "/var/lib/miso/state")),
             model_dir=model_dir,
             ollama_url=source.get("MISO_OLLAMA_URL", "http://127.0.0.1:11434"),
-            ollama_model=source.get("MISO_OLLAMA_MODEL", "qwen3:0.6b"),
+            ollama_model=source.get("MISO_OLLAMA_MODEL", "qwen3:1.7b"),
             provider_timeout_seconds=provider_timeout,
             log_level=source.get("MISO_LOG_LEVEL", "INFO").upper(),
             lan_ollama_url=source.get("MISO_LAN_OLLAMA_URL", "").strip() or None,
