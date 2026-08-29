@@ -3,6 +3,7 @@
 from miso.providers.base import (
     ChatChunk,
     ChatRequest,
+    GenerationMetrics,
     ModelProvider,
     ProviderCancelled,
     ProviderError,
@@ -16,6 +17,7 @@ from miso.providers.runtime import ProviderSet, create_provider_set
 __all__ = [
     "ChatChunk",
     "ChatRequest",
+    "GenerationMetrics",
     "LanOllamaProvider",
     "ModelProvider",
     "OllamaProvider",

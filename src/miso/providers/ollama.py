@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 from miso.providers.base import (
     ChatChunk,
     ChatRequest,
+    GenerationMetrics,
     ProviderCancelled,
     ProviderError,
     ProviderHealth,
@@ -76,6 +77,31 @@ class _ThinkFilter:
             return ""
         remainder, self._pending = self._pending, ""
         return remainder
+
+
+def _nanoseconds_to_milliseconds(value: object) -> int:
+    return round(value / 1_000_000) if isinstance(value, (int, float)) else 0
+
+
+def _count(value: object) -> int:
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def _metrics(data: Mapping[str, object]) -> GenerationMetrics | None:
+    """Read Ollama's per-request counters from its terminating chunk."""
+    if not any(
+        key in data
+        for key in ("prompt_eval_count", "prompt_eval_duration", "eval_count")
+    ):
+        return None
+    return GenerationMetrics(
+        prompt_tokens=_count(data.get("prompt_eval_count")),
+        prompt_milliseconds=_nanoseconds_to_milliseconds(
+            data.get("prompt_eval_duration")
+        ),
+        generated_tokens=_count(data.get("eval_count")),
+        generation_milliseconds=_nanoseconds_to_milliseconds(data.get("eval_duration")),
+    )
 
 
 class OllamaProvider:
@@ -177,7 +203,7 @@ class OllamaProvider:
                         remainder = think_filter.flush()
                         if remainder:
                             yield ChatChunk(text=remainder)
-                        yield ChatChunk(done=True)
+                        yield ChatChunk(done=True, metrics=_metrics(data))
                         return
         except ProviderError:
             raise

@@ -282,7 +282,9 @@ class ConversationManagerTests(unittest.TestCase):
         finally:
             manager.stop()
 
-    def test_speech_onset_cancels_output_and_routes_barge_in(self) -> None:
+    def test_wake_phrase_interrupts_a_spoken_answer(self) -> None:
+        # Wake-word barge-in survives the echo guard: openWakeWord is far more
+        # selective than the VAD, so it does not fire on Miso's own voice.
         speech = FakeSpeech(blocked_texts={"First response"})
         manager = self.manager(speech)
         manager.start()
@@ -291,18 +293,23 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_result("first request")
             wait_for(manager, "speaking")
-            self.source.put_activity()
-            wait_for(manager, "transcribing")
-            self.source.put_result("second request")
-            wait_for(manager, "follow_up")
+
+            self.source.put_wake()
+            # The fake speech backend completes instantly, so the acknowledging
+            # state is transient; assert the outcome rather than racing it.
+            wait_for(manager, "listening")
 
             self.assertTrue(speech.cancelled)
-            self.assertEqual(speech.calls[-1][1], "Second response")
+            self.assertGreaterEqual(manager.status()["interruptions"], 1)
+            self.assertIn("Yes?", [item[1] for item in speech.calls])
             self.assertEqual(manager.status()["interruptions"], 1)
         finally:
             manager.stop()
 
-    def test_short_discarded_interruption_returns_to_bounded_listening(self) -> None:
+    def test_noise_while_thinking_does_not_cancel_the_turn(self) -> None:
+        # The regression this guards: a mic onset during ROUTING cancelled the
+        # in-flight answer. On a Pi that thinks for seconds, an impatient repeat
+        # or a room noise then left the request permanently unanswered.
         self.provider.block = True
         speech = FakeSpeech()
         manager = self.manager(speech, listen=1)
@@ -315,17 +322,14 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "routing")
 
             self.source.put_activity("started")
-            wait_for(manager, "transcribing")
             self.source.put_activity("discarded")
-            wait_for(manager, "listening")
+            time.sleep(0.2)
+            self.assertEqual(manager.status()["state"], "routing")
+            self.assertEqual(manager.status()["interruptions"], 0)
 
-            status = manager.status()
-            self.assertEqual(
-                status["latest_transition"]["reason"],
-                "short utterance discarded",
-            )
-            self.assertEqual(status["errors"], 0)
-            self.assertIsNotNone(status["conversation_id"])
+            wait_for(manager, "follow_up", timeout=4)
+            self.assertEqual(manager.status()["errors"], 0)
+            self.assertIn("First response", [item[1] for item in speech.calls])
         finally:
             manager.stop()
 
@@ -531,6 +535,30 @@ class ConversationManagerTests(unittest.TestCase):
 
             self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
             self.assertGreaterEqual(manager.status()["errors"], 1)
+        finally:
+            manager.stop()
+
+    def test_mic_hearing_the_answer_does_not_truncate_it(self) -> None:
+        # The regression this guards: the VAD hears Miso's own answer through
+        # the speaker, cancels playback, clears the buffer, and only the tail of
+        # the phrase reaches the listener.
+        speech = FakeSpeech(blocked_texts={"First response"})
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            time.sleep(0.7)
+            self.source.put_result("first request")
+            wait_for(manager, "speaking")
+
+            self.source.put_activity()
+            self.source.put_result("First response")
+            time.sleep(0.25)
+
+            self.assertEqual(manager.status()["state"], "speaking")
+            self.assertEqual(speech.cancelled, [])
+            self.assertEqual(manager.status()["interruptions"], 0)
         finally:
             manager.stop()
 

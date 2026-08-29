@@ -1,0 +1,28 @@
+[Unit]
+Description=Miso Bluetooth speaker reconnect
+After=bluetooth.service
+Wants=bluetooth.service
+ConditionPathExists=/etc/miso/miso-audio.env
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/miso/app
+Environment=PYTHONPATH=/opt/miso/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/miso/miso-audio.env
+ExecStart=/usr/bin/python3 -m miso.bluetooth
+TimeoutStartSec=60
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH

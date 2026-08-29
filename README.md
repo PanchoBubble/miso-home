@@ -111,6 +111,13 @@ strict by default, and progress chunks are emitted before health checks or model
 loading. Household schemas are narrowed to the relevant tool family and omitted
 entirely from unrelated prompts.
 
+Each completed Pi attempt records a `generation` block in
+`routing.jsonl` with prompt tokens, prompt-evaluation milliseconds, generated
+tokens, generation milliseconds, and tokens per second. Prompt and generation
+cost are fixed differently: a slow prompt means too much replayed conversation
+history, a slow generation means the model is too large. Without the split,
+tuning either one is guesswork.
+
 `MISO_ROUTING_ATTEMPT_TIMEOUT` (default 45s) bounds *silence between chunks*,
 not the length of an answer: a small local model may stream for minutes and must
 not be cut off while it is still producing tokens. `MISO_ROUTING_STREAM_TIMEOUT`
@@ -228,6 +235,14 @@ PipeWire/Pulse sink. The assistant therefore never inherits the desktop user's
 session or home access, and a missing Bluetooth sink is reported unavailable
 instead of silently falling back to HDMI. The proxy and playback worker both
 survive late desktop-session startup and rediscover the sink after reconnect.
+
+A `miso-bluetooth.timer` reconnects the configured speaker every two minutes.
+Pulse playback never falls back to another sink, so a speaker that has drifted
+off leaves Miso completely silent: the acknowledgement cue fails, the turn
+errors, and the conversation never reaches its listening state. BlueZ accepts a
+reconnection from a trusted device but does not initiate one. The address is
+derived from `MISO_AUDIO_PLAYBACK_CARD` rather than configured twice, and a
+powered-off speaker exits cleanly so the timer keeps retrying quietly.
 
 Capture and playback use bounded raw S16_LE queues. `/api/status` reports the
 resolved device, connection/reconnection state, buffer overruns, playback
@@ -415,13 +430,18 @@ VAD speech-onset events are separate from completed transcripts. This lets new
 speech cancel provider work, tool work, synthesis, and ALSA playback promptly,
 then route the interrupting utterance as the next turn.
 
-Short spoken cues are an exception. The Pi shares a room with its speaker and
-has no acoustic echo cancellation, so the microphone hears Miso's own "Yes?",
-check-back, and goodbye. Without a guard the VAD treats that as a barge-in,
-transcribes Miso's own words, and routes them as the request, which swallows the
-one the user actually made. Mic input is therefore ignored for the duration of a
-cue plus a short tail, and the transcript that onset produces is dropped.
-Barge-in during a real answer is unaffected. Tune the tail with
+Miso's own audio is an exception. The Pi shares a room with its speaker and has
+no acoustic echo cancellation, so the microphone hears every acknowledgement,
+check-back, goodbye, and spoken answer. Without a guard the VAD treats that as a
+barge-in: during a cue it transcribes Miso's own words and routes them as the
+request, swallowing the real one, and during an answer it cancels playback and
+clears the buffer so only the tail of the phrase is ever heard. Mic-driven
+interruption is therefore ignored while Miso is speaking, plus a short tail, and
+the transcript that onset produces is dropped.
+
+Wake-word barge-in still works throughout: openWakeWord is far more selective
+than the VAD and does not fire on Miso's own voice, so saying the wake phrase
+interrupts an answer as before. Tune the tail with
 `MISO_CONVERSATION_ECHO_GUARD_SECONDS` if the speaker is unusually loud or
 distant. Invalid state transitions
 are rejected, and bounded provider, tool, or speech errors clear the active

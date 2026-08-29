@@ -6,6 +6,8 @@ TARGET_ROOT="${TARGET_ROOT:-/opt/miso/app}"
 UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso.service"
 AUDIO_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-audio-playback.service"
 AUDIO_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-audio.env"
+BLUETOOTH_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-bluetooth.service"
+BLUETOOTH_TIMER_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-bluetooth.timer"
 MDNS_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-mdns.service"
 MDNS_PUBLISH_SOURCE="${SOURCE_ROOT}/ops/bin/miso-mdns-publish.sh"
 KIOSK_LAUNCH_SOURCE="${SOURCE_ROOT}/ops/bin/miso-kiosk-launch.sh"
@@ -32,6 +34,8 @@ done
 [[ -f "${UNIT_SOURCE}" ]] || fail "systemd unit not found: ${UNIT_SOURCE}"
 [[ -f "${AUDIO_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${AUDIO_UNIT_SOURCE}"
 [[ -f "${AUDIO_ENV_SOURCE}" ]] || fail "audio environment not found: ${AUDIO_ENV_SOURCE}"
+[[ -f "${BLUETOOTH_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${BLUETOOTH_UNIT_SOURCE}"
+[[ -f "${BLUETOOTH_TIMER_SOURCE}" ]] || fail "systemd timer not found: ${BLUETOOTH_TIMER_SOURCE}"
 [[ -f "${MDNS_UNIT_SOURCE}" ]] || fail "systemd unit not found: ${MDNS_UNIT_SOURCE}"
 [[ -f "${MDNS_PUBLISH_SOURCE}" ]] || fail "helper not found: ${MDNS_PUBLISH_SOURCE}"
 [[ -f "${KIOSK_LAUNCH_SOURCE}" ]] || fail "helper not found: ${KIOSK_LAUNCH_SOURCE}"
@@ -62,6 +66,10 @@ install -o root -g root -m 0644 "${UNIT_SOURCE}" \
   /etc/systemd/system/miso.service
 install -o root -g root -m 0644 "${AUDIO_UNIT_SOURCE}" \
   /etc/systemd/system/miso-audio-playback.service
+install -o root -g root -m 0644 "${BLUETOOTH_UNIT_SOURCE}" \
+  /etc/systemd/system/miso-bluetooth.service
+install -o root -g root -m 0644 "${BLUETOOTH_TIMER_SOURCE}" \
+  /etc/systemd/system/miso-bluetooth.timer
 install -o root -g root -m 0644 "${MDNS_UNIT_SOURCE}" \
   /etc/systemd/system/miso-mdns.service
 install -o root -g root -m 0644 "${TUNNEL_UNIT_SOURCE}" \
@@ -109,8 +117,10 @@ PYTHONPATH="${TARGET_ROOT}/src" PYTHONDONTWRITEBYTECODE=1 \
   python3 -m compileall -q "${TARGET_ROOT}/src"
 systemctl daemon-reload
 systemctl enable miso-audio-playback.service
+systemctl enable miso-bluetooth.timer
 systemctl enable miso.service
 systemctl enable miso-mdns.service
+systemctl restart miso-bluetooth.timer
 systemctl restart miso-audio-playback.service
 systemctl restart miso.service
 systemctl restart miso-mdns.service

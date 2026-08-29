@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic Miso Bluetooth speaker reconnect
+ConditionPathExists=/etc/miso/miso-audio.env
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=miso-bluetooth.service
+
+[Install]
+WantedBy=timers.target

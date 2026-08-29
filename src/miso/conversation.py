@@ -150,11 +150,29 @@ _TRANSITIONS: dict[ConversationState, frozenset[ConversationState]] = {
 }
 
 
-_CUE_STATES = frozenset(
+# Every state in which Miso is producing audio of its own. The Pi shares a room
+# with its speaker and has no acoustic echo cancellation, so the VAD hears Miso
+# and reports a barge-in. Interrupting mid-answer clears the playback buffer and
+# leaves only the tail audible, so all self-audio is guarded. Wake-word barge-in
+# is unaffected: openWakeWord is far more selective than the VAD, so saying the
+# wake phrase still interrupts.
+_OUTPUT_STATES = frozenset(
     {
         ConversationState.ACKNOWLEDGING,
+        ConversationState.SPEAKING,
         ConversationState.CHECKING_BACK,
         ConversationState.GOODBYE,
+    }
+)
+
+# The only states in which a microphone onset means the user is addressing Miso.
+# Everywhere else Miso is speaking or working, and on this hardware the VAD
+# fires on its own speaker and on room noise, so treating an onset as a barge-in
+# cancelled real turns mid-answer. The wake phrase stays the way to interrupt.
+_VOICE_ADDRESSABLE = frozenset(
+    {
+        ConversationState.LISTENING,
+        ConversationState.FOLLOW_UP,
     }
 )
 
@@ -337,13 +355,7 @@ class ConversationManager:
                 LOGGER.exception("conversation response listener failed")
 
     def _open_echo_gate(self) -> None:
-        """Ignore the microphone while a short spoken cue is on the speaker.
-
-        The Pi shares a room with its speaker and has no acoustic echo
-        cancellation, so the VAD hears Miso's own acknowledgement and treats it
-        as a barge-in. Cues are short and never worth interrupting; barge-in
-        during a real answer is left untouched.
-        """
+        """Ignore the microphone while Miso's own audio is on the speaker."""
         with self._lock:
             self._cue_speaking = True
             self._cue_gate_until = time.time() + self.echo_guard_seconds
@@ -476,32 +488,20 @@ class ConversationManager:
             if activity.occurred_at <= self._ignore_activity_before:
                 return
             state = self._state
-            if state in _CUE_STATES and self._echo_gated_locked(activity.occurred_at):
+            if state not in _VOICE_ADDRESSABLE:
+                # Miso is either speaking or working on a turn. A microphone
+                # onset here is its own echo, room noise, or an impatient
+                # repeat, and destroying the in-flight answer for any of those
+                # leaves the request permanently unanswered. Suppress the
+                # transcript this onset will produce so it is never routed as a
+                # fresh request either.
                 self._suppress_utterance_locked()
                 return
-        if state in {
-            ConversationState.ACKNOWLEDGING,
-            ConversationState.ROUTING,
-            ConversationState.USING_TOOL,
-            ConversationState.SPEAKING,
-            ConversationState.CHECKING_BACK,
-            ConversationState.GOODBYE,
-        }:
-            self._cancel_active()
-            with self._lock:
-                if self._state is state:
-                    self._interruptions += 1
-                    self._deadline = None
-                    self._transition_locked(
-                        ConversationState.TRANSCRIBING, "speech interrupted output"
-                    )
-        elif state in {ConversationState.LISTENING, ConversationState.FOLLOW_UP}:
-            with self._lock:
-                if self._state is state:
-                    self._deadline = None
-                    self._transition_locked(
-                        ConversationState.TRANSCRIBING, "speech detected"
-                    )
+            if self._state is state:
+                self._deadline = None
+                self._transition_locked(
+                    ConversationState.TRANSCRIBING, "speech detected"
+                )
 
     def _handle_transcription(self, result: TranscriptionResult) -> None:
         if self._consume_suppressed():
@@ -708,8 +708,12 @@ class ConversationManager:
                 generation, ConversationState.SPEAKING, "response ready"
             )
             self._publish_response(spoken, language)
-            request_id = self.speech.speak(spoken, language)
-            result = self._wait_for_speech(request_id, cancel)
+            self._open_echo_gate()
+            try:
+                request_id = self.speech.speak(spoken, language)
+                result = self._wait_for_speech(request_id, cancel)
+            finally:
+                self._close_echo_gate()
             if (
                 result is not None
                 and result.status == "completed"

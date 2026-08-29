@@ -15,6 +15,7 @@ from miso.identity import Actor, VOICE_ACTOR
 from miso.providers import (
     ChatChunk,
     ChatRequest,
+    GenerationMetrics,
     ModelProvider,
     ProviderCancelled,
     ProviderError,
@@ -313,11 +314,13 @@ class ProviderRouter:
                     raise ProviderError(f"health:{health.detail}")
                 yield self._progress(decision, f"Using {provider_name}", provider_name)
                 completed = False
+                metrics = None
                 for chunk in self._bounded_stream(provider, routed_request, cancel):
                     if chunk.text or chunk.tool_call is not None:
                         output_started = True
                     if chunk.done:
                         completed = True
+                        metrics = chunk.metrics
                     yield replace(
                         chunk,
                         provider=provider_name,
@@ -331,6 +334,7 @@ class ProviderRouter:
                     attempt_started,
                     "completed",
                     None,
+                    metrics,
                 )
                 self._record_finish(
                     decision,
@@ -546,6 +550,7 @@ class ProviderRouter:
         started: float,
         status: str,
         reason: str | None,
+        metrics: GenerationMetrics | None = None,
     ) -> None:
         self.audit_sink.record(
             audit_event(
@@ -555,6 +560,7 @@ class ProviderRouter:
                 status=status,
                 latency_ms=max(0, round((time.monotonic() - started) * 1000)),
                 reason=reason,
+                generation=None if metrics is None else metrics.as_dict(),
                 actor=decision.actor_id,
                 actor_source=decision.actor_source,
             )
