@@ -181,3 +181,79 @@ class OllamaThinkRetryTests(unittest.TestCase):
                     )
                 )
         self.assertEqual(len(calls), 1)
+
+
+class OllamaJsonCompletionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.provider = OllamaProvider("http://127.0.0.1:11434", "qwen3:1.7b", 120)
+
+    def test_constrained_request_is_capped_and_non_streaming(self) -> None:
+        sent = []
+
+        def fake_urlopen(request, timeout=None):
+            sent.append((json.loads(request.data), timeout))
+            return FakeResponse(
+                json.dumps(
+                    {"message": {"content": '{"tool":"timer_list","arguments":{}}'}}
+                ).encode()
+            )
+
+        with patch("miso.providers.ollama.urlopen", fake_urlopen):
+            output = self.provider.complete_json(
+                "pick a tool", "how long left", max_tokens=40, timeout_seconds=6
+            )
+
+        payload, timeout = sent[0]
+        self.assertEqual(output, '{"tool":"timer_list","arguments":{}}')
+        self.assertIs(payload["stream"], False)
+        self.assertEqual(payload["format"], "json")
+        self.assertEqual(payload["options"]["num_predict"], 40)
+        self.assertEqual(payload["options"]["temperature"], 0)
+        self.assertEqual(timeout, 6)
+
+    def test_inline_reasoning_is_stripped_from_the_selection(self) -> None:
+        def fake_urlopen(request, timeout=None):
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "message": {
+                            "content": '<think>hmm</think>{"tool":null}',
+                        }
+                    }
+                ).encode()
+            )
+
+        with patch("miso.providers.ollama.urlopen", fake_urlopen):
+            self.assertEqual(
+                self.provider.complete_json("pick", "hello"), '{"tool":null}'
+            )
+
+    def test_rejected_think_field_is_retried_without_it(self) -> None:
+        sent = []
+
+        def fake_urlopen(request, timeout=None):
+            sent.append(json.loads(request.data))
+            if len(sent) == 1:
+                raise HTTPError(
+                    request.full_url, 400, "does not support thinking", {}, None
+                )
+            return FakeResponse(json.dumps({"message": {"content": "{}"}}).encode())
+
+        with patch("miso.providers.ollama.urlopen", fake_urlopen):
+            self.assertEqual(self.provider.complete_json("pick", "hello"), "{}")
+        self.assertEqual(len(sent), 2)
+        self.assertNotIn("think", sent[1])
+
+    def test_transport_failure_is_a_bounded_provider_error(self) -> None:
+        def fake_urlopen(request, timeout=None):
+            raise OSError("connection refused")
+
+        with patch("miso.providers.ollama.urlopen", fake_urlopen):
+            with self.assertRaises(ProviderError):
+                self.provider.complete_json("pick", "hello")
+
+    def test_pre_cancelled_selection_never_dispatches(self) -> None:
+        cancelled = Event()
+        cancelled.set()
+        with self.assertRaises(ProviderCancelled):
+            self.provider.complete_json("pick", "hello", cancel=cancelled)

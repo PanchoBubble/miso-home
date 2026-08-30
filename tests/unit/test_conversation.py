@@ -191,7 +191,15 @@ class ConversationManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def manager(self, speech=None, listen=1, checkback=1, tools=None, fast_lane=None):
+    def manager(
+        self,
+        speech=None,
+        listen=1,
+        checkback=1,
+        tools=None,
+        fast_lane=None,
+        tool_picker=None,
+    ):
         router = ProviderRouter(
             ProviderSet(pi=self.provider, lan=None, hosted=None), self.audit
         )
@@ -204,12 +212,53 @@ class ConversationManagerTests(unittest.TestCase):
             speech=speech or FakeSpeech(),
             memory=self.store,
             fast_lane=fast_lane,
+            tool_picker=tool_picker,
             audit_sink=self.audit,
             system_prompt="You are Miso.",
             wake_phrase="Miso",
             listen_timeout_seconds=listen,
             checkback_timeout_seconds=checkback,
         )
+
+    def test_tool_picker_answers_when_the_fast_lane_misses(self) -> None:
+        from miso.intake import FastLane
+        from miso.toolpick import ToolPicker
+        from miso.tools import register_household_tools
+
+        class StubCompletion:
+            def complete_json(self, system, user, **_options) -> str:
+                return '{"tool": "timer_create", "arguments": {"duration_seconds": 300}}'
+
+        registry = ToolRegistry(self.audit)
+        register_household_tools(
+            registry, Path(self.temporary.name) / "picker.sqlite3"
+        )
+        self.provider.fail = True
+        speech = FakeSpeech()
+        manager = self.manager(
+            speech,
+            tools=registry,
+            fast_lane=FastLane(registry, self.audit),
+            tool_picker=ToolPicker(registry, StubCompletion(), self.audit),
+        )
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, get a countdown going for five minutes")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual(
+                [item[1] for item in speech.calls],
+                ["Yes?", "Timer set for 5 minutes."],
+            )
+            picks = [
+                event for event in self.audit.events() if event["event"] == "tool_pick"
+            ]
+            self.assertEqual([event["status"] for event in picks], ["picked"])
+        finally:
+            manager.stop()
 
     def test_fast_lane_answers_without_consulting_a_provider(self) -> None:
         from miso.intake import FastLane

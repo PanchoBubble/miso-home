@@ -53,6 +53,9 @@ class Settings:
     routing_stream_timeout_seconds: float = 300.0
     routing_health_cache_seconds: float = 20.0
     fast_lane_enabled: bool = True
+    tool_picker_enabled: bool = True
+    tool_picker_max_tokens: int = 40
+    tool_picker_timeout_seconds: float = 6.0
     dashboard_token: str | None = field(default=None, repr=False)
     dashboard_email: str = "local@miso.invalid"
     access_team_domain: str | None = None
@@ -164,6 +167,15 @@ class Settings:
         except ValueError as error:
             raise ConfigError("MISO routing timeouts must be numeric") from error
         try:
+            tool_picker_max_tokens = int(
+                source.get("MISO_TOOL_PICKER_MAX_TOKENS", "40")
+            )
+            tool_picker_timeout = float(
+                source.get("MISO_TOOL_PICKER_TIMEOUT_SECONDS", "6")
+            )
+        except ValueError as error:
+            raise ConfigError("MISO tool picker limits must be numeric") from error
+        try:
             audio_device_index = int(source.get("MISO_AUDIO_DEVICE_INDEX", "0"))
             audio_sample_rate = int(source.get("MISO_AUDIO_SAMPLE_RATE", "16000"))
             audio_playback_sample_rate = int(
@@ -265,6 +277,12 @@ class Settings:
                 source.get("MISO_FAST_LANE_ENABLED", "true"),
                 "MISO_FAST_LANE_ENABLED",
             ),
+            tool_picker_enabled=_boolean(
+                source.get("MISO_TOOL_PICKER_ENABLED", "true"),
+                "MISO_TOOL_PICKER_ENABLED",
+            ),
+            tool_picker_max_tokens=tool_picker_max_tokens,
+            tool_picker_timeout_seconds=tool_picker_timeout,
             dashboard_token=source.get("MISO_DASHBOARD_TOKEN", "").strip() or None,
             dashboard_email=_email(
                 source.get("MISO_DASHBOARD_EMAIL", "local@miso.invalid"),
@@ -501,6 +519,12 @@ class Settings:
         if not 0 <= self.routing_health_cache_seconds <= 300:
             raise ConfigError(
                 "MISO_ROUTING_HEALTH_CACHE_SECONDS must be between 0 and 300"
+            )
+        if not 0 < self.tool_picker_max_tokens <= 256:
+            raise ConfigError("MISO_TOOL_PICKER_MAX_TOKENS must be between 1 and 256")
+        if not 0 < self.tool_picker_timeout_seconds <= 60:
+            raise ConfigError(
+                "MISO_TOOL_PICKER_TIMEOUT_SECONDS must be between 0 and 60"
             )
         if self.host not in {"127.0.0.1", "::1", "localhost"} and not self.dashboard_token:
             raise ConfigError("MISO_DASHBOARD_TOKEN is required for a non-loopback host")
