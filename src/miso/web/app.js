@@ -72,6 +72,7 @@ function providerLabel(name) {
     "pi-ollama": "Pi Ollama",
     "lan-ollama": "LAN Ollama",
     "hosted-gpt": "Hosted GPT",
+    "codex-cli": "Codex CLI",
   }[name] || name;
 }
 

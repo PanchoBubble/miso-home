@@ -99,13 +99,24 @@ with `MISO_OPENAI_MODEL`. Put these values in root-owned `/etc/miso/miso.env`
 `store: false`, translate strict tool schemas to function definitions, and do
 not include credentials in request bodies or settings representations.
 
+The Codex CLI can act as a fourth provider once the owner has installed it and
+run `codex login` on the machine. Set `MISO_CODEX_CLI_ENABLED=true` to add it;
+`MISO_CODEX_CLI_BINARY` (default `codex`) and `MISO_CODEX_CLI_MODEL` (default:
+whatever the CLI is configured to use) tune the invocation. Miso shells out to
+`codex exec --json` and reads its event stream; it never reads or reuses the
+credentials the CLI stores. Every run is pinned to `--sandbox read-only` inside
+a throwaway empty directory with an answer-only prompt, so a spoken question
+cannot reach the host filesystem. When the binary is absent or nobody is logged
+in, health reports `binary_not_found` or `not_authenticated` and the router
+skips the tier instead of stalling the lane.
+
 Message intake is two-tiered. A deterministic fast lane (`intake.py`) matches
 common bilingual household intents (timers, shopping list, weather) with strict
 parsers and invokes the tool directly, answering in milliseconds without any
 model; an ambiguous parse always falls through rather than guessing arguments.
 It can be disabled with `MISO_FAST_LANE_ENABLED=false`. Everything else goes to
-the model lane, which always prefers hosted GPT, then LAN Ollama, keeping the
-Pi model only as the offline fallback of last resort. Positive provider health
+the model lane, which always prefers hosted GPT, then the Codex CLI, then LAN
+Ollama, keeping the Pi model only as the offline fallback of last resort. Positive provider health
 verdicts are cached (`MISO_ROUTING_HEALTH_CACHE_SECONDS`, default 20, `0`
 disables) so repeat turns start streaming immediately; a mid-stream failure
 evicts the cached verdict and an unavailable verdict is never cached. Health
