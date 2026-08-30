@@ -29,9 +29,9 @@ class EventSource:
         self.activity = deque()
         self.condition = threading.Condition()
 
-    def put_wake(self) -> None:
+    def put_wake(self, source: str = "model") -> None:
         with self.condition:
-            self.events.append(WakeEvent("Miso", 1.0, time.time()))
+            self.events.append(WakeEvent("Miso", 1.0, time.time(), source=source))
             self.condition.notify_all()
 
     def activate(self, event: WakeEvent) -> None:
@@ -752,6 +752,66 @@ class ConversationManagerTests(unittest.TestCase):
 
             self.assertEqual(manager.status()["turns"], 0)
             self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+        finally:
+            manager.stop()
+
+    def test_button_talk_opens_listening_without_an_acknowledgement(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            started = time.monotonic()
+            self.source.put_wake(source="button")
+            wait_for(manager, "listening")
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(speech.calls, [])
+            self.assertLess(elapsed, 0.3)
+            latest = manager.status()["latest_transition"]
+            self.assertEqual(latest["previous"], "idle")
+            self.assertEqual(latest["reason"], "button talk")
+        finally:
+            manager.stop()
+
+    def test_button_talk_still_routes_the_utterance_it_opened(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake(source="button")
+            wait_for(manager, "listening")
+            self.source.put_result("first request")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual([item[1] for item in speech.calls], ["First response"])
+        finally:
+            manager.stop()
+
+    def test_interrupt_halts_a_spoken_answer_and_returns_to_idle(self) -> None:
+        speech = FakeSpeech(blocked_texts={"First response"})
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_result("first request")
+            wait_for(manager, "speaking")
+
+            self.assertTrue(manager.interrupt("button stop"))
+            wait_for(manager, "idle")
+
+            self.assertTrue(speech.cancelled)
+            self.assertEqual(manager.status()["interruptions"], 1)
+            self.assertIsNone(manager.status()["conversation_id"])
+        finally:
+            manager.stop()
+
+    def test_interrupt_reports_that_an_idle_assistant_had_nothing_to_stop(self) -> None:
+        manager = self.manager()
+        manager.start()
+        try:
+            self.assertFalse(manager.interrupt("button stop"))
+            self.assertEqual(manager.status()["interruptions"], 0)
         finally:
             manager.stop()
 

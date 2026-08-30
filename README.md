@@ -368,6 +368,39 @@ See `docs/miso-wakeword-benchmark.md` for bilingual training guidance, the
 labeled-WAV manifest, repeatable false-activation/miss scoring, tuning targets,
 and the outstanding physical-microphone acceptance gate.
 
+## BMO talk and stop buttons
+
+Two momentary buttons on the enclosure give Miso a physical control surface.
+The talk button publishes a wake event with `source=button` into the same queue
+openWakeWord publishes to, so it reuses the whole turn pipeline, but the
+conversation skips the spoken acknowledgement and opens listening directly: a
+press is already an unambiguous address, and speaking "Yes?" first would put a
+second of synthesis and playback between the press and the open microphone. The
+stop button cancels the in-flight turn and clears playback, exactly as a
+wake-phrase barge-in does. Both presses are audited with `actor_source=button`.
+
+Wire each button between its BCM pin and a ground pin; the internal pull-up
+means no external resistor. Defaults are BCM 23 (talk, header pin 16) and BCM 24
+(stop, header pin 18), both next to ground on header pins 14 and 20 and clear of
+the I2C, SPI, UART, and display pins. Install `python3-gpiozero` and
+`python3-lgpio` on the Pi, then set:
+
+```text
+MISO_BUTTONS_ENABLED=true
+MISO_BUTTON_TALK_PIN=23
+MISO_BUTTON_STOP_PIN=24
+MISO_BUTTON_PULL_UP=true
+MISO_BUTTON_BOUNCE_MILLISECONDS=50
+MISO_BUTTON_HOLD_SECONDS=1.0
+```
+
+gpiozero is not a package dependency: it is imported when the buttons start, and
+its absence, or absent GPIO hardware, disables the feature with a warning
+instead of failing the service. Long press is reserved for hold-to-talk and is
+not yet active, but both edges and the hold threshold are already bound so
+enabling it needs no rewiring. See `docs/miso-bmo-buttons.md` for the wiring
+table, the pin choice, and the long-press plan.
+
 ## Offline English-Spanish transcription
 
 Install the pinned whisper.cpp build and selected multilingual model on the Pi,

@@ -7,7 +7,7 @@ Wants=miso-audio-playback.service
 Type=simple
 User=miso
 Group=miso
-SupplementaryGroups=audio
+SupplementaryGroups=audio gpio
 WorkingDirectory=/opt/miso/app
 Environment=PYTHONPATH=/opt/miso/app/src
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -24,6 +24,7 @@ EnvironmentFile=-/etc/miso/miso-audio.env
 EnvironmentFile=-/etc/miso/miso-stt.env
 EnvironmentFile=-/etc/miso/miso-tts.env
 EnvironmentFile=-/etc/miso/miso-wake.env
+EnvironmentFile=-/etc/miso/miso-buttons.env
 EnvironmentFile=-/etc/miso/miso-conversation.env
 EnvironmentFile=-/etc/miso/miso-calendar.env
 EnvironmentFile=-/etc/miso/miso-display.env
@@ -41,6 +42,12 @@ NoNewPrivileges=true
 PrivateDevices=false
 DevicePolicy=closed
 DeviceAllow=char-alsa rw
+# The BMO talk and stop buttons. gpiozero reaches the header through a
+# character device; the exact node differs between Pi 4 and Pi 5, so both
+# the chip class and the memory-mapped nodes are allowed.
+DeviceAllow=char-gpiochip rw
+DeviceAllow=/dev/gpiomem rw
+DeviceAllow=/dev/gpiomem0 rw
 PrivateTmp=true
 ProtectControlGroups=true
 ProtectHome=true

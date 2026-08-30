@@ -24,6 +24,7 @@ from miso.calibration import (
     WakeCalibrationComplete,
     WakeCalibrationError,
 )
+from miso.buttons import ButtonManager, ButtonRouter
 from miso.config import Settings
 from miso.conversation import ConversationManager
 from miso.intake import FastLane, guess_language
@@ -131,6 +132,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         wake_manager: WakeWordManager,
         wake_calibration: WakeCalibration,
         conversation_manager: ConversationManager,
+        button_manager: ButtonManager,
         live_events: LiveEventStore,
         identity_policy: HouseholdIdentityPolicy,
         access_verifier: AccessJWTVerifier | None,
@@ -151,6 +153,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.wake_manager = wake_manager
         self.wake_calibration = wake_calibration
         self.conversation_manager = conversation_manager
+        self.button_manager = button_manager
         self.fast_lane = fast_lane
         self.tool_picker = tool_picker
         self.live_events = live_events
@@ -181,9 +184,11 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.transcription_manager.start()
         self.speech_manager.start()
         self.conversation_manager.start()
+        self.button_manager.start()
         try:
             super().serve_forever(poll_interval)
         finally:
+            self.button_manager.stop()
             self.conversation_manager.stop()
             self.speech_manager.stop()
             self.transcription_manager.stop()
@@ -192,6 +197,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
             self.scheduled_worker.stop()
 
     def server_close(self) -> None:
+        self.button_manager.stop()
         self.conversation_manager.stop()
         self.speech_manager.stop()
         self.transcription_manager.stop()
@@ -519,6 +525,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     "transcription": self.miso.transcription_manager.status(),
                     "speech": self.miso.speech_manager.status(),
                     "conversation": self.miso.conversation_manager.status(),
+                    "buttons": self.miso.button_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
                 },
             )
@@ -1401,6 +1408,7 @@ def create_server(
     wake_manager: WakeWordManager | None = None,
     wake_calibration: WakeCalibration | None = None,
     conversation_manager: ConversationManager | None = None,
+    button_manager: ButtonManager | None = None,
     access_verifier: AccessJWTVerifier | None = None,
 ) -> MisoHTTPServer:
     identity_policy = HouseholdIdentityPolicy(settings.dashboard_email)
@@ -1572,6 +1580,22 @@ def create_server(
         echo_guard_seconds=settings.conversation_echo_guard_seconds,
         echo_memory_seconds=settings.conversation_echo_memory_seconds,
     )
+    buttons = button_manager or ButtonManager(
+        enabled=settings.buttons_enabled,
+        router=ButtonRouter(
+            wake=wake,
+            conversation=conversation,
+            audit_sink=registry.audit_sink,
+            wake_phrase=settings.wake_phrase,
+            debounce_seconds=settings.button_bounce_milliseconds / 1000,
+            hold_seconds=settings.button_hold_seconds,
+        ),
+        talk_pin=settings.button_talk_pin,
+        stop_pin=settings.button_stop_pin,
+        pull_up=settings.button_pull_up,
+        bounce_seconds=settings.button_bounce_milliseconds / 1000,
+        hold_seconds=settings.button_hold_seconds,
+    )
     conversation.add_transition_listener(conversation_event_publisher(live_events))
     conversation.add_response_listener(conversation_caption_publisher(live_events))
     conversation.add_transcript_listener(user_transcript_publisher(live_events))
@@ -1592,6 +1616,7 @@ def create_server(
         wake_manager=wake,
         wake_calibration=calibration,
         conversation_manager=conversation,
+        button_manager=buttons,
         live_events=live_events,
         identity_policy=identity_policy,
         access_verifier=access_verifier,

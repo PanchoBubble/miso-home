@@ -323,6 +323,44 @@ class SettingsTests(unittest.TestCase):
                     }
                 ).validate_runtime_paths()
 
+    def test_button_defaults_are_disabled_on_free_header_pins(self) -> None:
+        settings = Settings.from_env({})
+        self.assertFalse(settings.buttons_enabled)
+        self.assertEqual(settings.button_talk_pin, 23)
+        self.assertEqual(settings.button_stop_pin, 24)
+        self.assertTrue(settings.button_pull_up)
+        self.assertEqual(settings.button_bounce_milliseconds, 50)
+        self.assertEqual(settings.button_hold_seconds, 1.0)
+
+    def test_buttons_are_configurable(self) -> None:
+        settings = Settings.from_env(
+            {
+                "MISO_BUTTONS_ENABLED": "true",
+                "MISO_BUTTON_TALK_PIN": "5",
+                "MISO_BUTTON_STOP_PIN": "6",
+                "MISO_BUTTON_PULL_UP": "false",
+                "MISO_BUTTON_BOUNCE_MILLISECONDS": "80",
+                "MISO_BUTTON_HOLD_SECONDS": "0.75",
+            }
+        )
+        self.assertTrue(settings.buttons_enabled)
+        self.assertEqual(settings.button_talk_pin, 5)
+        self.assertEqual(settings.button_stop_pin, 6)
+        self.assertFalse(settings.button_pull_up)
+        self.assertEqual(settings.button_bounce_milliseconds, 80)
+        self.assertEqual(settings.button_hold_seconds, 0.75)
+
+    def test_unusable_button_pins_are_rejected(self) -> None:
+        for environment, message in (
+            ({"MISO_BUTTON_TALK_PIN": "40"}, "BCM pin between 0 and 27"),
+            ({"MISO_BUTTON_STOP_PIN": "23"}, "must differ"),
+            ({"MISO_BUTTON_BOUNCE_MILLISECONDS": "0"}, "between 1 and 1000"),
+            ({"MISO_BUTTON_HOLD_SECONDS": "30"}, "between 0.2 and 10"),
+        ):
+            with self.subTest(environment=environment):
+                with self.assertRaisesRegex(ConfigError, message):
+                    Settings.from_env(environment)
+
 
 if __name__ == "__main__":
     unittest.main()

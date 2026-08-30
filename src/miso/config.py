@@ -100,6 +100,12 @@ class Settings:
     wake_cooldown_seconds: float = 2.0
     wake_result_capacity: int = 16
     display_wake_path: Path | None = None
+    buttons_enabled: bool = False
+    button_talk_pin: int = 23
+    button_stop_pin: int = 24
+    button_pull_up: bool = True
+    button_bounce_milliseconds: int = 50
+    button_hold_seconds: float = 1.0
     stt_enabled: bool = False
     stt_executable: Path = Path("/usr/local/bin/whisper-cli")
     stt_model: Path = Path("/var/lib/miso/models/whisper/ggml-tiny.bin")
@@ -216,6 +222,14 @@ class Settings:
             )
             wake_result_capacity = int(
                 source.get("MISO_WAKE_RESULT_CAPACITY", "16")
+            )
+            button_talk_pin = int(source.get("MISO_BUTTON_TALK_PIN", "23"))
+            button_stop_pin = int(source.get("MISO_BUTTON_STOP_PIN", "24"))
+            button_bounce_milliseconds = int(
+                source.get("MISO_BUTTON_BOUNCE_MILLISECONDS", "50")
+            )
+            button_hold_seconds = float(
+                source.get("MISO_BUTTON_HOLD_SECONDS", "1.0")
             )
             stt_threads = int(source.get("MISO_STT_THREADS", "4"))
             stt_timeout_seconds = float(source.get("MISO_STT_TIMEOUT_SECONDS", "45"))
@@ -402,6 +416,16 @@ class Settings:
                 if source.get("MISO_DISPLAY_WAKE_PATH", "").strip()
                 else None
             ),
+            buttons_enabled=_boolean(
+                source.get("MISO_BUTTONS_ENABLED", "false"), "MISO_BUTTONS_ENABLED"
+            ),
+            button_talk_pin=button_talk_pin,
+            button_stop_pin=button_stop_pin,
+            button_pull_up=_boolean(
+                source.get("MISO_BUTTON_PULL_UP", "true"), "MISO_BUTTON_PULL_UP"
+            ),
+            button_bounce_milliseconds=button_bounce_milliseconds,
+            button_hold_seconds=button_hold_seconds,
             stt_enabled=_boolean(
                 source.get("MISO_STT_ENABLED", "false"), "MISO_STT_ENABLED"
             ),
@@ -694,6 +718,22 @@ class Settings:
             self.audio_sample_rate != 16_000 or self.audio_channels != 1
         ):
             raise ConfigError("openWakeWord requires mono MISO_AUDIO_SAMPLE_RATE=16000")
+        for name, pin in (
+            ("MISO_BUTTON_TALK_PIN", self.button_talk_pin),
+            ("MISO_BUTTON_STOP_PIN", self.button_stop_pin),
+        ):
+            if not 0 <= pin <= 27:
+                raise ConfigError(f"{name} must be a BCM pin between 0 and 27")
+        if self.button_talk_pin == self.button_stop_pin:
+            raise ConfigError(
+                "MISO_BUTTON_TALK_PIN and MISO_BUTTON_STOP_PIN must differ"
+            )
+        if not 1 <= self.button_bounce_milliseconds <= 1_000:
+            raise ConfigError(
+                "MISO_BUTTON_BOUNCE_MILLISECONDS must be between 1 and 1000"
+            )
+        if not 0.2 <= self.button_hold_seconds <= 10:
+            raise ConfigError("MISO_BUTTON_HOLD_SECONDS must be between 0.2 and 10")
         for name, path in (
             ("MISO_STT_EXECUTABLE", self.stt_executable),
             ("MISO_STT_MODEL", self.stt_model),
