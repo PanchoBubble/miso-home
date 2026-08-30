@@ -3,7 +3,28 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from miso.intake import FastLane, guess_language
-from miso.tools import InMemoryAuditLog, ToolRegistry, register_household_tools
+from miso.tools import (
+    InMemoryAuditLog,
+    ToolDirectoryLoader,
+    ToolRegistry,
+    register_household_tools,
+)
+
+
+PORCH_MODULE = """
+from miso.tools import ToolDefinition
+
+
+def tool_definitions():
+    return [
+        ToolDefinition(
+            "porch_light",
+            "Switch the porch light",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda arguments, context: {"summary": "porch light switched"},
+        )
+    ]
+"""
 
 
 class FastLaneTests(unittest.TestCase):
@@ -94,6 +115,45 @@ class FastLaneTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["intent"], "timer_create")
         self.assertEqual(events[0]["status"], "success")
+
+    def test_refresh_tools_request_reloads_without_a_model(self) -> None:
+        directory = Path(self.temporary.name) / "tools.d"
+        directory.mkdir()
+        loader = ToolDirectoryLoader(self.registry, directory, audit_sink=self.audit)
+        self.registry.register(loader.tool_definition())
+        (directory / "porch.py").write_text(PORCH_MODULE)
+
+        reply = self.lane.try_handle("Refresh your tools", "en")
+
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.tool, "tools_refresh")
+        self.assertEqual(reply.spoken, "Tools reloaded: 1 added.")
+        self.assertIn("porch_light", self.registry.names())
+
+        spanish = self.lane.try_handle("Recarga las herramientas", "es")
+        self.assertIsNotNone(spanish)
+        self.assertEqual(spanish.spoken, "Herramientas recargadas, sin cambios.")
+
+    def test_refresh_tools_request_speaks_rejected_modules(self) -> None:
+        directory = Path(self.temporary.name) / "tools.d"
+        directory.mkdir()
+        loader = ToolDirectoryLoader(self.registry, directory, audit_sink=self.audit)
+        self.registry.register(loader.tool_definition())
+        (directory / "broken.py").write_text(
+            "def tool_definitions():\n    raise RuntimeError('boom')\n"
+        )
+
+        reply = self.lane.try_handle("reload tools", "en")
+
+        self.assertIsNotNone(reply)
+        self.assertEqual(
+            reply.spoken,
+            "Tools reloaded, nothing changed. I rejected these modules: broken.",
+        )
+
+    def test_refresh_phrasing_without_the_tool_falls_through(self) -> None:
+        self.assertIsNone(self.lane.try_handle("Refresh your tools", "en"))
+        self.assertIsNone(self.lane.try_handle("refresh the kitchen tools", "en"))
 
     def test_language_guess_for_typed_text(self) -> None:
         self.assertEqual(guess_language("¿Qué tiempo hace?"), "es")

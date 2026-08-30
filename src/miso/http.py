@@ -59,7 +59,9 @@ from miso.tools import (
     DeveloperShellController,
     GoogleCalendarConfig,
     HouseholdStore,
+    REFRESH_TOOL_NAME,
     ScheduledItemWorker,
+    ToolDirectoryLoader,
     ToolRegistry,
     WeatherConfig,
     create_runtime_registry,
@@ -127,9 +129,11 @@ class MisoHTTPServer(ThreadingHTTPServer):
         access_verifier: AccessJWTVerifier | None,
         started_at: float,
         fast_lane: FastLane | None = None,
+        tool_loader: ToolDirectoryLoader | None = None,
     ) -> None:
         self.settings = settings
         self.tool_registry = tool_registry
+        self.tool_loader = tool_loader
         self.scheduled_worker = scheduled_worker
         self.router = router
         self.developer_shell = developer_shell
@@ -268,6 +272,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 except ValueError:
                     limit = 50
                 self._activity(limit)
+            elif parsed.path == "/api/tools":
+                self._tools()
             elif parsed.path == "/api/household":
                 self._household()
             else:
@@ -296,6 +302,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         HTTPStatus.OK,
                         {"cancelled": self.miso.cancel_request(request_id, self._actor())},
                     )
+            elif parsed.path == "/api/tools/refresh":
+                self._tools_refresh(payload)
             elif parsed.path == "/api/developer":
                 self._developer(payload)
             elif parsed.path == "/api/developer/command":
@@ -1144,6 +1152,45 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
             finally:
                 self.miso.unregister_request(request_id)
 
+        def _tools(self) -> None:
+            registry = self.miso.tool_registry
+            loader = self.miso.tool_loader
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "tools": [
+                        {
+                            "name": schema["name"],
+                            "description": schema["description"],
+                            "source": registry.source_of(str(schema["name"])),
+                        }
+                        for schema in registry.schemas()
+                    ],
+                    "refresh": None if loader is None else loader.status(),
+                },
+            )
+
+        def _tools_refresh(self, payload: dict[str, object]) -> None:
+            if self.miso.tool_loader is None:
+                self._json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "tool_refresh_unavailable"},
+                )
+                return
+            module = payload.get("module")
+            arguments: dict[str, object] = {}
+            if module is not None:
+                arguments["module"] = module
+            result = self.miso.tool_registry.invoke(
+                REFRESH_TOOL_NAME, arguments, actor=self._actor()
+            )
+            report = result.output if isinstance(result.output, dict) else None
+            rejected = bool(report is not None and not report.get("ok", True))
+            status = (
+                HTTPStatus.OK if result.ok and not rejected else HTTPStatus.BAD_REQUEST
+            )
+            self._json(status, {"result": result.as_dict()})
+
         def _developer(self, payload: dict[str, object]) -> None:
             action = payload.get("action")
             try:
@@ -1377,6 +1424,13 @@ def create_server(
     )
     if "developer_command" not in registry.names():
         registry.register(shell.tool_definition())
+    tool_loader = ToolDirectoryLoader(
+        registry, settings.tools_dir, audit_sink=registry.audit_sink
+    )
+    if REFRESH_TOOL_NAME not in registry.names():
+        registry.register(tool_loader.tool_definition())
+    if settings.tools_dir.is_dir():
+        tool_loader.refresh(actor=SYSTEM_ACTOR)
     playback_backend = (
         PulseProxyBackend(settings.audio_playback_proxy)
         if settings.audio_playback_backend == "pulse"
@@ -1518,4 +1572,5 @@ def create_server(
         access_verifier=access_verifier,
         started_at=time.monotonic(),
         fast_lane=fast_lane,
+        tool_loader=tool_loader,
     )

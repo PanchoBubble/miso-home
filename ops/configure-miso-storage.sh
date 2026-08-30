@@ -28,7 +28,7 @@ fi
 
 install -d -o miso -g miso -m 0750 \
   "${MISO_ROOT}" "${MISO_ROOT}/db" "${MISO_ROOT}/state" \
-  "${MISO_ROOT}/models"
+  "${MISO_ROOT}/models" "${MISO_ROOT}/tools.d"
 install -d -o root -g miso -m 0750 /etc/miso
 install -d "${BACKUP_ROOT}"
 

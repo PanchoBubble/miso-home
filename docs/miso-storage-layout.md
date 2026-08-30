@@ -11,6 +11,7 @@ filesystem only for backup artifacts.
 | `/var/lib/miso/db` | root ext4 | `miso:miso`, 0750 | Live `miso.sqlite3`, WAL, and shared-memory files |
 | `/var/lib/miso/state` | root ext4 | `miso:miso`, 0750 | Durable non-database application state |
 | `/var/lib/miso/models` | root ext4 | `miso:miso`, 0750 | Explicitly managed local model files and manifests |
+| `/var/lib/miso/tools.d` | root ext4 | `miso:miso`, 0750 | Hot-loadable tool modules (see `miso-tool-modules.md`) |
 | `/run/miso` | tmpfs | created by systemd | Sockets, locks, and other restart-disposable runtime files |
 | `/etc/miso` | root ext4 | `root:miso`, 0750 | Service configuration; secret files must be 0640 or stricter |
 | `/media/pancho/T7/backups/miso` | T7 exFAT | mount-mapped `pancho:pancho`, 0755 | Completed encrypted backup artifacts only |

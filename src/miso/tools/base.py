@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from miso.identity import Actor, VOICE_ACTOR
 from miso.tools.audit import AuditSink, InMemoryAuditLog, audit_event, redact
@@ -114,23 +114,36 @@ class ToolResult:
 
 
 class ToolRegistry:
-    """Allowlist which validates and audits every request before execution."""
+    """Allowlist which validates and audits every request before execution.
+
+    The tool table is replaced wholesale rather than mutated in place, so a
+    reader that resolved a definition keeps running against it while another
+    thread swaps the table underneath. Tools loaded from a hot-reloadable
+    source carry that source label; tools registered by the service itself
+    carry none and are never touched by a source swap.
+    """
 
     def __init__(self, audit_sink: AuditSink | None = None) -> None:
         self._tools: dict[str, ToolDefinition] = {}
+        self._sources: dict[str, str] = {}
+        self._lock = threading.RLock()
         self.audit_sink = audit_sink or InMemoryAuditLog()
         self._result_listeners: list[ToolResultListener] = []
 
     def add_result_listener(self, listener: ToolResultListener) -> None:
         self._result_listeners.append(listener)
 
-    def register(self, definition: ToolDefinition) -> None:
+    @staticmethod
+    def validate_definition(definition: ToolDefinition) -> None:
+        """Check a definition without registering it."""
+        if not isinstance(definition, ToolDefinition):
+            raise ValueError("tool definition must be a ToolDefinition")
         if not definition.name or not definition.name.replace("_", "").isalnum():
             raise ValueError("tool name must contain only letters, numbers, and underscores")
-        if definition.name in self._tools:
-            raise ValueError(f"tool is already registered: {definition.name}")
         if not definition.description.strip():
             raise ValueError("tool description must not be empty")
+        if not callable(definition.handler):
+            raise ValueError("tool handler must be callable")
         if not math.isfinite(definition.timeout_seconds) or not (
             0 < definition.timeout_seconds <= 600
         ):
@@ -141,7 +154,91 @@ class ToolRegistry:
         ):
             raise ValueError("tool redaction fields must be non-empty strings")
         validate_tool_schema(definition.input_schema)
-        self._tools[definition.name] = definition
+
+    def register(
+        self,
+        definition: ToolDefinition,
+        *,
+        source: str | None = None,
+        replace: bool = False,
+    ) -> None:
+        self.validate_definition(definition)
+        with self._lock:
+            if definition.name in self._tools and not replace:
+                raise ValueError(f"tool is already registered: {definition.name}")
+            tools = dict(self._tools)
+            tools[definition.name] = definition
+            sources = dict(self._sources)
+            if source is None:
+                sources.pop(definition.name, None)
+            else:
+                sources[definition.name] = source
+            self._tools = tools
+            self._sources = sources
+
+    def unregister(self, name: str) -> bool:
+        """Drop a tool. In-flight invocations keep their resolved definition."""
+        with self._lock:
+            if name not in self._tools:
+                return False
+            tools = dict(self._tools)
+            del tools[name]
+            sources = dict(self._sources)
+            sources.pop(name, None)
+            self._tools = tools
+            self._sources = sources
+            return True
+
+    def apply_sources(
+        self, definitions: Mapping[str, Sequence[ToolDefinition]]
+    ) -> tuple[str, ...]:
+        """Replace every source-owned tool in one atomic swap.
+
+        Everything is validated before anything is committed, so a rejected
+        definition leaves the previous table untouched. Tools registered
+        without a source are preserved.
+        """
+        prepared: dict[str, tuple[str, ToolDefinition]] = {}
+        for source, items in sorted(definitions.items()):
+            if not source:
+                raise ValueError("tool source must be a non-empty string")
+            for definition in items:
+                self.validate_definition(definition)
+                if definition.name in prepared:
+                    raise ValueError(
+                        f"tool name is claimed by two sources: {definition.name}"
+                    )
+                prepared[definition.name] = (source, definition)
+        with self._lock:
+            tools = {
+                name: definition
+                for name, definition in self._tools.items()
+                if name not in self._sources
+            }
+            claimed = sorted(set(prepared) & set(tools))
+            if claimed:
+                raise ValueError(f"tool is already registered: {claimed[0]}")
+            sources: dict[str, str] = {}
+            for name, (source, definition) in prepared.items():
+                tools[name] = definition
+                sources[name] = source
+            self._tools = tools
+            self._sources = sources
+            return tuple(sorted(prepared))
+
+    def source_of(self, name: str) -> str | None:
+        return self._sources.get(name)
+
+    def sources(self) -> dict[str, tuple[str, ...]]:
+        sources = self._sources
+        grouped: dict[str, list[str]] = {}
+        for name, source in sources.items():
+            grouped.setdefault(source, []).append(name)
+        return {source: tuple(sorted(names)) for source, names in sorted(grouped.items())}
+
+    def static_names(self) -> tuple[str, ...]:
+        sources = self._sources
+        return tuple(sorted(name for name in self._tools if name not in sources))
 
     def get(self, name: str) -> ToolDefinition:
         try:
