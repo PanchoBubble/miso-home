@@ -110,13 +110,30 @@ cannot reach the host filesystem. When the binary is absent or nobody is logged
 in, health reports `binary_not_found` or `not_authenticated` and the router
 skips the tier instead of stalling the lane.
 
-Message intake is two-tiered. A deterministic fast lane (`intake.py`) matches
+Message intake is three-tiered. A deterministic fast lane (`intake.py`) matches
 common bilingual household intents (timers, shopping list, weather) with strict
 parsers and invokes the tool directly, answering in milliseconds without any
 model; an ambiguous parse always falls through rather than guessing arguments.
-It can be disabled with `MISO_FAST_LANE_ENABLED=false`. Everything else goes to
-the model lane, which always prefers hosted GPT, then the Codex CLI, then LAN
-Ollama, keeping the Pi model only as the offline fallback of last resort. Positive provider health
+It can be disabled with `MISO_FAST_LANE_ENABLED=false`.
+
+When the fast lane misses but the request still looks tool-shaped, the picker
+lane (`toolpick.py`) puts it to the Pi model as a selection problem rather than
+a conversation: `format=json`, a catalogue of roughly 200 prompt tokens, and a
+`MISO_TOOL_PICKER_MAX_TOKENS` cap (default 40) so the model answers with a name
+and arguments instead of prose. The model only ever selects. The picked name
+must be one of the allowlisted pickable tools (those with a fast-lane renderer),
+the arguments are validated against that tool's schema before anything runs, and
+the spoken reply comes from the same templated renderer the fast lane would have
+used. Malformed JSON, an unknown or unpickable name, and arguments that miss the
+schema all fall through to the model lane without executing anything. Every
+attempt is audited as a `tool_pick` event (`picked`, `rejected`, or
+`fell_through`) with its end-to-end `duration_ms`. Disable it with
+`MISO_TOOL_PICKER_ENABLED=false`; bound it with
+`MISO_TOOL_PICKER_TIMEOUT_SECONDS` (default 6).
+
+Everything else goes to the model lane, which always prefers hosted GPT, then
+the Codex CLI, then LAN Ollama, keeping the Pi model only as the offline
+fallback of last resort. Positive provider health
 verdicts are cached (`MISO_ROUTING_HEALTH_CACHE_SECONDS`, default 20, `0`
 disables) so repeat turns start streaming immediately; a mid-stream failure
 evicts the cached verdict and an unavailable verdict is never cached. Health

@@ -165,6 +165,78 @@ class OllamaProvider:
                     "Ollama request failed: HTTPError"
                 ) from retry_error
 
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int = 40,
+        timeout_seconds: float | None = None,
+        cancel: Event | None = None,
+    ) -> str:
+        """Return one non-streamed JSON reply capped to a few dozen tokens.
+
+        Constrained selection is not a conversation: `format` pins the reply to
+        JSON and `num_predict` stops the model long before it can start
+        explaining itself, which is what keeps the call inside a voice turn.
+        """
+        if max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+        if cancel is not None and cancel.is_set():
+            raise ProviderCancelled("request cancelled before dispatch")
+        payload: dict[str, object] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": False,
+            "think": False,
+            "format": "json",
+            "options": {"temperature": 0, "seed": 0, "num_predict": max_tokens},
+        }
+        timeout = (
+            self.timeout
+            if timeout_seconds is None
+            else min(self.timeout, timeout_seconds)
+        )
+        try:
+            return self._complete(payload, timeout)
+        except HTTPError as error:
+            # Same `think` rejection the streaming path retries around.
+            if error.code != 400 or "think" not in payload:
+                raise ProviderError("Ollama request failed: HTTPError") from error
+            payload.pop("think")
+            try:
+                return self._complete(payload, timeout)
+            except HTTPError as retry_error:
+                raise ProviderError(
+                    "Ollama request failed: HTTPError"
+                ) from retry_error
+
+    def _complete(self, payload: dict[str, object], timeout: float) -> str:
+        http_request = Request(
+            f"{self.base_url}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(http_request, timeout=timeout) as response:
+                data = json.load(response)
+        except HTTPError:
+            raise
+        except (OSError, ValueError, URLError) as error:
+            raise ProviderError(
+                f"Ollama request failed: {type(error).__name__}"
+            ) from error
+        message = data.get("message") if isinstance(data, Mapping) else None
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, str):
+            raise ProviderProtocolError("Ollama returned no message content")
+        think_filter = _ThinkFilter()
+        return think_filter.feed(content) + think_filter.flush()
+
     def _dispatch(
         self, payload: dict[str, object], cancel: Event
     ) -> Iterator[ChatChunk]:

@@ -17,6 +17,7 @@ from miso.identity import VOICE_ACTOR
 from miso.providers import ChatRequest, ProviderCancelled
 from miso.routing import ProviderRouter, RoutingError
 from miso.speech import SpeechManager, SpeechResult
+from miso.toolpick import ToolPicker
 from miso.tools import ToolRegistry
 from miso.tools.audit import AuditSink, audit_event
 from miso.transcription import SpeechActivity, TranscriptionResult
@@ -310,6 +311,7 @@ class ConversationManager:
         speech: SpeechManager,
         memory: MemoryStore,
         fast_lane: FastLane | None = None,
+        tool_picker: ToolPicker | None = None,
         audit_sink: AuditSink,
         system_prompt: str,
         wake_phrase: str,
@@ -346,6 +348,7 @@ class ConversationManager:
         self.speech = speech
         self.memory = memory
         self.fast_lane = fast_lane
+        self.tool_picker = tool_picker
         self.audit_sink = audit_sink
         self.system_prompt = system_prompt
         self.wake_phrase = wake_phrase.strip()
@@ -761,11 +764,17 @@ class ConversationManager:
                 fast_reply = self.fast_lane.try_handle(
                     text, language, cancel_event=cancel, actor=VOICE_ACTOR
                 )
+            if fast_reply is None and self.tool_picker is not None:
+                fast_reply = self.tool_picker.try_handle(
+                    text, language, cancel_event=cancel, actor=VOICE_ACTOR
+                )
             used_tool = False
             partial: list[str] = []
             if fast_reply is not None:
                 self._transition_current(
-                    generation, ConversationState.USING_TOOL, "fast intent matched"
+                    generation,
+                    ConversationState.USING_TOOL,
+                    f"intent matched: {fast_reply.intent}",
                 )
                 self.memory.append_event(
                     conversation_id,

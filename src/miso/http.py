@@ -46,6 +46,7 @@ from miso.live_events import (
 )
 from miso.memory import MemoryStore, SearchResult, utc_now
 from miso.providers import ChatRequest, ProviderCancelled
+from miso.providers.ollama import OllamaProvider
 from miso.routing import (
     PROVIDER_PREFERENCE,
     ProviderRouter,
@@ -53,6 +54,7 @@ from miso.routing import (
     create_router,
 )
 from miso.speech import PiperBackend, PiperVoice, SpeechError, SpeechManager
+from miso.toolpick import ToolPicker
 from miso.transcription import (
     EnergySpeechDetector,
     TranscriptionManager,
@@ -135,6 +137,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         started_at: float,
         fast_lane: FastLane | None = None,
         tool_loader: ToolDirectoryLoader | None = None,
+        tool_picker: ToolPicker | None = None,
     ) -> None:
         self.settings = settings
         self.tool_registry = tool_registry
@@ -149,6 +152,7 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.wake_calibration = wake_calibration
         self.conversation_manager = conversation_manager
         self.fast_lane = fast_lane
+        self.tool_picker = tool_picker
         self.live_events = live_events
         self.memory_store = MemoryStore(settings.database_path)
         self.household_store = HouseholdStore(settings.database_path)
@@ -976,6 +980,13 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     cancel_event=cancel,
                     actor=actor,
                 )
+            if fast is None and self.miso.tool_picker is not None:
+                fast = self.miso.tool_picker.try_handle(
+                    text.strip(),
+                    guess_language(text),
+                    cancel_event=cancel,
+                    actor=actor,
+                )
             if fast is not None:
                 self.send_response(HTTPStatus.OK)
                 self.send_header(
@@ -1530,6 +1541,18 @@ def create_server(
         registry.audit_sink,
         enabled=settings.fast_lane_enabled,
     )
+    tool_picker = ToolPicker(
+        registry,
+        OllamaProvider(
+            settings.ollama_url,
+            settings.ollama_model,
+            settings.provider_timeout_seconds,
+        ),
+        registry.audit_sink,
+        enabled=settings.tool_picker_enabled,
+        max_tokens=settings.tool_picker_max_tokens,
+        timeout_seconds=settings.tool_picker_timeout_seconds,
+    )
     conversation = conversation_manager or ConversationManager(
         enabled=settings.conversation_enabled,
         wake=wake,
@@ -1539,6 +1562,7 @@ def create_server(
         speech=speech,
         memory=memory,
         fast_lane=fast_lane,
+        tool_picker=tool_picker,
         audit_sink=registry.audit_sink,
         system_prompt=MISO_SYSTEM_PROMPT,
         wake_phrase=settings.wake_phrase,
@@ -1574,4 +1598,5 @@ def create_server(
         started_at=time.monotonic(),
         fast_lane=fast_lane,
         tool_loader=tool_loader,
+        tool_picker=tool_picker,
     )
