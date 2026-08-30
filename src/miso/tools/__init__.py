@@ -31,6 +31,13 @@ from miso.tools.google_calendar import (
     GoogleTokenStore,
     register_google_calendar_tools,
 )
+from miso.tools.loader import (
+    REFRESH_TOOL_NAME,
+    ToolDirectoryLoader,
+    ToolModuleError,
+    ToolModuleFailure,
+    ToolRefreshReport,
+)
 from miso.tools.mcp import MCPToolAdapter, MCPToolClient
 from miso.tools.schema import SchemaError
 from miso.tools.shell import DeveloperShellController
@@ -76,6 +83,7 @@ __all__ = [
     "JsonlAuditLog",
     "MCPToolAdapter",
     "MCPToolClient",
+    "REFRESH_TOOL_NAME",
     "OpenMeteoWeatherAdapter",
     "SchemaError",
     "ScheduledItemWorker",
@@ -83,6 +91,10 @@ __all__ = [
     "ToolContext",
     "ToolDeadlineExceeded",
     "ToolDefinition",
+    "ToolDirectoryLoader",
+    "ToolModuleError",
+    "ToolModuleFailure",
+    "ToolRefreshReport",
     "ToolRegistry",
     "ToolRejected",
     "ToolResult",

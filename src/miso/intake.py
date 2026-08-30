@@ -305,6 +305,66 @@ def _render_weather(result: ToolResult, language: str) -> str:
     return _failure_phrase(language)
 
 
+_TOOL_REFRESH_PATTERNS = (
+    re.compile(r"^(?:refresh|reload|update)\s+(?:your\s+|the\s+|my\s+)?tools?(?:\s+list|\s+modules?)?$"),
+    re.compile(r"^(?:refresh|reload)\s+(?:the\s+)?tool\s+(?:list|registry|modules?)$"),
+    re.compile(r"^(?:recarga|refresca|actualiza)\s+(?:las\s+|tus\s+|mis\s+)?herramientas$"),
+    re.compile(r"^(?:recarga|refresca|actualiza)\s+(?:la\s+)?lista\s+de\s+herramientas$"),
+)
+
+
+def _match_tools_refresh(text: str, language: str) -> Mapping[str, object] | None:
+    if any(pattern.match(text) for pattern in _TOOL_REFRESH_PATTERNS):
+        return {}
+    return None
+
+
+def _render_tools_refresh(result: ToolResult, language: str) -> str:
+    if not result.ok:
+        return _failure_phrase(language)
+    output = result.output or {}
+    counts = [
+        (key, len(value))
+        for key, value in (
+            ("added", output.get("added")),
+            ("updated", output.get("updated")),
+            ("removed", output.get("removed")),
+        )
+        if isinstance(value, list) and value
+    ]
+    labels = {
+        "added": ("added", "nuevas"),
+        "updated": ("updated", "actualizadas"),
+        "removed": ("removed", "retiradas"),
+    }
+    described = ", ".join(
+        f"{count} {labels[key][1 if language == 'es' else 0]}" for key, count in counts
+    )
+    if language == "es":
+        spoken = (
+            f"Herramientas recargadas: {described}."
+            if described
+            else "Herramientas recargadas, sin cambios."
+        )
+    else:
+        spoken = (
+            f"Tools reloaded: {described}."
+            if described
+            else "Tools reloaded, nothing changed."
+        )
+    failed = output.get("failed")
+    if isinstance(failed, list) and failed:
+        modules = ", ".join(
+            str(entry.get("module"))
+            for entry in failed
+            if isinstance(entry, Mapping) and entry.get("module")
+        )
+        if language == "es":
+            return f"{spoken} Rechacé estos módulos: {modules}."
+        return f"{spoken} I rejected these modules: {modules}."
+    return spoken
+
+
 def _failure_phrase(language: str) -> str:
     return (
         "No he podido hacerlo, inténtalo de nuevo."
@@ -331,6 +391,9 @@ def default_intents() -> tuple[FastIntent, ...]:
         FastIntent("shopping_add", "shopping_add", _match_shopping_add, _render_shopping_add),
         FastIntent("shopping_list", "shopping_list", _match_shopping_list, _render_shopping_list),
         FastIntent("weather_get", "weather_get", _match_weather, _render_weather),
+        FastIntent(
+            "tools_refresh", "tools_refresh", _match_tools_refresh, _render_tools_refresh
+        ),
     )
 
 

@@ -66,6 +66,7 @@ class Settings:
     google_calendar_default_id: str = "primary"
     google_calendar_voice_email: str | None = None
     weather_default_location: str | None = None
+    tools_dir: Path = Path("/var/lib/miso/tools.d")
     developer_root: Path | None = None
     developer_commands: tuple[str, ...] = ("python3", "git", "rg", "ls")
     audio_enabled: bool = True
@@ -307,6 +308,7 @@ class Settings:
             weather_default_location=(
                 source.get("MISO_WEATHER_DEFAULT_LOCATION", "").strip() or None
             ),
+            tools_dir=Path(source.get("MISO_TOOLS_DIR", "/var/lib/miso/tools.d")),
             developer_root=(
                 Path(source["MISO_DEVELOPER_ROOT"])
                 if source.get("MISO_DEVELOPER_ROOT")
@@ -561,6 +563,8 @@ class Settings:
             raise ConfigError(
                 "MISO_WEATHER_DEFAULT_LOCATION must be at most 120 printable characters"
             )
+        if not self.tools_dir.is_absolute():
+            raise ConfigError("MISO_TOOLS_DIR must be absolute")
         if self.developer_root is not None and not self.developer_root.is_absolute():
             raise ConfigError("MISO_DEVELOPER_ROOT must be absolute")
         if not self.developer_commands:

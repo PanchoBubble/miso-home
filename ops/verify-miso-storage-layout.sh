@@ -34,7 +34,7 @@ mounted_uuid="$(findmnt -rn -o UUID -T "${T7_ROOT}" 2>/dev/null \
   || fail "T7 UUID ${T7_UUID} is not mounted at ${T7_ROOT}"
 
 for path in "${MISO_ROOT}" "${MISO_ROOT}/db" "${MISO_ROOT}/state" \
-  "${MISO_ROOT}/models"; do
+  "${MISO_ROOT}/models" "${MISO_ROOT}/tools.d"; do
   [[ -d "${path}" ]] || fail "missing directory: ${path}"
   [[ "$(stat -c '%U:%G' "${path}")" == "miso:miso" ]] \
     || fail "unexpected owner for ${path}"
