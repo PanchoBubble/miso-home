@@ -144,7 +144,13 @@ latency, fallback reason, and final selection is written to
 overrides are strict by default, and progress chunks are emitted before health
 checks or model loading. Voice replies now speak sentence by sentence: synthesis
 of the first sentence overlaps generation of the rest, so long answers start
-sounding almost immediately.
+sounding almost immediately. Piper emits nothing until it has synthesised the
+whole string it was handed - measured on the Pi, first audio tracks length at
+roughly 65 ms per word - so a long opening sentence is additionally broken at
+its own commas, semicolons or dashes once it passes twelve words. Fragments
+below four words are kept attached to what follows, and a long sentence with no
+punctuation in it is still spoken whole, because a break Piper was not given
+lands as an unnatural pause.
 
 Each completed Pi attempt records a `generation` block in
 `routing.jsonl` with prompt tokens, prompt-evaluation milliseconds, generated

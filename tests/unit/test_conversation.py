@@ -10,6 +10,8 @@ from miso.conversation import (
     ConversationError,
     ConversationManager,
     ConversationState,
+    _SegmentSpeaker,
+    _split_long_clause,
 )
 from miso.memory import MemoryStore
 from miso.providers import ChatChunk, ProviderHealth, ProviderSet
@@ -186,6 +188,82 @@ def wait_for(manager: ConversationManager, state: str, timeout=1.0) -> None:
         time.sleep(0.005)
     if manager.status()["state"] != state:
         raise AssertionError(f"state did not become {state}: {manager.status()}")
+
+
+class SegmentSplitTests(unittest.TestCase):
+    def test_a_long_sentence_is_broken_at_its_clause(self) -> None:
+        head, rest = _split_long_clause(
+            "The sky looks blue because air molecules scatter blue sunlight more "
+            "strongly than other colours, and that scattered light reaches your eyes"
+        )
+        self.assertTrue(head.endswith("colours,"))
+        self.assertTrue(rest.startswith("and that scattered"))
+
+    def test_a_short_sentence_is_left_whole(self) -> None:
+        self.assertEqual(
+            _split_long_clause("Timer set for five minutes."),
+            ("", "Timer set for five minutes."),
+        )
+
+    def test_a_long_sentence_without_punctuation_is_left_whole(self) -> None:
+        text = " ".join(["word"] * 30)
+        self.assertEqual(_split_long_clause(text), ("", text))
+
+    def test_a_tiny_leading_clause_is_kept_attached(self) -> None:
+        # "Sure," alone would be a stutter, so it stays with what follows.
+        text = (
+            "Sure, the timer is running and it has about four minutes left "
+            "before it goes off in the kitchen"
+        )
+        head, rest = _split_long_clause(text)
+        self.assertEqual(head, "")
+        self.assertEqual(rest, text)
+
+
+class SegmentSpeakerTests(unittest.TestCase):
+    class _Recorder:
+        def __init__(self) -> None:
+            self.spoken = []
+
+        def _speak_segment(self, speaker, segment):
+            self.spoken.append(segment)
+
+    def _speaker(self, spoken):
+        speaker = _SegmentSpeaker.__new__(_SegmentSpeaker)
+        speaker._buffer = ""
+        speaker.received = False
+        speaker.opened_gate = False
+        speaker._speak = spoken.append
+        return speaker
+
+    def test_a_long_first_sentence_speaks_before_it_ends(self) -> None:
+        spoken = []
+        speaker = self._speaker(spoken)
+        speaker.feed(
+            "The sky looks blue because air molecules scatter blue sunlight more "
+            "strongly than other colours, and that scattered light reaches your eyes "
+        )
+
+        # Audio starts on the first clause instead of waiting for the full stop.
+        self.assertEqual(len(spoken), 1)
+        self.assertTrue(spoken[0].endswith("colours,"))
+
+    def test_sentences_still_win_over_clauses(self) -> None:
+        spoken = []
+        speaker = self._speaker(spoken)
+        speaker.feed("Timer set for five minutes. Anything else? ")
+        self.assertEqual(
+            spoken, ["Timer set for five minutes.", "Anything else?"]
+        )
+
+    def test_a_short_answer_is_spoken_once_at_the_end(self) -> None:
+        spoken = []
+        speaker = self._speaker(spoken)
+        speaker.feed("Timer set")
+        speaker.feed(" for five minutes")
+        self.assertEqual(spoken, [])
+        speaker.finish()
+        self.assertEqual(spoken, ["Timer set for five minutes"])
 
 
 class ConversationManagerTests(unittest.TestCase):

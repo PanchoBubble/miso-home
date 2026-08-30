@@ -283,6 +283,47 @@ class TranscriptionEvents(Protocol):
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
 
+# Piper emits nothing until it has synthesised the whole string it was given:
+# measured on the Pi, first audio tracks length at roughly 65 ms per word
+# (1 word 280 ms, 12 words 1223 ms, 32 words 2323 ms). Waiting for a sentence
+# therefore buys silence in proportion to how long that sentence is, so a long
+# opening sentence is broken at its own punctuation as well.
+_CLAUSE_BOUNDARY = re.compile(r"(?<=[,;:])\s+|\s+[—–-]\s+")
+
+# Below this a fragment is too short to sound like speech rather than a stutter.
+# Above the maximum the wait is worse than the seam, so a clause break is looked
+# for - only at real punctuation, since splitting mid-clause makes Piper put an
+# unnatural pause where the writer never meant one. A sentence with no comma in
+# it is still spoken whole. Twelve words is about 800 ms of synthesis against
+# nearly four seconds of audio, so playback stays well ahead of the next
+# fragment once it starts.
+_MINIMUM_SEGMENT_WORDS = 4
+_MAXIMUM_SEGMENT_WORDS = 12
+
+
+def _split_long_clause(buffer: str) -> tuple[str, str]:
+    """Split an over-long pending sentence at its last usable clause break."""
+    if len(buffer.split()) <= _MAXIMUM_SEGMENT_WORDS:
+        return "", buffer
+    head = ""
+    rest = buffer
+    while True:
+        match = _CLAUSE_BOUNDARY.search(rest)
+        if match is None:
+            break
+        candidate = rest[: match.start()]
+        remainder = rest[match.end() :]
+        if len(candidate.split()) < _MINIMUM_SEGMENT_WORDS:
+            # Too small on its own; keep it attached to what follows.
+            break
+        head = (head + " " + candidate).strip()
+        rest = remainder
+        if len(head.split()) >= _MINIMUM_SEGMENT_WORDS:
+            break
+    if not head or len(rest.split()) < _MINIMUM_SEGMENT_WORDS:
+        return "", buffer
+    return head, rest
+
 
 class _SegmentSpeaker:
     """Speak completed sentences while the rest of the answer still streams.
@@ -315,11 +356,13 @@ class _SegmentSpeaker:
         self.received = True
         self._buffer += text
         parts = _SENTENCE_BOUNDARY.split(self._buffer)
-        if len(parts) <= 1:
-            return
-        self._buffer = parts[-1]
-        for segment in parts[:-1]:
-            self._speak(segment)
+        if len(parts) > 1:
+            self._buffer = parts[-1]
+            for segment in parts[:-1]:
+                self._speak(segment)
+        head, self._buffer = _split_long_clause(self._buffer)
+        if head:
+            self._speak(head)
 
     def finish(self) -> None:
         remainder, self._buffer = self._buffer, ""
