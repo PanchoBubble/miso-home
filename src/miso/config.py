@@ -53,6 +53,9 @@ class Settings:
     routing_stream_timeout_seconds: float = 300.0
     routing_health_cache_seconds: float = 20.0
     fast_lane_enabled: bool = True
+    codex_cli_enabled: bool = False
+    codex_cli_binary: str = "codex"
+    codex_cli_model: str | None = None
     dashboard_token: str | None = field(default=None, repr=False)
     dashboard_email: str = "local@miso.invalid"
     access_team_domain: str | None = None
@@ -266,6 +269,13 @@ class Settings:
                 source.get("MISO_FAST_LANE_ENABLED", "true"),
                 "MISO_FAST_LANE_ENABLED",
             ),
+            codex_cli_enabled=_boolean(
+                source.get("MISO_CODEX_CLI_ENABLED", "false"),
+                "MISO_CODEX_CLI_ENABLED",
+            ),
+            codex_cli_binary=source.get("MISO_CODEX_CLI_BINARY", "codex").strip()
+            or "codex",
+            codex_cli_model=source.get("MISO_CODEX_CLI_MODEL", "").strip() or None,
             dashboard_token=source.get("MISO_DASHBOARD_TOKEN", "").strip() or None,
             dashboard_email=_email(
                 source.get("MISO_DASHBOARD_EMAIL", "local@miso.invalid"),
@@ -488,6 +498,8 @@ class Settings:
             raise ConfigError("MISO_OPENAI_MODEL must not be empty")
         if not self.openai_base_url.startswith("https://"):
             raise ConfigError("MISO_OPENAI_BASE_URL must use HTTPS")
+        if self.codex_cli_enabled and not self.codex_cli_binary.strip():
+            raise ConfigError("MISO_CODEX_CLI_BINARY must not be empty")
         if not 0 < self.provider_timeout_seconds <= 600:
             raise ConfigError("MISO_PROVIDER_TIMEOUT must be between 0 and 600 seconds")
         if not 0 < self.routing_health_timeout_seconds <= 30:

@@ -46,7 +46,12 @@ from miso.live_events import (
 )
 from miso.memory import MemoryStore, SearchResult, utc_now
 from miso.providers import ChatRequest, ProviderCancelled
-from miso.routing import ProviderRouter, RoutingError, create_router
+from miso.routing import (
+    PROVIDER_PREFERENCE,
+    ProviderRouter,
+    RoutingError,
+    create_router,
+)
 from miso.speech import PiperBackend, PiperVoice, SpeechError, SpeechManager
 from miso.transcription import (
     EnergySpeechDetector,
@@ -502,11 +507,7 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                             "lan-ollama",
                             "hosted-gpt",
                         ],
-                        "no_matching_tool": [
-                            "hosted-gpt",
-                            "lan-ollama",
-                            "pi-ollama",
-                        ],
+                        "no_matching_tool": list(PROVIDER_PREFERENCE),
                     },
                     "tools": list(self.miso.tool_registry.names()),
                     "audio": self.miso.audio_manager.status(),

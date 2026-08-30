@@ -82,7 +82,7 @@ _COMPLEX_MARKERS = (
 # deterministic tool intents are answered by the fast lane before routing, so
 # the model lane no longer detours through the small on-device model, which is
 # kept only as the offline fallback of last resort.
-_PROVIDER_PREFERENCE = ("hosted-gpt", "lan-ollama", "pi-ollama")
+PROVIDER_PREFERENCE = ("hosted-gpt", "codex-cli", "lan-ollama", "pi-ollama")
 
 
 class ProviderRouter:
@@ -215,7 +215,7 @@ class ProviderRouter:
             if isinstance(tool.get("name"), str)
         )
         candidates = tuple(
-            name for name in _PROVIDER_PREFERENCE if name in available
+            name for name in PROVIDER_PREFERENCE if name in available
         )
         if manual_override is not None:
             if manual_override not in available:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from miso.config import Settings
 from miso.providers.base import ModelProvider
+from miso.providers.codex import CodexCliProvider
 from miso.providers.ollama import LanOllamaProvider, OllamaProvider
 from miso.providers.openai import OpenAIResponsesProvider
 
@@ -15,11 +16,12 @@ class ProviderSet:
     pi: ModelProvider
     lan: ModelProvider | None
     hosted: ModelProvider
+    codex: ModelProvider | None = None
 
     def configured(self) -> tuple[ModelProvider, ...]:
         return tuple(
             provider
-            for provider in (self.pi, self.lan, self.hosted)
+            for provider in (self.pi, self.lan, self.codex, self.hosted)
             if provider is not None
         )
 
@@ -42,5 +44,14 @@ def create_provider_set(settings: Settings) -> ProviderSet:
             settings.openai_model,
             timeout,
             base_url=settings.openai_base_url,
+        ),
+        codex=(
+            CodexCliProvider(
+                settings.codex_cli_binary,
+                settings.codex_cli_model,
+                timeout,
+            )
+            if settings.codex_cli_enabled
+            else None
         ),
     )

@@ -10,6 +10,7 @@ from miso.providers.base import (
     ProviderHealth,
     ProviderProtocolError,
 )
+from miso.providers.codex import CodexCliProvider
 from miso.providers.ollama import LanOllamaProvider, OllamaProvider
 from miso.providers.openai import OpenAIResponsesProvider
 from miso.providers.runtime import ProviderSet, create_provider_set
@@ -17,6 +18,7 @@ from miso.providers.runtime import ProviderSet, create_provider_set
 __all__ = [
     "ChatChunk",
     "ChatRequest",
+    "CodexCliProvider",
     "GenerationMetrics",
     "LanOllamaProvider",
     "ModelProvider",
