@@ -342,3 +342,42 @@ def conversation_caption_publisher(
         )
 
     return publish
+
+
+def user_transcript_publisher(
+    events: LiveEventStore,
+) -> Callable[[str, str], None]:
+    """Show what Miso heard so a mis-transcription is visible immediately."""
+
+    def publish(text: str, language: str) -> None:
+        normalized = text.strip()
+        if not normalized:
+            return
+        events.publish(
+            "user_caption",
+            {
+                "text": normalized[:MAX_CAPTION_CHARACTERS],
+                "language": language,
+            },
+            actor=VOICE_ACTOR,
+        )
+
+    return publish
+
+
+def conversation_error_publisher(
+    events: LiveEventStore,
+) -> Callable[[str], None]:
+    """Show the failure reason instead of only switching the face to error."""
+
+    def publish(error: str) -> None:
+        normalized = error.strip()
+        if not normalized:
+            return
+        events.publish(
+            "assistant_error",
+            {"text": normalized[:200]},
+            actor=VOICE_ACTOR,
+        )
+
+    return publish

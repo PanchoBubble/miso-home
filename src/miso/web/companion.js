@@ -52,6 +52,7 @@ const fallback = document.querySelector("#fallback-face");
 const statusCopy = document.querySelector("#companion-status-copy");
 const caption = document.querySelector("#companion-caption");
 const captionCopy = document.querySelector("#companion-caption-copy");
+const captionSpeaker = document.querySelector(".caption-speaker");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 function requestHeaders() {
@@ -77,14 +78,18 @@ function clearCaption() {
   companion.captionTimer = null;
   caption.hidden = true;
   caption.dataset.captionState = "final";
+  caption.dataset.captionSpeaker = "miso";
+  captionSpeaker.textContent = "Miso";
   captionCopy.textContent = "";
 }
 
-function showCaption(text, final = true) {
+function showCaption(text, final = true, speaker = "Miso") {
   const normalized = text.trim();
   if (!normalized) return;
   if (companion.captionTimer) window.clearTimeout(companion.captionTimer);
   companion.captionTimer = null;
+  captionSpeaker.textContent = speaker;
+  caption.dataset.captionSpeaker = speaker.toLowerCase();
   captionCopy.textContent = normalized;
   caption.hidden = false;
   // A draft caption is the answer still being generated. It must not time out
@@ -193,6 +198,20 @@ function handleLiveEvent(event) {
     && Date.now() - Date.parse(event.created_at) <= CAPTION_MAX_AGE_MS
   ) {
     showCaption(event.payload.text, event.payload.final !== false);
+  }
+  if (
+    event.type === "user_caption"
+    && typeof event.payload?.text === "string"
+    && Date.now() - Date.parse(event.created_at) <= CAPTION_MAX_AGE_MS
+  ) {
+    showCaption(event.payload.text, true, "You");
+  }
+  if (
+    event.type === "assistant_error"
+    && typeof event.payload?.text === "string"
+    && Date.now() - Date.parse(event.created_at) <= CAPTION_MAX_AGE_MS
+  ) {
+    showCaption(event.payload.text, true, "Error");
   }
 }
 

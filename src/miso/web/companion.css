@@ -56,6 +56,18 @@ canvas.face-renderer { display: block; }
   content: " · typing";
   animation: fallback-pulse 1.4s ease-in-out infinite;
 }
+/* What Miso heard: quieter than an answer so a glance tells them apart. */
+.companion-caption[data-caption-speaker="you"] .caption-copy {
+  opacity: 0.82;
+  font-style: italic;
+  font-weight: 600;
+}
+.companion-caption[data-caption-speaker="error"] {
+  border-color: rgba(255, 138, 128, 0.65);
+}
+.companion-caption[data-caption-speaker="error"] .caption-speaker {
+  color: rgba(255, 168, 158, 0.95);
+}
 .caption-speaker {
   display: block;
   margin-bottom: 7px;

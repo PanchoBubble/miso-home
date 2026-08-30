@@ -325,6 +325,8 @@ class ConversationManager:
         transition_capacity: int = 32,
         transition_listeners: tuple[Callable[[StateTransition], None], ...] = (),
         response_listeners: tuple[Callable[[str, str, bool], None], ...] = (),
+        transcript_listeners: tuple[Callable[[str, str], None], ...] = (),
+        error_listeners: tuple[Callable[[str], None], ...] = (),
     ) -> None:
         if listen_timeout_seconds <= 0 or checkback_timeout_seconds <= 0:
             raise ValueError("conversation timeouts must be positive")
@@ -364,6 +366,8 @@ class ConversationManager:
         self._transitions: deque[StateTransition] = deque(maxlen=transition_capacity)
         self._transition_listeners = list(transition_listeners)
         self._response_listeners = list(response_listeners)
+        self._transcript_listeners = list(transcript_listeners)
+        self._error_listeners = list(error_listeners)
         self._conversation_id: str | None = None
         self._active_cancel: threading.Event | None = None
         self._generation = 0
@@ -433,6 +437,32 @@ class ConversationManager:
     def add_response_listener(self, listener: Callable[[str, str, bool], None]) -> None:
         with self._lock:
             self._response_listeners.append(listener)
+
+    def add_transcript_listener(self, listener: Callable[[str, str], None]) -> None:
+        with self._lock:
+            self._transcript_listeners.append(listener)
+
+    def add_error_listener(self, listener: Callable[[str], None]) -> None:
+        with self._lock:
+            self._error_listeners.append(listener)
+
+    def _publish_transcript(self, text: str, language: str) -> None:
+        with self._lock:
+            listeners = tuple(self._transcript_listeners)
+        for listener in listeners:
+            try:
+                listener(text, language)
+            except Exception:
+                LOGGER.exception("conversation transcript listener failed")
+
+    def _publish_error(self, error: str) -> None:
+        with self._lock:
+            listeners = tuple(self._error_listeners)
+        for listener in listeners:
+            try:
+                listener(error)
+            except Exception:
+                LOGGER.exception("conversation error listener failed")
 
     def _publish_response(self, text: str, language: str, final: bool = True) -> None:
         if final:
@@ -691,6 +721,7 @@ class ConversationManager:
                 ConversationState.ROUTING, "transcription completed"
             )
             self._turns += 1
+        self._publish_transcript(text, language)
         self._turn_thread = threading.Thread(
             target=self._execute_turn,
             args=(generation, cancel, text, language, transcription),
@@ -981,6 +1012,7 @@ class ConversationManager:
         self.speech.cancel()
 
     def _recover(self, error: Exception) -> None:
+        self._publish_error(str(error)[:200])
         with self._lock:
             self._errors += 1
             self._last_error = str(error)[:200]

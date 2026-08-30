@@ -284,6 +284,38 @@ class ConversationManagerTests(unittest.TestCase):
         finally:
             manager.stop()
 
+    def test_transcript_listener_receives_what_miso_heard(self) -> None:
+        manager = self.manager()
+        heard = []
+        manager.add_transcript_listener(lambda text, language: heard.append((text, language)))
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "follow_up")
+            self.assertEqual(heard, [("tell me hello", "en")])
+        finally:
+            manager.stop()
+
+    def test_error_listener_receives_failure_reason(self) -> None:
+        self.provider.fail = True
+        manager = self.manager()
+        errors = []
+        manager.add_error_listener(errors.append)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "idle")
+            self.assertEqual(len(errors), 1)
+            self.assertIn("failed", errors[0])
+        finally:
+            manager.stop()
+
     def test_rejects_invalid_transition(self) -> None:
         manager = self.manager()
         with self.assertRaisesRegex(ConversationError, "idle -> routing"):

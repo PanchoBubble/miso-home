@@ -40,7 +40,9 @@ from miso.live_events import (
     LiveEventStore,
     LiveToolResultPublisher,
     conversation_caption_publisher,
+    conversation_error_publisher,
     conversation_event_publisher,
+    user_transcript_publisher,
 )
 from miso.memory import MemoryStore, SearchResult, utc_now
 from miso.providers import ChatRequest, ProviderCancelled
@@ -1493,6 +1495,8 @@ def create_server(
     )
     conversation.add_transition_listener(conversation_event_publisher(live_events))
     conversation.add_response_listener(conversation_caption_publisher(live_events))
+    conversation.add_transcript_listener(user_transcript_publisher(live_events))
+    conversation.add_error_listener(conversation_error_publisher(live_events))
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),
         handler_type(),
