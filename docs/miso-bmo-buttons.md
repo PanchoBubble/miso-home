@@ -124,3 +124,9 @@ The buttons ride on the wake manager, which the conversation state machine
 already requires, so `MISO_WAKE_ENABLED` must be true for a press to open a
 turn. Confirm with `/api/status`: `buttons.state` should be `listening` and the
 press counters should climb.
+
+`miso.service` sets `LG_WD=/run/miso`. lgpio writes a notify file into the
+process working directory, and the unit runs from the root-owned
+`/opt/miso/app`, so without that variable every pin factory fails in turn and
+the buttons come up `unavailable` with `Unable to load any default pin
+factory!` in the journal.

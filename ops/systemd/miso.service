@@ -20,6 +20,11 @@ Environment=MISO_DB_PATH=/var/lib/miso/db/miso.sqlite3
 Environment=MISO_STATE_DIR=/var/lib/miso/state
 Environment=MISO_MODEL_DIR=/var/lib/miso/models
 Environment=MISO_DEVELOPER_ROOT=/opt/miso/app
+# gpiozero's lgpio backend writes a notify file into the working directory,
+# which is root-owned and read-only for the service, so every pin factory
+# falls through and the buttons come up unavailable. RuntimeDirectory below
+# is the writable path the service already owns.
+Environment=LG_WD=/run/miso
 EnvironmentFile=-/etc/miso/miso-audio.env
 EnvironmentFile=-/etc/miso/miso-stt.env
 EnvironmentFile=-/etc/miso/miso-tts.env
