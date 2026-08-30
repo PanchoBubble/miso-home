@@ -111,10 +111,15 @@ class Settings:
     stt_model: Path = Path("/var/lib/miso/models/whisper/ggml-tiny.bin")
     stt_threads: int = 4
     stt_timeout_seconds: float = 45.0
+    # Whole example commands, not a vocabulary list: whisper conditions on this
+    # text as if it preceded the utterance, so phrasing primes far better than
+    # loose keywords. See docs/miso-transcription-benchmark.md.
     stt_prompt: str = (
-        "Miso. English and Spanish home assistant commands. "
-        "Timer, shopping list, calendar, events, lights. "
-        "Temporizador, lista de compras, calendario, citas, luces."
+        "Miso. Comandos de casa en español e inglés. "
+        "Pon un temporizador de ocho minutos. "
+        "¿Cuánto tiempo queda en el temporizador? "
+        "Añade leche a la lista de la compra. Enciende la luz de la cocina. "
+        "Set a timer for twenty seconds. Add bread to the shopping list."
     )
     stt_result_capacity: int = 16
     stt_vad_threshold_dbfs: float = -38.0
@@ -442,9 +447,11 @@ class Settings:
             stt_timeout_seconds=stt_timeout_seconds,
             stt_prompt=source.get(
                 "MISO_STT_PROMPT",
-                "Miso. English and Spanish home assistant commands. "
-                "Timer, shopping list, calendar, events, lights. "
-                "Temporizador, lista de compras, calendario, citas, luces.",
+                "Miso. Comandos de casa en español e inglés. "
+                "Pon un temporizador de ocho minutos. "
+                "¿Cuánto tiempo queda en el temporizador? "
+                "Añade leche a la lista de la compra. Enciende la luz de la cocina. "
+                "Set a timer for twenty seconds. Add bread to the shopping list.",
             ).strip(),
             stt_result_capacity=stt_result_capacity,
             stt_vad_threshold_dbfs=stt_vad_threshold_dbfs,

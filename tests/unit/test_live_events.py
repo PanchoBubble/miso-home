@@ -13,6 +13,7 @@ from miso.live_events import (
     MAX_CAPTION_CHARACTERS,
     conversation_caption_publisher,
     conversation_event_publisher,
+    user_capture_publisher,
 )
 from miso.memory import MemoryStore
 from miso.tools import InMemoryAuditLog, ToolResult, ToolStatus
@@ -120,6 +121,21 @@ class LiveEventStoreTests(unittest.TestCase):
         bounded = self.store.recent(actor=self.ana)[-1]
         self.assertEqual(len(bounded.payload["text"]), MAX_CAPTION_CHARACTERS)
         self.assertTrue(bounded.payload["truncated"])
+
+    def test_capture_cue_is_shared_and_rejects_unknown_states(self) -> None:
+        publish = user_capture_publisher(self.store)
+        publish("capturing")
+        publish("transcribing")
+        publish("discarded")
+        with self.assertRaises(ValueError):
+            publish("recording")
+
+        events = self.store.recent(actor=self.ana)
+        self.assertEqual([event.event_type for event in events], ["user_capture"] * 3)
+        self.assertEqual(
+            [event.payload["state"] for event in events],
+            ["capturing", "transcribing", "discarded"],
+        )
 
     def test_scheduled_audit_and_tool_results_are_projected_safely(self) -> None:
         audit = InMemoryAuditLog()

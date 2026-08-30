@@ -43,6 +43,7 @@ from miso.live_events import (
     conversation_caption_publisher,
     conversation_error_publisher,
     conversation_event_publisher,
+    user_capture_publisher,
     user_transcript_publisher,
 )
 from miso.memory import MemoryStore, SearchResult, utc_now
@@ -74,7 +75,7 @@ from miso.tools import (
     WeatherConfig,
     create_runtime_registry,
 )
-from miso.tools.audit import audit_event
+from miso.tools.audit import JsonlAuditLog, audit_event
 
 MISO_SYSTEM_PROMPT = (
     "You are Miso, a friendly local household assistant. Answer ordinary questions "
@@ -1572,6 +1573,9 @@ def create_server(
         fast_lane=fast_lane,
         tool_picker=tool_picker,
         audit_sink=registry.audit_sink,
+        latency_sink=JsonlAuditLog(
+            settings.state_dir / "audit" / "routing.jsonl"
+        ),
         system_prompt=MISO_SYSTEM_PROMPT,
         wake_phrase=settings.wake_phrase,
         listen_timeout_seconds=settings.conversation_listen_timeout_seconds,
@@ -1599,6 +1603,7 @@ def create_server(
     conversation.add_transition_listener(conversation_event_publisher(live_events))
     conversation.add_response_listener(conversation_caption_publisher(live_events))
     conversation.add_transcript_listener(user_transcript_publisher(live_events))
+    conversation.add_capture_listener(user_capture_publisher(live_events))
     conversation.add_error_listener(conversation_error_publisher(live_events))
     return MisoHTTPServer(
         (settings.host, settings.port if port is None else port),

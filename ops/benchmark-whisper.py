@@ -11,6 +11,8 @@ import sys
 import wave
 from pathlib import Path
 
+from miso.conversation import strip_wake_phrase
+from miso.intake import match_fast_intent
 from miso.transcription import Utterance, WhisperCppTranscriber, word_error_rate
 
 
@@ -22,10 +24,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--threads", type=int, default=4)
     result.add_argument("--timeout", type=float, default=120)
     result.add_argument("--prompt", default="")
+    result.add_argument("--wake-phrase", default="Miso")
     result.add_argument("--repeats", type=int, default=1)
     result.add_argument("--monolingual-wer-target", type=float, default=0.20)
     result.add_argument("--mixed-wer-target", type=float, default=0.50)
     result.add_argument("--latency-target-ms", type=int, default=2_500)
+    result.add_argument("--intent-accuracy-target", type=float, default=1.0)
     result.add_argument("--output", type=Path)
     return result
 
@@ -48,8 +52,39 @@ def read_manifest(path: Path) -> list[dict[str, str]]:
         if category not in {"monolingual", "mixed"}:
             raise ValueError("manifest category must be monolingual or mixed")
         case["category"] = category
+        intent = raw.get("intent")
+        if intent is not None:
+            if not isinstance(intent, str) or not intent:
+                raise ValueError("manifest intent must be a non-empty string")
+            arguments = raw.get("intent_arguments", {})
+            if not isinstance(arguments, dict):
+                raise ValueError("manifest intent_arguments must be an object")
+            case["intent"] = intent
+            case["intent_arguments"] = arguments
         cases.append(case)
     return cases
+
+
+def intent_outcome(
+    case: dict[str, object], hypothesis: str, wake_phrase: str
+) -> dict[str, object] | None:
+    """Score whether a transcript still reaches its deterministic fast lane.
+
+    Word error rate alone hides the failure that matters here: a near-miss on
+    one number word costs little WER but sends the whole turn to the model.
+    """
+    if "intent" not in case:
+        return None
+    request = strip_wake_phrase(hypothesis, wake_phrase)
+    matched = match_fast_intent(request, str(case["language"]))
+    name = None if matched is None else matched[0]
+    arguments = {} if matched is None else dict(matched[1])
+    return {
+        "expected": case["intent"],
+        "matched": name,
+        "arguments": arguments,
+        "hit": name == case["intent"] and arguments == case["intent_arguments"],
+    }
 
 
 def load_utterance(path: Path) -> Utterance:
@@ -91,6 +126,9 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
                 attempts.append(
                     {
                         "text": transcription.text,
+                        "intent": intent_outcome(
+                            case, transcription.text, arguments.wake_phrase
+                        ),
                         "language": transcription.language,
                         "language_confidence": transcription.language_confidence,
                         "confidence": transcription.confidence,
@@ -138,6 +176,14 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
             for case in model_cases
             for attempt in case["attempts"]
         )
+        scored_intents = [
+            attempt["intent"] for attempt in flat if attempt["intent"] is not None
+        ]
+        intent_accuracy = (
+            statistics.fmean(outcome["hit"] for outcome in scored_intents)
+            if scored_intents
+            else None
+        )
         p95_latency = percentile_95(latencies)
         results.append(
             {
@@ -149,6 +195,9 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
                         None if mixed_wer is None else round(mixed_wer, 4)
                     ),
                     "language_accuracy": round(language_accuracy, 4),
+                    "fast_lane_intent_accuracy": (
+                        None if intent_accuracy is None else round(intent_accuracy, 4)
+                    ),
                     "median_latency_milliseconds": round(statistics.median(latencies)),
                     "p95_latency_milliseconds": p95_latency,
                     "median_real_time_factor": round(
@@ -164,6 +213,10 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
                             or mixed_wer <= arguments.mixed_wer_target
                         )
                         and language_accuracy == 1
+                        and (
+                            intent_accuracy is None
+                            or intent_accuracy >= arguments.intent_accuracy_target
+                        )
                         and p95_latency <= arguments.latency_target_ms
                     ),
                 },
@@ -182,6 +235,9 @@ def benchmark(arguments: argparse.Namespace) -> dict[str, object]:
             "monolingual_wer_target": arguments.monolingual_wer_target,
             "mixed_wer_target": arguments.mixed_wer_target,
             "latency_target_milliseconds": arguments.latency_target_ms,
+            "intent_accuracy_target": arguments.intent_accuracy_target,
+            "wake_phrase": arguments.wake_phrase,
+            "prompt": arguments.prompt,
             "offline": True,
         },
         "models": results,

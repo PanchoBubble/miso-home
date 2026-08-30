@@ -62,6 +62,16 @@ canvas.face-renderer { display: block; }
   font-style: italic;
   font-weight: 600;
 }
+/* A capture cue is a placeholder, not text anyone said, so it drops the
+   "typing" suffix a draft answer uses and breathes on its own instead. */
+.companion-caption[data-caption-cue] .caption-speaker::after {
+  content: none;
+  animation: none;
+}
+.companion-caption[data-caption-cue] .caption-copy {
+  font-style: normal;
+  animation: fallback-pulse 1.4s ease-in-out infinite;
+}
 .companion-caption[data-caption-speaker="error"] {
   border-color: rgba(255, 138, 128, 0.65);
 }

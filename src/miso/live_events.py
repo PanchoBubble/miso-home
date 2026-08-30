@@ -344,6 +344,26 @@ def conversation_caption_publisher(
     return publish
 
 
+CAPTURE_STATES = frozenset({"capturing", "transcribing", "discarded"})
+
+
+def user_capture_publisher(
+    events: LiveEventStore,
+) -> Callable[[str], None]:
+    """Announce that the microphone is capturing before any transcript exists.
+
+    Transcription of a short command still costs a second or more, and until it
+    lands the display has nothing to show, so a wake looks like it was missed.
+    """
+
+    def publish(state: str) -> None:
+        if state not in CAPTURE_STATES:
+            raise ValueError("user capture state is invalid")
+        events.publish("user_capture", {"state": state}, actor=VOICE_ACTOR)
+
+    return publish
+
+
 def user_transcript_publisher(
     events: LiveEventStore,
 ) -> Callable[[str, str], None]:

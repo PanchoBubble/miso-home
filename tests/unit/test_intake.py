@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from miso.intake import FastLane, guess_language
+from miso.intake import FastLane, guess_language, match_fast_intent
 from miso.tools import (
     InMemoryAuditLog,
     ToolDirectoryLoader,
@@ -154,6 +154,14 @@ class FastLaneTests(unittest.TestCase):
     def test_refresh_phrasing_without_the_tool_falls_through(self) -> None:
         self.assertIsNone(self.lane.try_handle("Refresh your tools", "en"))
         self.assertIsNone(self.lane.try_handle("refresh the kitchen tools", "en"))
+
+    def test_dry_run_match_reports_intent_without_running_a_tool(self) -> None:
+        self.assertEqual(
+            match_fast_intent("pon un temporizador de cinco segundos", "es"),
+            ("timer_create", {"duration_seconds": 5}),
+        )
+        self.assertIsNone(match_fast_intent("Cinco Ceundas", "es"))
+        self.assertIsNone(match_fast_intent("   ", "es"))
 
     def test_language_guess_for_typed_text(self) -> None:
         self.assertEqual(guess_language("¿Qué tiempo hace?"), "es")
