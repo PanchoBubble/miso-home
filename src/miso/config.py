@@ -25,6 +25,18 @@ def _boolean(value: str, name: str) -> bool:
     raise ConfigError(f"{name} must be true or false")
 
 
+def _languages(value: str, name: str) -> tuple[str, ...]:
+    codes = tuple(
+        code.strip().casefold() for code in value.split(",") if code.strip()
+    )
+    if not codes:
+        raise ConfigError(f"{name} must list at least one language code")
+    for code in codes:
+        if not code.isalpha() or not 2 <= len(code) <= 3:
+            raise ConfigError(f"{name} contains an invalid language code: {code}")
+    return codes
+
+
 def _email(value: str, name: str) -> str:
     try:
         return normalize_email(value)
@@ -110,6 +122,7 @@ class Settings:
     stt_executable: Path = Path("/usr/local/bin/whisper-cli")
     stt_model: Path = Path("/var/lib/miso/models/whisper/ggml-tiny.bin")
     stt_threads: int = 4
+    stt_languages: tuple[str, ...] = ("en", "es")
     stt_timeout_seconds: float = 45.0
     # Whole example commands, not a vocabulary list: whisper conditions on this
     # text as if it preceded the utterance, so phrasing primes far better than
@@ -151,6 +164,7 @@ class Settings:
     conversation_listen_timeout_seconds: float = 8.0
     conversation_checkback_timeout_seconds: float = 5.0
     conversation_acknowledgement: str = "Yes?"
+    conversation_acknowledge_wake: bool = True
     conversation_echo_guard_seconds: float = 0.6
     conversation_echo_memory_seconds: float = 12.0
 
@@ -272,6 +286,10 @@ class Settings:
             )
         except ValueError as error:
             raise ConfigError("MISO audio numeric settings are invalid") from error
+
+        stt_languages = _languages(
+            source.get("MISO_STT_LANGUAGES", "en,es"), "MISO_STT_LANGUAGES"
+        )
 
         settings = cls(
             host=source.get("MISO_HOST", "127.0.0.1"),
@@ -444,6 +462,7 @@ class Settings:
                 )
             ),
             stt_threads=stt_threads,
+            stt_languages=stt_languages,
             stt_timeout_seconds=stt_timeout_seconds,
             stt_prompt=source.get(
                 "MISO_STT_PROMPT",
@@ -512,6 +531,10 @@ class Settings:
             ),
             conversation_checkback_timeout_seconds=(
                 conversation_checkback_timeout_seconds
+            ),
+            conversation_acknowledge_wake=_boolean(
+                source.get("MISO_CONVERSATION_ACKNOWLEDGE_WAKE", "true"),
+                "MISO_CONVERSATION_ACKNOWLEDGE_WAKE",
             ),
             conversation_acknowledgement=source.get(
                 "MISO_CONVERSATION_ACKNOWLEDGEMENT", "Yes?"

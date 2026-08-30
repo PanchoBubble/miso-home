@@ -209,6 +209,8 @@ class ConversationManagerTests(unittest.TestCase):
         fast_lane=None,
         tool_picker=None,
         latency=None,
+        acknowledge_wake=True,
+        languages=("en", "es"),
     ):
         router = ProviderRouter(
             ProviderSet(pi=self.provider, lan=None, hosted=None), self.audit
@@ -225,6 +227,8 @@ class ConversationManagerTests(unittest.TestCase):
             tool_picker=tool_picker,
             audit_sink=self.audit,
             latency_sink=latency,
+            acknowledge_wake=acknowledge_wake,
+            languages=languages,
             system_prompt="You are Miso.",
             wake_phrase="Miso",
             listen_timeout_seconds=listen,
@@ -840,6 +844,88 @@ class ConversationManagerTests(unittest.TestCase):
 
             self.assertEqual(manager.status()["turns"], 0)
             self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+        finally:
+            manager.stop()
+
+    def test_wake_without_acknowledgement_opens_the_microphone_immediately(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=False)
+        manager.start()
+        try:
+            started = time.monotonic()
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            elapsed = time.monotonic() - started
+
+            # Nothing is spoken over the tail of "Miso, tell me hello".
+            self.assertEqual(speech.calls, [])
+            self.assertLess(elapsed, 0.3)
+            latest = manager.status()["latest_transition"]
+            self.assertEqual(latest["previous"], "idle")
+            self.assertEqual(latest["reason"], "wake detected")
+        finally:
+            manager.stop()
+
+    def test_wake_without_acknowledgement_still_routes_the_utterance(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=False)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "follow_up")
+
+            self.assertEqual([item[1] for item in speech.calls], ["First response"])
+            events = self.store.events(str(manager.status()["conversation_id"]))
+            self.assertEqual(events[0].content, "tell me hello")
+        finally:
+            manager.stop()
+
+    def test_wake_acknowledgement_is_spoken_when_it_is_enabled(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=True)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+            latest = manager.status()["latest_transition"]
+            self.assertEqual(latest["previous"], "acknowledging")
+        finally:
+            manager.stop()
+
+    def test_transcript_in_an_unsupported_language_is_discarded(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("bore da sut mae", language="cy")
+            wait_for(manager, "listening")
+
+            self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+            conversation_id = manager.status()["conversation_id"]
+            self.assertEqual(self.store.events(str(conversation_id)), [])
+        finally:
+            manager.stop()
+
+    def test_configured_language_is_kept(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, languages=("en", "es", "cy"))
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("bore da sut mae", language="cy")
+            wait_for(manager, "follow_up")
+
+            events = self.store.events(str(manager.status()["conversation_id"]))
+            self.assertEqual([event.role for event in events], ["user", "assistant"])
         finally:
             manager.stop()
 

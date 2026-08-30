@@ -1581,6 +1581,8 @@ def create_server(
         listen_timeout_seconds=settings.conversation_listen_timeout_seconds,
         checkback_timeout_seconds=settings.conversation_checkback_timeout_seconds,
         acknowledgement=settings.conversation_acknowledgement,
+        acknowledge_wake=settings.conversation_acknowledge_wake,
+        languages=settings.stt_languages,
         echo_guard_seconds=settings.conversation_echo_guard_seconds,
         echo_memory_seconds=settings.conversation_echo_memory_seconds,
     )

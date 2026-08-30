@@ -553,6 +553,21 @@ reached the speaker. It also records the lane that answered (`fast` or `model`)
 and the transcription cost, because no other audit entry spans the whole wait:
 routing latency omits transcription and the fast lane skips routing entirely.
 
+With `MISO_CONVERSATION_ACKNOWLEDGE_WAKE=false` the wake phrase opens the
+microphone directly instead of speaking "Yes?" first, so "Miso, set a timer for
+five minutes" works said in one breath. It is off in the shipped configuration:
+the acknowledgement plays through the same speaker the microphone hears, and
+there is no echo cancellation, so anyone who keeps talking through it has the
+tail of their sentence recorded on top of Miso's own voice and transcribed as
+mumble. The listening cue on the companion display carries the feedback the
+sound used to. Turn it back on for a speaker-only setup with no screen.
+
+Whisper auto-detects across every language it knows, so a noisy or foreign
+utterance can come back confidently labelled as something Miso cannot answer in.
+`MISO_STT_LANGUAGES` (default `en,es`) is the household's own list: a transcript
+detected outside it is discarded rather than answered, and the turn returns to
+listening.
+
 The optional conversation values are:
 
 ```text
@@ -560,6 +575,7 @@ MISO_CONVERSATION_ENABLED=true
 MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS=8
 MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS=5
 MISO_CONVERSATION_ACKNOWLEDGEMENT=Yes?
+MISO_CONVERSATION_ACKNOWLEDGE_WAKE=false
 MISO_CONVERSATION_ECHO_GUARD_SECONDS=0.6
 MISO_CONVERSATION_ECHO_MEMORY_SECONDS=12
 ```

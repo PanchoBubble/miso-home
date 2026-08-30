@@ -379,6 +379,8 @@ class ConversationManager:
         listen_timeout_seconds: float,
         checkback_timeout_seconds: float,
         acknowledgement: str = "Yes?",
+        acknowledge_wake: bool = True,
+        languages: tuple[str, ...] = ("en", "es"),
         checkback_english: str = "Anything else?",
         checkback_spanish: str = "¿Algo más?",
         goodbye_english: str = "Goodbye.",
@@ -422,6 +424,8 @@ class ConversationManager:
         self.echo_guard_seconds = echo_guard_seconds
         self.echo_memory_seconds = echo_memory_seconds
         self.acknowledgement = acknowledgement.strip()
+        self.acknowledge_wake = acknowledge_wake
+        self.languages = tuple(code.casefold() for code in languages) or ("en", "es")
         self.checkbacks = {"en": checkback_english, "es": checkback_spanish}
         self.goodbyes = {"en": goodbye_english, "es": goodbye_spanish}
         self._lock = threading.Lock()
@@ -685,13 +689,23 @@ class ConversationManager:
             self._deadline = None
             self._last_error = None
             self._ignore_activity_before = event.detected_at
-            if event.source == WAKE_SOURCE_BUTTON:
-                # Pressing the button is already an unambiguous address, so the
-                # spoken acknowledgement would only delay the microphone and the
-                # listening face behind a second of synthesis and playback.
-                self._turn_origin = ("button", _monotonic_for(event.detected_at))
+            button = event.source == WAKE_SOURCE_BUTTON
+            if button or not self.acknowledge_wake:
+                # A button press is already an unambiguous address, and when the
+                # spoken acknowledgement is off the wake phrase is treated the
+                # same way: someone saying "Miso, set a timer" in one breath is
+                # still talking while "Yes?" would be playing, so the tail of
+                # the sentence lands in the microphone mixed with Miso's own
+                # voice. Opening the microphone immediately keeps that audio
+                # clean and the listening cue on the display carries the
+                # feedback the sound used to.
+                origin = "button" if button else "wake"
+                self._turn_origin = (origin, _monotonic_for(event.detected_at))
                 self._deadline = time.monotonic() + self.listen_timeout_seconds
-                self._transition_locked(ConversationState.LISTENING, "button talk")
+                self._transition_locked(
+                    ConversationState.LISTENING,
+                    "button talk" if button else "wake detected",
+                )
                 return
             self._turn_origin = ("wake", _monotonic_for(event.detected_at))
             self._transition_locked(ConversationState.ACKNOWLEDGING, "wake detected")
@@ -797,6 +811,21 @@ class ConversationManager:
                 if self._state is ConversationState.TRANSCRIBING:
                     self._transition_locked(
                         ConversationState.LISTENING, "wake-only transcript ignored"
+                    )
+                self._deadline = time.monotonic() + self.listen_timeout_seconds
+            self._publish_capture("discarded")
+            return
+        detected = (result.model_language or "").casefold()
+        if detected and detected not in self.languages and result.language != "mixed":
+            # whisper auto-detects across a hundred languages; a verdict outside
+            # the household's own two means the audio was noise or a language
+            # Miso cannot answer in, and the transcript that came with it is not
+            # worth acting on.
+            LOGGER.info("dropped transcript detected as %s", detected)
+            with self._lock:
+                if self._state is ConversationState.TRANSCRIBING:
+                    self._transition_locked(
+                        ConversationState.LISTENING, "unsupported language ignored"
                     )
                 self._deadline = time.monotonic() + self.listen_timeout_seconds
             self._publish_capture("discarded")

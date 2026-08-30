@@ -362,5 +362,36 @@ class SettingsTests(unittest.TestCase):
                     Settings.from_env(environment)
 
 
+
+class LanguageAndWakeSettingsTests(unittest.TestCase):
+    def _settings(self, **overrides):
+        source = {
+            "MISO_DB_PATH": "/tmp/miso/db/miso.sqlite3",
+            "MISO_STATE_DIR": "/tmp/miso/state",
+            "MISO_MODEL_DIR": "/tmp/miso/models",
+        }
+        source.update(overrides)
+        return Settings.from_env(source)
+
+    def test_languages_default_to_english_and_spanish(self) -> None:
+        self.assertEqual(self._settings().stt_languages, ("en", "es"))
+
+    def test_languages_are_parsed_and_normalised(self) -> None:
+        settings = self._settings(MISO_STT_LANGUAGES="EN, es , fr")
+        self.assertEqual(settings.stt_languages, ("en", "es", "fr"))
+
+    def test_empty_language_list_is_rejected(self) -> None:
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_STT_LANGUAGES=" , ")
+
+    def test_invalid_language_code_is_rejected(self) -> None:
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_STT_LANGUAGES="en,spanish")
+
+    def test_wake_acknowledgement_defaults_on_and_can_be_disabled(self) -> None:
+        self.assertTrue(self._settings().conversation_acknowledge_wake)
+        settings = self._settings(MISO_CONVERSATION_ACKNOWLEDGE_WAKE="false")
+        self.assertFalse(settings.conversation_acknowledge_wake)
+
 if __name__ == "__main__":
     unittest.main()
