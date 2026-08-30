@@ -187,6 +187,29 @@ _VOICE_ADDRESSABLE = frozenset(
 )
 
 
+def strip_wake_phrase(text: str, wake_phrase: str) -> str:
+    """Drop a leading wake phrase so only the request itself remains."""
+    normalized = text.strip()
+    phrase = re.escape(wake_phrase.strip())
+    pattern = rf"^{phrase}(?=$|[\s,.:;!?-])(?:\s*[,.:;!?-]\s*|\s+)?"
+    return re.sub(pattern, "", normalized, count=1, flags=re.IGNORECASE).strip()
+
+
+def _monotonic_for(wall_clock: float) -> float:
+    """Place a wall-clock timestamp on the monotonic clock used for latency."""
+    return time.monotonic() - max(0.0, time.time() - wall_clock)
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnContext:
+    """What a turn needs to report its own wake-to-first-audio latency."""
+
+    turn: int
+    origin: str
+    origin_at: float
+    conversation_id: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class StateTransition:
     previous: ConversationState
@@ -241,11 +264,14 @@ class _SegmentSpeaker:
         language: str,
         generation: int,
         cancel: threading.Event,
+        on_first_audio: Callable[[float], None] | None = None,
     ) -> None:
         self._manager = manager
         self._language = language
         self._generation = generation
         self._cancel = cancel
+        self._on_first_audio = on_first_audio
+        self._reported_first_audio = False
         self._buffer = ""
         self.received = False
         self.opened_gate = False
@@ -281,8 +307,10 @@ class _SegmentSpeaker:
             manager._open_echo_gate()
             self.opened_gate = True
         manager._remember_spoken(segment)
+        requested_at = time.monotonic()
         request_id = manager.speech.speak(segment, self._language)
         result = manager._wait_for_speech(request_id, self._cancel)
+        self._note_first_audio(requested_at, result)
         if result is not None and result.status == "completed":
             return
         if self._cancel.is_set() or (
@@ -293,6 +321,23 @@ class _SegmentSpeaker:
             "speech output timed out"
             if result is None
             else (result.error or "speech output failed")
+        )
+
+    def _note_first_audio(
+        self, requested_at: float, result: SpeechResult | None
+    ) -> None:
+        """Report when the speaker first produced sound for this turn.
+
+        Piper measures its own first chunk relative to the start of synthesis,
+        so the request time plus that offset is the wall moment audio began.
+        """
+        if self._reported_first_audio or self._on_first_audio is None:
+            return
+        if result is None or result.first_audio_milliseconds is None:
+            return
+        self._reported_first_audio = True
+        self._on_first_audio(
+            requested_at + result.first_audio_milliseconds / 1000
         )
 
 
@@ -311,6 +356,7 @@ class ConversationManager:
         memory: MemoryStore,
         fast_lane: FastLane | None = None,
         audit_sink: AuditSink,
+        latency_sink: AuditSink | None = None,
         system_prompt: str,
         wake_phrase: str,
         listen_timeout_seconds: float,
@@ -326,6 +372,7 @@ class ConversationManager:
         transition_listeners: tuple[Callable[[StateTransition], None], ...] = (),
         response_listeners: tuple[Callable[[str, str, bool], None], ...] = (),
         transcript_listeners: tuple[Callable[[str, str], None], ...] = (),
+        capture_listeners: tuple[Callable[[str], None], ...] = (),
         error_listeners: tuple[Callable[[str], None], ...] = (),
     ) -> None:
         if listen_timeout_seconds <= 0 or checkback_timeout_seconds <= 0:
@@ -347,6 +394,9 @@ class ConversationManager:
         self.memory = memory
         self.fast_lane = fast_lane
         self.audit_sink = audit_sink
+        # Turn latency belongs beside the routing decisions it is judged
+        # against, which is a different log from the tool audit trail.
+        self.latency_sink = latency_sink or audit_sink
         self.system_prompt = system_prompt
         self.wake_phrase = wake_phrase.strip()
         self.listen_timeout_seconds = listen_timeout_seconds
@@ -367,6 +417,7 @@ class ConversationManager:
         self._transition_listeners = list(transition_listeners)
         self._response_listeners = list(response_listeners)
         self._transcript_listeners = list(transcript_listeners)
+        self._capture_listeners = list(capture_listeners)
         self._error_listeners = list(error_listeners)
         self._conversation_id: str | None = None
         self._active_cancel: threading.Event | None = None
@@ -383,6 +434,7 @@ class ConversationManager:
         self._cue_speaking = False
         self._cue_gate_until = 0.0
         self._spoken_recently: list[tuple[str, float]] = []
+        self._turn_origin: tuple[str, float] | None = None
 
     def start(self) -> None:
         if not self.enabled or (self._thread is not None and self._thread.is_alive()):
@@ -442,9 +494,22 @@ class ConversationManager:
         with self._lock:
             self._transcript_listeners.append(listener)
 
+    def add_capture_listener(self, listener: Callable[[str], None]) -> None:
+        with self._lock:
+            self._capture_listeners.append(listener)
+
     def add_error_listener(self, listener: Callable[[str], None]) -> None:
         with self._lock:
             self._error_listeners.append(listener)
+
+    def _publish_capture(self, state: str) -> None:
+        with self._lock:
+            listeners = tuple(self._capture_listeners)
+        for listener in listeners:
+            try:
+                listener(state)
+            except Exception:
+                LOGGER.exception("conversation capture listener failed")
 
     def _publish_transcript(self, text: str, language: str) -> None:
         with self._lock:
@@ -587,6 +652,7 @@ class ConversationManager:
             self._deadline = None
             self._last_error = None
             self._ignore_activity_before = event.detected_at
+            self._turn_origin = ("wake", _monotonic_for(event.detected_at))
             self._transition_locked(ConversationState.ACKNOWLEDGING, "wake detected")
         self._start_cue(
             self.acknowledgement,
@@ -598,6 +664,7 @@ class ConversationManager:
 
     def _handle_activity(self, activity: SpeechActivity) -> None:
         if activity.kind == "discarded":
+            discarded = False
             with self._lock:
                 if self._state is ConversationState.TRANSCRIBING:
                     self._active_cancel = None
@@ -606,9 +673,21 @@ class ConversationManager:
                         ConversationState.LISTENING,
                         "short utterance discarded",
                     )
+                    discarded = True
+            if discarded:
+                self._publish_capture("discarded")
+            return
+        if activity.kind == "ended":
+            # The utterance is now with the recogniser, which is the slow half
+            # of the wait, so the cue changes rather than disappearing.
+            with self._lock:
+                waiting = self._state is ConversationState.TRANSCRIBING
+            if waiting:
+                self._publish_capture("transcribing")
             return
         if activity.kind != "started":
             return
+        capturing = False
         with self._lock:
             if activity.occurred_at <= self._ignore_activity_before:
                 return
@@ -621,9 +700,17 @@ class ConversationManager:
                 return
             if self._state is state:
                 self._deadline = None
+                if self._turn_origin is None:
+                    self._turn_origin = (
+                        "follow_up",
+                        _monotonic_for(activity.occurred_at),
+                    )
                 self._transition_locked(
                     ConversationState.TRANSCRIBING, "speech detected"
                 )
+                capturing = True
+        if capturing:
+            self._publish_capture("capturing")
 
     def _handle_transcription(self, result: TranscriptionResult) -> None:
         with self._lock:
@@ -671,6 +758,7 @@ class ConversationManager:
                         ConversationState.LISTENING, "wake-only transcript ignored"
                     )
                 self._deadline = time.monotonic() + self.listen_timeout_seconds
+            self._publish_capture("discarded")
             return
         language = (
             "es"
@@ -687,6 +775,7 @@ class ConversationManager:
                         ConversationState.LISTENING, "own speech ignored"
                     )
                 self._deadline = time.monotonic() + self.listen_timeout_seconds
+            self._publish_capture("discarded")
             return
         if self._is_goodbye(text):
             with self._lock:
@@ -721,10 +810,15 @@ class ConversationManager:
                 ConversationState.ROUTING, "transcription completed"
             )
             self._turns += 1
+            origin, origin_at = self._turn_origin or ("turn", time.monotonic())
+            self._turn_origin = None
+            context = _TurnContext(
+                self._turns, origin, origin_at, self._conversation_id
+            )
         self._publish_transcript(text, language)
         self._turn_thread = threading.Thread(
             target=self._execute_turn,
-            args=(generation, cancel, text, language, transcription),
+            args=(generation, cancel, text, language, transcription, context),
             name="miso-conversation-turn",
             daemon=True,
         )
@@ -737,8 +831,18 @@ class ConversationManager:
         text: str,
         language: str,
         transcription: TranscriptionResult,
+        context: _TurnContext,
     ) -> None:
-        speaker = _SegmentSpeaker(self, language, generation, cancel)
+        lane = "model"
+        speaker = _SegmentSpeaker(
+            self,
+            language,
+            generation,
+            cancel,
+            on_first_audio=lambda at: self._record_first_audio(
+                context, lane, language, transcription, at
+            ),
+        )
         try:
             with self._lock:
                 conversation_id = self._conversation_id
@@ -764,6 +868,7 @@ class ConversationManager:
             used_tool = False
             partial: list[str] = []
             if fast_reply is not None:
+                lane = "fast"
                 self._transition_current(
                     generation, ConversationState.USING_TOOL, "fast intent matched"
                 )
@@ -871,6 +976,42 @@ class ConversationManager:
                 self._recover(error)
         finally:
             speaker.close()
+
+    def _record_first_audio(
+        self,
+        context: _TurnContext,
+        lane: str,
+        language: str,
+        transcription: TranscriptionResult,
+        first_audio_at: float,
+    ) -> None:
+        """Record how long the user waited between speaking and hearing audio.
+
+        This is the number a listener actually experiences, and no existing
+        audit entry covers it: routing latency omits transcription and the
+        fast lane skips routing altogether.
+        """
+        try:
+            self.latency_sink.record(
+                audit_event(
+                    "turn_first_audio",
+                    conversation_id=context.conversation_id,
+                    turn=context.turn,
+                    origin=context.origin,
+                    lane=lane,
+                    language=language,
+                    status="completed",
+                    latency_ms=max(
+                        0, round((first_audio_at - context.origin_at) * 1000)
+                    ),
+                    transcription_ms=transcription.inference_milliseconds,
+                    actor=VOICE_ACTOR.actor_id,
+                    actor_source=VOICE_ACTOR.source,
+                )
+            )
+        except Exception:
+            # A metric must never take the answer down with it.
+            LOGGER.exception("could not record turn first-audio latency")
 
     def _stream_turn(
         self,
@@ -1018,6 +1159,7 @@ class ConversationManager:
             self._last_error = str(error)[:200]
             self._deadline = None
             self._active_cancel = None
+            self._turn_origin = None
             if self._state not in {
                 ConversationState.ERROR,
                 ConversationState.IDLE,
@@ -1041,10 +1183,7 @@ class ConversationManager:
             return generation == self._generation
 
     def _without_wake_phrase(self, text: str) -> str:
-        normalized = text.strip()
-        phrase = re.escape(self.wake_phrase)
-        pattern = rf"^{phrase}(?=$|[\s,.:;!?-])(?:\s*[,.:;!?-]\s*|\s+)?"
-        return re.sub(pattern, "", normalized, count=1, flags=re.IGNORECASE).strip()
+        return strip_wake_phrase(text, self.wake_phrase)
 
     def _starts_with_wake_phrase(self, text: str) -> bool:
         normalized = text.strip()

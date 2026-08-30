@@ -380,7 +380,13 @@ MISO_STT_VAD_MAXIMUM_UTTERANCE_MILLISECONDS=15000
 MISO_STT_VAD_PRE_ROLL_MILLISECONDS=200
 ```
 
-`MISO_STT_PROMPT` can override the short bilingual command vocabulary bias.
+`MISO_STT_PROMPT` can override the bilingual command bias. The default is a
+short list of whole example commands rather than loose keywords: whisper
+conditions on the prompt as if it preceded the utterance, so example phrasing
+primes it far better. A prompt listing number words is measurably worse, since
+it lets the model spell a wrong number confidently. See
+`docs/miso-transcription-benchmark.md`.
+
 Energy gating is deliberately replaceable so the wake/VAD phase can supply a
 stronger speech decision without changing utterance or transcription contracts.
 
@@ -471,6 +477,20 @@ are rejected, and bounded provider, tool, or speech errors clear the active
 conversation and return safely to idle. `/api/status` exposes the current state,
 turn/interruption/timeout/error counts, and the latest transition without
 transcript or spoken-response text.
+
+The companion display shows a capture cue as soon as the VAD hears speech and
+switches it to a recogniser cue when the utterance is handed to whisper, both
+before any transcript exists. Transcribing a short command still costs about a
+second, and until this a landed wake was indistinguishable from a missed one.
+The cue is retired by the transcript that replaces it, or by the discard event
+when the utterance was too short to keep.
+
+Each voice turn writes a `turn_first_audio` entry to
+`state_dir / "audit" / "routing.jsonl"` carrying `latency_ms` from the wake
+word, or from speech onset on a follow-up turn, to the first Piper chunk that
+reached the speaker. It also records the lane that answered (`fast` or `model`)
+and the transcription cost, because no other audit entry spans the whole wait:
+routing latency omits transcription and the fast lane skips routing entirely.
 
 The optional conversation values are:
 

@@ -1,0 +1,177 @@
+{
+  "variants": [
+    {
+      "name": "tiny-production-prompt",
+      "role": "before",
+      "model": "ggml-tiny.bin",
+      "prompt": "Miso. English and Spanish home assistant commands. Timer, shopping list, calendar, events, lights. Temporizador, lista de compras, calendario, citas, luces.",
+      "repeats": 3,
+      "mean_wer": 0.1679,
+      "fast_lane_intent_accuracy": 0.8,
+      "language_accuracy": 1.0,
+      "median_latency_milliseconds": 788,
+      "p95_latency_milliseconds": 812,
+      "spanish": {
+        "attempts": 51,
+        "mean_wer": 0.1415,
+        "fast_lane_intent_accuracy": 0.8235
+      },
+      "english": {
+        "attempts": 9,
+        "mean_wer": 0.3175,
+        "fast_lane_intent_accuracy": 0.6667
+      },
+      "misses": [
+        "en-gb-timer-thirty-seconds",
+        "es-timer-five-minutes",
+        "es-timer-five-seconds",
+        "es-timer-remaining"
+      ]
+    },
+    {
+      "name": "tiny-command-example-prompt",
+      "role": "after",
+      "model": "ggml-tiny.bin",
+      "prompt": "Miso. Comandos de casa en español e inglés. Pon un temporizador de ocho minutos. ¿Cuánto tiempo queda en el temporizador? Añade leche a la lista de la compra. Enciende la luz de la cocina. Set a timer for twenty seconds. Add bread to the shopping list.",
+      "repeats": 3,
+      "mean_wer": 0.0798,
+      "fast_lane_intent_accuracy": 0.85,
+      "language_accuracy": 1.0,
+      "median_latency_milliseconds": 800,
+      "p95_latency_milliseconds": 827,
+      "spanish": {
+        "attempts": 51,
+        "mean_wer": 0.0939,
+        "fast_lane_intent_accuracy": 0.8235
+      },
+      "english": {
+        "attempts": 9,
+        "mean_wer": 0.0,
+        "fast_lane_intent_accuracy": 1.0
+      },
+      "misses": [
+        "es-timer-five-minutes",
+        "es-timer-five-seconds",
+        "es-timer-remaining"
+      ]
+    },
+    {
+      "name": "tiny-number-list-prompt",
+      "role": "rejected",
+      "model": "ggml-tiny.bin",
+      "prompt": "Miso. Comandos de casa en español e inglés. Pon un temporizador de ocho minutos. Añade leche a la lista de la compra. Enciende la luz de la cocina. Set a timer for twenty seconds. Add bread to the shopping list. Números en palabras: uno, dos, tres, cuatro, cinco, seis, siete, ocho, nueve, diez, once, doce, quince, veinte, treinta, cuarenta, cincuenta, sesenta. Segundos, minutos, horas, temporizador, cronómetro.",
+      "repeats": 3,
+      "mean_wer": 0.0869,
+      "fast_lane_intent_accuracy": 0.8,
+      "language_accuracy": 1.0,
+      "median_latency_milliseconds": 822,
+      "p95_latency_milliseconds": 853,
+      "spanish": {
+        "attempts": 51,
+        "mean_wer": 0.0854,
+        "fast_lane_intent_accuracy": 0.7647
+      },
+      "english": {
+        "attempts": 9,
+        "mean_wer": 0.0953,
+        "fast_lane_intent_accuracy": 1.0
+      },
+      "misses": [
+        "es-mx-timer-twelve-minutes",
+        "es-timer-five-minutes",
+        "es-timer-five-seconds",
+        "es-timer-remaining"
+      ]
+    },
+    {
+      "name": "base-number-list-prompt",
+      "role": "rejected",
+      "model": "ggml-base.bin",
+      "prompt": "Miso. Comandos de casa en español e inglés. Pon un temporizador de ocho minutos. Añade leche a la lista de la compra. Enciende la luz de la cocina. Set a timer for twenty seconds. Add bread to the shopping list. Números en palabras: uno, dos, tres, cuatro, cinco, seis, siete, ocho, nueve, diez, once, doce, quince, veinte, treinta, cuarenta, cincuenta, sesenta. Segundos, minutos, horas, temporizador, cronómetro.",
+      "repeats": 3,
+      "mean_wer": 0.0488,
+      "fast_lane_intent_accuracy": 0.9,
+      "language_accuracy": 1.0,
+      "median_latency_milliseconds": 1460,
+      "p95_latency_milliseconds": 1483,
+      "spanish": {
+        "attempts": 51,
+        "mean_wer": 0.0574,
+        "fast_lane_intent_accuracy": 0.8824
+      },
+      "english": {
+        "attempts": 9,
+        "mean_wer": 0.0,
+        "fast_lane_intent_accuracy": 1.0
+      },
+      "misses": [
+        "es-timer-five-seconds",
+        "es-timer-remaining"
+      ]
+    },
+    {
+      "name": "small-number-list-prompt",
+      "role": "rejected",
+      "model": "ggml-small.bin",
+      "prompt": "Miso. Comandos de casa en español e inglés. Pon un temporizador de ocho minutos. Añade leche a la lista de la compra. Enciende la luz de la cocina. Set a timer for twenty seconds. Add bread to the shopping list. Números en palabras: uno, dos, tres, cuatro, cinco, seis, siete, ocho, nueve, diez, once, doce, quince, veinte, treinta, cuarenta, cincuenta, sesenta. Segundos, minutos, horas, temporizador, cronómetro.",
+      "repeats": 1,
+      "mean_wer": 0.0,
+      "fast_lane_intent_accuracy": 1.0,
+      "language_accuracy": 1.0,
+      "median_latency_milliseconds": 4100,
+      "p95_latency_milliseconds": 4189,
+      "spanish": {
+        "attempts": 17,
+        "mean_wer": 0.0,
+        "fast_lane_intent_accuracy": 1.0
+      },
+      "english": {
+        "attempts": 3,
+        "mean_wer": 0.0,
+        "fast_lane_intent_accuracy": 1.0
+      },
+      "misses": []
+    },
+    {
+      "name": "tiny-cinco-primed-prompt",
+      "role": "rejected",
+      "model": "ggml-tiny.bin",
+      "prompt": "Miso. Comandos de casa en español e inglés. Pon un temporizador de ocho minutos. Añade leche a la lista de la compra. Enciende la luz de la cocina. Set a timer for twenty seconds. Add bread to the shopping list. Números en palabras: uno, dos, tres, cuatro, cinco, seis, siete, ocho, nueve, diez, once, doce, quince, veinte, treinta, cuarenta, cincuenta, sesenta. Segundos, minutos, horas, temporizador, cronómetro. Cinco segundos, cinco minutos.",
+      "repeats": 1,
+      "mean_wer": 0.0786,
+      "fast_lane_intent_accuracy": 0.8,
+      "language_accuracy": 1.0,
+      "median_latency_milliseconds": 808,
+      "p95_latency_milliseconds": 830,
+      "spanish": {
+        "attempts": 17,
+        "mean_wer": 0.0756,
+        "fast_lane_intent_accuracy": 0.7647
+      },
+      "english": {
+        "attempts": 3,
+        "mean_wer": 0.0953,
+        "fast_lane_intent_accuracy": 1.0
+      },
+      "misses": [
+        "es-mx-timer-twelve-minutes",
+        "es-timer-five-minutes",
+        "es-timer-five-seconds",
+        "es-timer-remaining"
+      ]
+    }
+  ],
+  "host": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "python": "3.12.11"
+  },
+  "fixtures": {
+    "generator": "ops/make-stt-fixtures.py",
+    "cases": 20,
+    "spanish_cases": 17,
+    "english_cases": 3,
+    "note": "macOS say(1) voices Monica (es_ES), Paulina (es_MX), Samantha (en_US) and Daniel (en_GB); mono 16 kHz S16_LE. No fixture sentence appears in any evaluated prompt."
+  },
+  "whisper_cpp": "1.9.2 (Homebrew), --no-gpu, 4 threads, --language auto"
+}

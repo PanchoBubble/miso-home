@@ -334,6 +334,26 @@ def default_intents() -> tuple[FastIntent, ...]:
     )
 
 
+def match_fast_intent(
+    text: str,
+    language: str,
+    intents: tuple[FastIntent, ...] | None = None,
+) -> tuple[str, Mapping[str, object]] | None:
+    """Report which intent an utterance takes, without invoking its tool.
+
+    Offline scoring needs to know whether a transcript still reaches the fast
+    lane, and it must not create timers or shopping items to find out.
+    """
+    normalized = _normalize(text)
+    if not normalized:
+        return None
+    for intent in default_intents() if intents is None else intents:
+        arguments = intent.match(normalized, language)
+        if arguments is not None:
+            return intent.name, arguments
+    return None
+
+
 class FastLane:
     """Try deterministic intents before any model call.
 

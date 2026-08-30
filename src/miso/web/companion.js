@@ -6,6 +6,15 @@ const CAPTION_MAX_AGE_MS = 30000;
 const CAPTION_MIN_VISIBLE_MS = 6000;
 const CAPTION_MAX_VISIBLE_MS = 20000;
 const CAPTION_MS_PER_CHARACTER = 55;
+const CAPTURE_CUE_MAX_AGE_MS = 5000;
+const CAPTURE_CUE_TIMEOUT_MS = 20000;
+
+// Shown while the microphone is still capturing, so a wake that landed
+// looks different from one that was missed even before whisper answers.
+const CAPTURE_CUES = Object.freeze({
+  capturing: "Listening\u2026",
+  transcribing: "Working out what you said\u2026",
+});
 
 const COMPANION_STATES = Object.freeze({
   idle: { code: 0, label: "Ready" },
@@ -79,6 +88,7 @@ function clearCaption() {
   caption.hidden = true;
   caption.dataset.captionState = "final";
   caption.dataset.captionSpeaker = "miso";
+  delete caption.dataset.captionCue;
   captionSpeaker.textContent = "Miso";
   captionCopy.textContent = "";
 }
@@ -90,6 +100,7 @@ function showCaption(text, final = true, speaker = "Miso") {
   companion.captionTimer = null;
   captionSpeaker.textContent = speaker;
   caption.dataset.captionSpeaker = speaker.toLowerCase();
+  delete caption.dataset.captionCue;
   captionCopy.textContent = normalized;
   caption.hidden = false;
   // A draft caption is the answer still being generated. It must not time out
@@ -101,6 +112,19 @@ function showCaption(text, final = true, speaker = "Miso") {
     Math.max(CAPTION_MIN_VISIBLE_MS, normalized.length * CAPTION_MS_PER_CHARACTER),
   );
   companion.captionTimer = window.setTimeout(clearCaption, visibleMilliseconds);
+}
+
+function showCaptureCue(state) {
+  const label = CAPTURE_CUES[state];
+  if (!label) {
+    // Anything else ended the capture. Only retire the cue itself: a real
+    // transcript or answer may already have replaced it.
+    if (caption.dataset.captionCue) clearCaption();
+    return;
+  }
+  showCaption(label, false, "You");
+  caption.dataset.captionCue = state;
+  companion.captionTimer = window.setTimeout(clearCaption, CAPTURE_CUE_TIMEOUT_MS);
 }
 
 function useFallback() {
@@ -191,6 +215,13 @@ function handleLiveEvent(event) {
   if (event.type === "assistant_state" && typeof event.payload?.state === "string") {
     applyCompanionState(event.payload.state);
     if (event.payload.state === "acknowledging") clearCaption();
+  }
+  if (
+    event.type === "user_capture"
+    && typeof event.payload?.state === "string"
+    && Date.now() - Date.parse(event.created_at) <= CAPTURE_CUE_MAX_AGE_MS
+  ) {
+    showCaptureCue(event.payload.state);
   }
   if (
     event.type === "assistant_caption"

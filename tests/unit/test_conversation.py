@@ -171,6 +171,15 @@ def speech_result(request_id: str, language: str, status="completed") -> SpeechR
     )
 
 
+def wait_until(predicate, description: str, timeout=1.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError(f"timed out waiting for {description}")
+
+
 def wait_for(manager: ConversationManager, state: str, timeout=1.0) -> None:
     deadline = time.monotonic() + timeout
     while manager.status()["state"] != state and time.monotonic() < deadline:
@@ -191,7 +200,10 @@ class ConversationManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def manager(self, speech=None, listen=1, checkback=1, tools=None, fast_lane=None):
+    def manager(
+        self, speech=None, listen=1, checkback=1, tools=None, fast_lane=None,
+        latency=None,
+    ):
         router = ProviderRouter(
             ProviderSet(pi=self.provider, lan=None, hosted=None), self.audit
         )
@@ -205,6 +217,7 @@ class ConversationManagerTests(unittest.TestCase):
             memory=self.store,
             fast_lane=fast_lane,
             audit_sink=self.audit,
+            latency_sink=latency,
             system_prompt="You are Miso.",
             wake_phrase="Miso",
             listen_timeout_seconds=listen,
@@ -298,6 +311,83 @@ class ConversationManagerTests(unittest.TestCase):
             self.assertEqual(heard, [("tell me hello", "en")])
         finally:
             manager.stop()
+
+    def test_capture_listener_cues_the_display_before_a_transcript_exists(
+        self,
+    ) -> None:
+        manager = self.manager()
+        cues = []
+        manager.add_capture_listener(cues.append)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            wait_until(lambda: cues == ["capturing"], "capture cue")
+            self.source.put_activity("ended")
+            wait_until(
+                lambda: cues == ["capturing", "transcribing"], "transcribing cue"
+            )
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "follow_up")
+            self.assertEqual(cues, ["capturing", "transcribing"])
+        finally:
+            manager.stop()
+
+    def test_capture_cue_is_retired_when_the_utterance_is_discarded(self) -> None:
+        manager = self.manager()
+        cues = []
+        manager.add_capture_listener(cues.append)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            wait_for(manager, "transcribing")
+            self.source.put_activity("discarded")
+            wait_for(manager, "listening")
+            self.assertEqual(cues, ["capturing", "discarded"])
+        finally:
+            manager.stop()
+
+    def test_turn_first_audio_latency_is_recorded_separately_from_tools(self) -> None:
+        latency = InMemoryAuditLog()
+        manager = self.manager(latency=latency, listen=5, checkback=5)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "follow_up")
+            self.source.put_activity()
+            self.source.put_result("second question")
+            wait_until(
+                lambda: sum(
+                    event["event"] == "turn_first_audio"
+                    for event in latency.events()
+                )
+                == 2,
+                "both turns to report first audio",
+            )
+        finally:
+            manager.stop()
+
+        recorded = [
+            event
+            for event in latency.events()
+            if event["event"] == "turn_first_audio"
+        ]
+        self.assertEqual([event["turn"] for event in recorded], [1, 2])
+        self.assertEqual([event["origin"] for event in recorded], ["wake", "follow_up"])
+        self.assertEqual([event["lane"] for event in recorded], ["model", "model"])
+        self.assertEqual(recorded[0]["transcription_ms"], 100)
+        self.assertEqual(recorded[0]["language"], "en")
+        self.assertEqual(recorded[0]["status"], "completed")
+        for event in recorded:
+            self.assertGreaterEqual(event["latency_ms"], 0)
+        # The tool audit trail must not grow a routing metric by accident.
+        self.assertNotIn("turn_first_audio", str(self.audit.events()))
 
     def test_error_listener_receives_failure_reason(self) -> None:
         self.provider.fail = True
