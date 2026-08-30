@@ -562,6 +562,17 @@ tail of their sentence recorded on top of Miso's own voice and transcribed as
 mumble. The listening cue on the companion display carries the feedback the
 sound used to. Turn it back on for a speaker-only setup with no screen.
 
+Two defences keep Miso from answering itself. The microphone is closed while
+its own audio is on the speaker and for `MISO_CONVERSATION_ECHO_GUARD_SECONDS`
+afterwards, which has to cover the lag between the state machine finishing a
+sentence and the speaker actually finishing it. Any transcript that still gets
+through is compared against what Miso recently said: not just exactly, since a
+recording of its own voice comes back mangled ("Air molecules scatter the
+shorter blue wavelengths" was heard as "We'll scatter the shorter blue
+wavelengths"), but on shared words and sequence similarity. Transcripts under
+four words stay on exact matching so a real "the timer" follow-up is never
+mistaken for an echo.
+
 Whisper auto-detects across every language it knows, so a noisy or foreign
 utterance can come back confidently labelled as something Miso cannot answer in.
 `MISO_STT_LANGUAGES` (default `en,es`) is the household's own list: a transcript
@@ -576,6 +587,6 @@ MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS=8
 MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS=5
 MISO_CONVERSATION_ACKNOWLEDGEMENT=Yes?
 MISO_CONVERSATION_ACKNOWLEDGE_WAKE=false
-MISO_CONVERSATION_ECHO_GUARD_SECONDS=0.6
+MISO_CONVERSATION_ECHO_GUARD_SECONDS=2.0
 MISO_CONVERSATION_ECHO_MEMORY_SECONDS=12
 ```

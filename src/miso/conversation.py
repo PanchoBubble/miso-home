@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+from difflib import SequenceMatcher
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -184,6 +185,24 @@ _OUTPUT_STATES = frozenset(
 def _normalize_for_match(text: str) -> str:
     """Reduce text to comparable words so recogniser noise does not defeat it."""
     return " ".join(re.sub(r"[^\w\sáéíóúüñ]+", " ", text.casefold()).split())
+
+
+# A transcript of Miso's own voice is never a clean copy of it: the speaker
+# colours it, the room adds reverb, and whisper fills the gaps with words that
+# were never spoken ("Air molecules scatter the shorter blue wavelengths" came
+# back as "We'll scatter the shorter blue wavelengths"). Exact and substring
+# matching both miss that, so the comparison is on shared content instead.
+_ECHO_SIMILARITY = 0.6
+_ECHO_MINIMUM_WORDS = 4
+
+
+def _echo_overlap(candidate: str, spoken: str) -> float:
+    """Share of the candidate's words that also appear in what Miso said."""
+    heard = candidate.split()
+    if not heard:
+        return 0.0
+    said = set(spoken.split())
+    return sum(1 for word in heard if word in said) / len(heard)
 
 
 _VOICE_ADDRESSABLE = frozenset(
@@ -599,10 +618,20 @@ class ConversationManager:
                 item for item in self._spoken_recently if item[1] >= horizon
             ]
             recent = [spoken for spoken, _ in self._spoken_recently]
-        return any(
-            candidate == spoken or candidate in spoken or spoken in candidate
-            for spoken in recent
-        )
+        for spoken in recent:
+            if candidate == spoken or candidate in spoken or spoken in candidate:
+                return True
+            # Short transcripts stay on exact matching: "yes" or "the timer"
+            # legitimately repeats words Miso just used, and discarding those
+            # would swallow real follow-ups.
+            if len(candidate.split()) < _ECHO_MINIMUM_WORDS:
+                continue
+            if (
+                _echo_overlap(candidate, spoken) >= _ECHO_SIMILARITY
+                or SequenceMatcher(None, candidate, spoken).ratio() >= _ECHO_SIMILARITY
+            ):
+                return True
+        return False
 
     def _transition_locked(self, target: ConversationState, reason: str) -> None:
         previous = self._state
@@ -745,6 +774,14 @@ class ConversationManager:
         capturing = False
         with self._lock:
             if activity.occurred_at <= self._ignore_activity_before:
+                return
+            if self._echo_gated_locked(activity.occurred_at):
+                # Miso's own audio is still on the speaker, or just left it.
+                # There is no echo cancellation between the two, so an onset
+                # here is the tail of the answer being recorded as the next
+                # question - which is how a reply once fed itself back in as a
+                # follow-up three turns running.
+                LOGGER.debug("ignored microphone onset inside the echo gate")
                 return
             state = self._state
             if state not in _VOICE_ADDRESSABLE:

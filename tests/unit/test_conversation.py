@@ -211,6 +211,7 @@ class ConversationManagerTests(unittest.TestCase):
         latency=None,
         acknowledge_wake=True,
         languages=("en", "es"),
+        echo_guard=0.6,
     ):
         router = ProviderRouter(
             ProviderSet(pi=self.provider, lan=None, hosted=None), self.audit
@@ -229,6 +230,7 @@ class ConversationManagerTests(unittest.TestCase):
             latency_sink=latency,
             acknowledge_wake=acknowledge_wake,
             languages=languages,
+            echo_guard_seconds=echo_guard,
             system_prompt="You are Miso.",
             wake_phrase="Miso",
             listen_timeout_seconds=listen,
@@ -366,7 +368,7 @@ class ConversationManagerTests(unittest.TestCase):
     def test_capture_listener_cues_the_display_before_a_transcript_exists(
         self,
     ) -> None:
-        manager = self.manager()
+        manager = self.manager(echo_guard=0)
         cues = []
         manager.add_capture_listener(cues.append)
         manager.start()
@@ -386,7 +388,7 @@ class ConversationManagerTests(unittest.TestCase):
             manager.stop()
 
     def test_capture_cue_is_retired_when_the_utterance_is_discarded(self) -> None:
-        manager = self.manager()
+        manager = self.manager(echo_guard=0)
         cues = []
         manager.add_capture_listener(cues.append)
         manager.start()
@@ -403,7 +405,7 @@ class ConversationManagerTests(unittest.TestCase):
 
     def test_turn_first_audio_latency_is_recorded_separately_from_tools(self) -> None:
         latency = InMemoryAuditLog()
-        manager = self.manager(latency=latency, listen=5, checkback=5)
+        manager = self.manager(latency=latency, listen=5, checkback=5, echo_guard=0)
         manager.start()
         try:
             self.source.put_wake()
@@ -844,6 +846,102 @@ class ConversationManagerTests(unittest.TestCase):
 
             self.assertEqual(manager.status()["turns"], 0)
             self.assertEqual([item[1] for item in speech.calls], ["Yes?"])
+        finally:
+            manager.stop()
+
+    def test_microphone_onset_while_speaking_is_ignored(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=False)
+        manager.start()
+        try:
+            manager._open_echo_gate()
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            time.sleep(0.15)
+
+            # The onset never opened a capture, so the state never advanced.
+            self.assertEqual(manager.status()["state"], "listening")
+        finally:
+            manager.stop()
+
+    def test_microphone_reopens_once_the_echo_gate_expires(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=False)
+        manager.start()
+        try:
+            manager._open_echo_gate()
+            manager._close_echo_gate()
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            time.sleep(manager.echo_guard_seconds + 0.1)
+            self.source.put_activity()
+            wait_for(manager, "transcribing")
+
+            self.assertEqual(manager.status()["state"], "transcribing")
+        finally:
+            manager.stop()
+
+    def test_garbled_echo_of_its_own_answer_is_discarded(self) -> None:
+        # Both transcripts are what the Pi actually recorded of Miso's own
+        # replies while the speaker was still playing them.
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=False)
+        manager.start()
+        try:
+            spoken = (
+                "Air molecules scatter the shorter blue wavelengths of sunlight "
+                "more strongly than longer wavelengths"
+            )
+            manager._remember_spoken(spoken)
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result(
+                "We'll scatter the shorter blue wavelengths of sunlight more "
+                "strongly than longer wavelengths"
+            )
+            wait_for(manager, "listening")
+
+            self.assertEqual(speech.calls, [])
+            conversation_id = manager.status()["conversation_id"]
+            self.assertEqual(self.store.events(str(conversation_id)), [])
+        finally:
+            manager.stop()
+
+    def test_a_real_follow_up_reusing_miso_words_still_routes(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=False)
+        manager.start()
+        try:
+            manager._remember_spoken(
+                "The sky looks blue because air molecules scatter blue sunlight"
+            )
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("set a timer for five minutes")
+            wait_for(manager, "follow_up")
+
+            events = self.store.events(str(manager.status()["conversation_id"]))
+            self.assertEqual(events[0].content, "set a timer for five minutes")
+        finally:
+            manager.stop()
+
+    def test_short_transcripts_are_not_treated_as_echoes(self) -> None:
+        speech = FakeSpeech()
+        manager = self.manager(speech, acknowledge_wake=False)
+        manager.start()
+        try:
+            manager._remember_spoken("Timer set for five minutes")
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("the timer")
+            wait_for(manager, "follow_up")
+
+            events = self.store.events(str(manager.status()["conversation_id"]))
+            self.assertEqual(events[0].content, "the timer")
         finally:
             manager.stop()
 
