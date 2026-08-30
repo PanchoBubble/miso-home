@@ -15,6 +15,7 @@ KIOSK_DESKTOP_SOURCE="${SOURCE_ROOT}/ops/desktop/miso-kiosk.desktop"
 TUNNEL_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-cloudflared.service"
 TUNNEL_BOOTSTRAP_SOURCE="${SOURCE_ROOT}/ops/cloudflared/miso-bootstrap.yml"
 CONVERSATION_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-conversation.env"
+BUTTONS_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-buttons.env"
 CALENDAR_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-calendar.env"
 DISPLAY_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-display.service"
 DISPLAY_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-display.env"
@@ -44,6 +45,8 @@ done
 [[ -f "${TUNNEL_BOOTSTRAP_SOURCE}" ]] || fail "tunnel bootstrap not found: ${TUNNEL_BOOTSTRAP_SOURCE}"
 [[ -f "${CONVERSATION_ENV_SOURCE}" ]] || fail \
   "conversation environment not found: ${CONVERSATION_ENV_SOURCE}"
+[[ -f "${BUTTONS_ENV_SOURCE}" ]] || fail \
+  "buttons environment not found: ${BUTTONS_ENV_SOURCE}"
 [[ -f "${CALENDAR_ENV_SOURCE}" ]] || fail \
   "calendar environment not found: ${CALENDAR_ENV_SOURCE}"
 [[ -f "${DISPLAY_UNIT_SOURCE}" ]] || fail "display unit not found: ${DISPLAY_UNIT_SOURCE}"
@@ -54,6 +57,11 @@ getent passwd miso >/dev/null || fail "miso service user is not configured"
 getent passwd pancho >/dev/null || fail "pancho desktop user is not configured"
 getent group audio >/dev/null || fail "audio group is not configured"
 usermod --append --groups audio miso
+# The BMO buttons need the GPIO character device. Raspberry Pi OS ships the
+# group; anywhere else the buttons stay disabled rather than blocking install.
+if getent group gpio >/dev/null; then
+  usermod --append --groups gpio miso
+fi
 
 install -d -o root -g root -m 0755 "${TARGET_ROOT}" "${TARGET_ROOT}/src"
 rsync -a --delete --exclude '__pycache__/' \
@@ -98,6 +106,10 @@ install -o root -g root -m 0644 "${AUDIO_ENV_SOURCE}" \
   /etc/miso/miso-audio.env
 install -o root -g root -m 0644 "${CONVERSATION_ENV_SOURCE}" \
   /etc/miso/miso-conversation.env
+if [[ ! -e /etc/miso/miso-buttons.env ]]; then
+  install -o root -g root -m 0644 "${BUTTONS_ENV_SOURCE}" \
+    /etc/miso/miso-buttons.env
+fi
 if [[ ! -e /etc/miso/miso-calendar.env ]]; then
   install -o root -g root -m 0644 "${CALENDAR_ENV_SOURCE}" \
     /etc/miso/miso-calendar.env

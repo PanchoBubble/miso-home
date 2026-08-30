@@ -20,7 +20,7 @@ from miso.speech import SpeechManager, SpeechResult
 from miso.tools import ToolRegistry
 from miso.tools.audit import AuditSink, audit_event
 from miso.transcription import SpeechActivity, TranscriptionResult
-from miso.wake import WakeEvent
+from miso.wake import WAKE_SOURCE_BUTTON, WakeEvent
 
 
 LOGGER = logging.getLogger("miso.conversation")
@@ -49,7 +49,13 @@ class ConversationState(str, Enum):
 _TRANSITIONS: dict[ConversationState, frozenset[ConversationState]] = {
     ConversationState.DISABLED: frozenset({ConversationState.STOPPED}),
     ConversationState.IDLE: frozenset(
-        {ConversationState.ACKNOWLEDGING, ConversationState.STOPPED}
+        {
+            ConversationState.ACKNOWLEDGING,
+            # A talk button press is already an explicit address, so it opens
+            # the microphone without a spoken acknowledgement first.
+            ConversationState.LISTENING,
+            ConversationState.STOPPED,
+        }
     ),
     ConversationState.ACKNOWLEDGING: frozenset(
         {
@@ -183,6 +189,15 @@ _VOICE_ADDRESSABLE = frozenset(
     {
         ConversationState.LISTENING,
         ConversationState.FOLLOW_UP,
+    }
+)
+
+# States in which there is nothing to interrupt.
+_INACTIVE_STATES = frozenset(
+    {
+        ConversationState.IDLE,
+        ConversationState.DISABLED,
+        ConversationState.STOPPED,
     }
 )
 
@@ -563,13 +578,28 @@ class ConversationManager:
                 self._recover(error)
                 self._stop.wait(0.05)
 
+    def interrupt(self, reason: str) -> bool:
+        """Cancel any turn and its playback, exactly as a wake interruption does.
+
+        Returns False when nothing was in flight, so a caller such as the stop
+        button can record that the press was a no-op rather than a cancellation.
+        """
+        with self._lock:
+            if self._state in _INACTIVE_STATES:
+                return False
+        self._cancel_active()
+        with self._lock:
+            self._interruptions += 1
+            if self._state is not ConversationState.IDLE:
+                self._transition_locked(ConversationState.IDLE, reason)
+            self._conversation_id = None
+            self._checked_back = False
+            self._deadline = None
+        return True
+
     def _handle_wake(self, event: WakeEvent) -> None:
         with self._lock:
-            active = self._state not in {
-                ConversationState.IDLE,
-                ConversationState.DISABLED,
-                ConversationState.STOPPED,
-            }
+            active = self._state not in _INACTIVE_STATES
         if active:
             self._cancel_active()
             with self._lock:
@@ -587,6 +617,13 @@ class ConversationManager:
             self._deadline = None
             self._last_error = None
             self._ignore_activity_before = event.detected_at
+            if event.source == WAKE_SOURCE_BUTTON:
+                # Pressing the button is already an unambiguous address, so the
+                # spoken acknowledgement would only delay the microphone and the
+                # listening face behind a second of synthesis and playback.
+                self._deadline = time.monotonic() + self.listen_timeout_seconds
+                self._transition_locked(ConversationState.LISTENING, "button talk")
+                return
             self._transition_locked(ConversationState.ACKNOWLEDGING, "wake detected")
         self._start_cue(
             self.acknowledgement,

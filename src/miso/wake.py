@@ -22,6 +22,12 @@ _READY = b"OWW1"
 _RESET = 0xFFFFFFFF
 LOGGER = logging.getLogger("miso.wake")
 
+# Sources a wake event can carry. The model source is openWakeWord itself;
+# the button source is a physical press on the enclosure, which is already an
+# explicit address and so needs no acknowledgement cue before listening.
+WAKE_SOURCE_MODEL = "model"
+WAKE_SOURCE_BUTTON = "button"
+
 
 class WakeWordError(RuntimeError):
     """Raised when the local wake-word model cannot score audio."""
