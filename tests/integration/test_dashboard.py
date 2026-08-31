@@ -193,7 +193,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v13', service_worker)
+        self.assertIn(b'miso-shell-v14', service_worker)
         self.assertIn(b'"/companion"', service_worker)
         self.assertIn(b'"/assets/miso-face.riv"', service_worker)
         self.assertIn(b'"/vendor/rive/rive.wasm"', service_worker)
@@ -244,8 +244,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="rive-face"', content)
         self.assertIn(b'id="fallback-face"', content)
         self.assertIn(b'/vendor/rive/rive.js', content)
-        self.assertIn(b'/companion.js?v=13', content)
-        self.assertIn(b'/companion.css?v=13', content)
+        self.assertIn(b'/companion.js?v=14', content)
+        self.assertIn(b'/companion.css?v=14', content)
         self.assertIn(b'id="companion-caption"', content)
         self.assertNotIn(b'https://', content)
 
@@ -268,6 +268,47 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'href="/companion"', dashboard)
         self.assertNotIn(b'innerHTML', javascript)
+
+    def test_companion_states_are_legible_and_touch_reacts(self) -> None:
+        response, javascript = self.request("GET", "/companion.js")
+        self.assertEqual(response.status, 200)
+
+        # The numeric codes are the contract with the Rive `state` input built
+        # by ops/face/build.mjs, so a silent renumbering must fail here.
+        for name, code in (
+            ("active", 0),
+            ("listening", 2),
+            ("thinking", 3),
+            ("sleep", 9),
+        ):
+            self.assertIn(f'{name}: {{ code: {code},'.encode(), javascript)
+        self.assertIn(b'idle: "active"', javascript)
+
+        # Sleep is screen inactivity, never a ConversationState.
+        self.assertIn(b"SLEEP_AFTER_MS = 60000", javascript)
+        self.assertIn(b'if (companion.current !== "active") return;', javascript)
+        self.assertIn(b'applyCompanionState("sleep")', javascript)
+
+        # Touch pokes when awake and greets when asleep, and never arms audio.
+        self.assertIn(b'stage.addEventListener("pointerdown", handleFaceTouch)', javascript)
+        self.assertIn(b'playReaction("greeting")', javascript)
+        self.assertIn(b'playReaction("poked")', javascript)
+        self.assertIn(b"RIVE_POKE_INPUT", javascript)
+        self.assertIn(b"RIVE_GREET_INPUT", javascript)
+        self.assertNotIn(b"getUserMedia", javascript)
+
+        response, html = self.request("GET", "/companion")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'data-companion-state="active"', html)
+        self.assertIn(b'class="listening-ring"', html)
+
+        response, css = self.request("GET", "/companion.css")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'body[data-companion-state="listening"] .listening-ring', css)
+        self.assertIn(b"pointer-events: none;", css)
+        self.assertIn(b'body[data-companion-state="sleep"] .fallback-eye', css)
+        self.assertIn(b'body[data-companion-reaction="poked"] .fallback-eye', css)
+        self.assertIn(b'body[data-companion-reaction="greeting"] .fallback-mouth', css)
         self.assertNotIn(b"setInterval", javascript)
 
         response, asset = self.request("GET", "/assets/miso-face.riv")

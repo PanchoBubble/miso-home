@@ -1,10 +1,16 @@
 PYTHON ?= python3
 PYTHONPATH := src
 
-.PHONY: check-config integration-test run test
+.PHONY: check-config face face-verify integration-test run test
 
 test:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m unittest discover -s tests/unit -p 'test_*.py'
+
+face:
+	cd ops/face && npm ci --no-audit --no-fund && npm run build
+
+face-verify:
+	cd ops/face && npm ci --no-audit --no-fund && npm run verify
 
 integration-test:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m unittest discover -s tests/integration -p 'test_*.py'

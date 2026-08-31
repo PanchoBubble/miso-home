@@ -1,7 +1,15 @@
 const RIVE_ARTBOARD = "Miso";
 const RIVE_STATE_MACHINE = "Miso Face";
 const RIVE_STATE_INPUT = "state";
+const RIVE_POKE_INPUT = "poke";
+const RIVE_GREET_INPUT = "greet";
 const RIVE_MAX_RENDER_PIXELS = 540 * 960;
+// Screen inactivity, not conversation state: Miso settles into a sleeping
+// face well before the compositor blanks the panel at
+// MISO_DISPLAY_IDLE_SECONDS, so an unattended screen reads as asleep rather
+// than as awake and ignoring the room.
+const SLEEP_AFTER_MS = 60000;
+const REACTION_MS = Object.freeze({ poked: 500, greeting: 800 });
 const CAPTION_MAX_AGE_MS = 30000;
 const CAPTION_MIN_VISIBLE_MS = 6000;
 const CAPTION_MAX_VISIBLE_MS = 20000;
@@ -16,8 +24,10 @@ const CAPTURE_CUES = Object.freeze({
   transcribing: "Working out what you said\u2026",
 });
 
+// Codes are the contract with the Rive `state` input built by
+// ops/face/build.mjs. Keep both tables and docs/miso-rive.md in step.
 const COMPANION_STATES = Object.freeze({
-  idle: { code: 0, label: "Ready" },
+  active: { code: 0, label: "Awake" },
   waking: { code: 1, label: "Waking" },
   listening: { code: 2, label: "Listening" },
   thinking: { code: 3, label: "Thinking" },
@@ -26,12 +36,13 @@ const COMPANION_STATES = Object.freeze({
   muted: { code: 6, label: "Microphone muted" },
   offline: { code: 7, label: "Offline" },
   error: { code: 8, label: "Needs attention" },
+  sleep: { code: 9, label: "Asleep" },
 });
 
 const CONVERSATION_TO_COMPANION = Object.freeze({
   disabled: "offline",
   stopped: "offline",
-  idle: "idle",
+  idle: "active",
   acknowledging: "waking",
   listening: "listening",
   follow_up: "listening",
@@ -46,16 +57,20 @@ const CONVERSATION_TO_COMPANION = Object.freeze({
 
 const companion = {
   token: localStorage.getItem("miso-dashboard-token") || "",
-  current: "idle",
+  current: "active",
   lastEventId: Number(localStorage.getItem("miso-companion-event-id") || "0"),
   liveGeneration: 0,
   liveAbort: null,
   riveInstance: null,
   riveStateInput: null,
+  riveTriggers: {},
   resizeObserver: null,
   captionTimer: null,
+  sleepTimer: null,
+  reactionTimer: null,
 };
 
+const stage = document.querySelector(".companion-stage");
 const canvas = document.querySelector("#rive-face");
 const fallback = document.querySelector("#fallback-face");
 const statusCopy = document.querySelector("#companion-status-copy");
@@ -70,7 +85,16 @@ function requestHeaders() {
 
 function normalizeState(value) {
   const mapped = CONVERSATION_TO_COMPANION[value] || value;
-  return Object.hasOwn(COMPANION_STATES, mapped) ? mapped : "idle";
+  return Object.hasOwn(COMPANION_STATES, mapped) ? mapped : "active";
+}
+
+// Only a fully awake, idle Miso falls asleep. Muted, offline, and error all
+// carry information someone still needs to see on the panel.
+function scheduleSleep() {
+  if (companion.sleepTimer) window.clearTimeout(companion.sleepTimer);
+  companion.sleepTimer = null;
+  if (companion.current !== "active") return;
+  companion.sleepTimer = window.setTimeout(() => applyCompanionState("sleep"), SLEEP_AFTER_MS);
 }
 
 function applyCompanionState(value) {
@@ -80,6 +104,34 @@ function applyCompanionState(value) {
   document.body.dataset.companionState = name;
   statusCopy.textContent = `Miso · ${definition.label}`;
   if (companion.riveStateInput) companion.riveStateInput.value = definition.code;
+  scheduleSleep();
+}
+
+function playReaction(name) {
+  companion.riveTriggers[name === "greeting" ? RIVE_GREET_INPUT : RIVE_POKE_INPUT]?.fire();
+  if (companion.reactionTimer) window.clearTimeout(companion.reactionTimer);
+  // Restarting the attribute lets a second touch replay the animation instead
+  // of being swallowed as a no-op class change.
+  delete document.body.dataset.companionReaction;
+  void document.body.offsetWidth;
+  document.body.dataset.companionReaction = name;
+  companion.reactionTimer = window.setTimeout(() => {
+    companion.reactionTimer = null;
+    delete document.body.dataset.companionReaction;
+  }, REACTION_MS[name]);
+}
+
+// Touching the face is affection, not a command: it never arms the
+// microphone. Starting and stopping a turn stays on the BMO buttons.
+function handleFaceTouch(event) {
+  if (event.target.closest("a, button")) return;
+  if (companion.current === "sleep") {
+    applyCompanionState("active");
+    playReaction("greeting");
+    return;
+  }
+  playReaction("poked");
+  scheduleSleep();
 }
 
 function clearCaption() {
@@ -131,6 +183,7 @@ function useFallback() {
   companion.riveInstance?.cleanup();
   companion.riveInstance = null;
   companion.riveStateInput = null;
+  companion.riveTriggers = {};
   companion.resizeObserver?.disconnect();
   companion.resizeObserver = null;
   canvas.classList.add("is-hidden");
@@ -169,6 +222,13 @@ function loadRiveFace() {
         useFallback();
         return;
       }
+      // Touch reactions are optional: an older asset without them still gets
+      // the fallback CSS reaction rather than dropping to the SVG face.
+      companion.riveTriggers = Object.fromEntries(
+        [RIVE_POKE_INPUT, RIVE_GREET_INPUT]
+          .map((name) => [name, inputs.find((input) => input.name === name)])
+          .filter(([, input]) => input),
+      );
       companion.riveInstance = instance;
       resizeRiveSurface(instance);
       companion.resizeObserver = new ResizeObserver(() => resizeRiveSurface(instance));
@@ -292,6 +352,7 @@ async function startLiveEvents() {
   }
 }
 
+stage.addEventListener("pointerdown", handleFaceTouch);
 reducedMotion.addEventListener("change", loadRiveFace);
 window.addEventListener("online", () => {
   loadInitialState();
@@ -305,8 +366,11 @@ window.addEventListener("offline", () => {
 window.addEventListener("beforeunload", () => {
   stopLiveEvents();
   clearCaption();
+  if (companion.sleepTimer) window.clearTimeout(companion.sleepTimer);
+  if (companion.reactionTimer) window.clearTimeout(companion.reactionTimer);
   useFallback();
 });
 
 loadRiveFace();
+applyCompanionState(companion.current);
 loadInitialState().then(startLiveEvents);

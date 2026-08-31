@@ -1,0 +1,13 @@
+{
+  "name": "miso-face-build",
+  "private": true,
+  "type": "module",
+  "description": "Regenerates src/miso/web/assets/miso-face.riv from scene.json and build.mjs.",
+  "scripts": {
+    "build": "node build.mjs",
+    "verify": "node build.mjs --verify"
+  },
+  "devDependencies": {
+    "rive-mcp-server": "0.5.0"
+  }
+}

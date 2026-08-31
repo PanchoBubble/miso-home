@@ -31,6 +31,24 @@ body { min-height: 100vh; min-height: 100dvh; background: var(--screen); }
 canvas.face-renderer { display: block; }
 .face-renderer.is-hidden { visibility: hidden; }
 
+/* The listening cue that reads from across the room. It lives in the DOM
+   rather than the .riv so the Rive face and the SVG fallback look identical,
+   and it must never swallow a touch aimed at the face behind it. */
+.listening-ring {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border: 14px solid var(--coral);
+  border-radius: 26px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease-out;
+}
+body[data-companion-state="listening"] .listening-ring {
+  opacity: 1;
+  animation: listening-ring 1.6s ease-in-out infinite;
+}
+
 .companion-status,
 .companion-caption,
 .dashboard-link {
@@ -135,10 +153,22 @@ body[data-connection="offline"] .connection-dot { background: var(--coral); box-
 .fallback-mouth { transform-box: fill-box; transform-origin: center; }
 
 body[data-companion-state="waking"] .fallback-eye { animation: fallback-wake 700ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
-body[data-companion-state="listening"] .fallback-eye { animation: fallback-listen 1.8s ease-in-out infinite; }
+body[data-companion-state="listening"] .fallback-eye { animation: fallback-listen 1.6s ease-in-out infinite; }
+body[data-companion-state="listening"] .fallback-mouth { transform: scaleX(0.55); }
 body[data-companion-state="thinking"] .fallback-normal-eyes { animation: none; }
 body[data-companion-state="thinking"] .fallback-eye { animation: fallback-think-eyes 2.6s ease-in-out infinite; }
-body[data-companion-state="thinking"] .fallback-mouth { transform: scaleX(0.82) rotate(-4deg); }
+body[data-companion-state="thinking"] .fallback-mouth { animation: fallback-ponder 2.6s ease-in-out infinite; }
+/* Sleep and thinking both close the eyes. Only sleep dims the whole face and
+   breathes deeply, which is what keeps them apart at a glance. */
+body[data-companion-state="sleep"] .fallback-expression {
+  opacity: 0.6;
+  animation: fallback-sleep-breathe 4s ease-in-out infinite;
+}
+body[data-companion-state="sleep"] .fallback-eye {
+  transform: translateY(18px) scaleY(0.06);
+  animation: none;
+}
+body[data-companion-state="sleep"] .fallback-mouth { transform: scaleX(0.5); }
 body[data-companion-state="tool"] .fallback-mouth { opacity: 0; }
 body[data-companion-state="tool"] .fallback-tool-dots { opacity: 1; }
 body[data-companion-state="tool"] .fallback-tool-dots circle { transform-box: fill-box; transform-origin: center; animation: fallback-dot 1.4s ease-in-out infinite; }
@@ -156,16 +186,48 @@ body[data-companion-state="error"] .fallback-normal-eyes { opacity: 0; }
 body[data-companion-state="error"] .fallback-error-eyes { opacity: 1; }
 body[data-companion-state="error"] .fallback-mouth { transform: scaleX(0.7); }
 
+/* Touch reactions. The Rive face plays these from its own Touch layer, so
+   these rules only dress the SVG fallback and win over the state poses. */
+body[data-companion-reaction] .fallback-expression { animation: fallback-poke-shake 500ms ease-out both; }
+body[data-companion-reaction="poked"] .fallback-eye { animation: fallback-poke-blink 500ms ease-in-out both; }
+body[data-companion-reaction="greeting"] .fallback-expression { animation: fallback-greet-rise 800ms ease-out both; }
+body[data-companion-reaction="greeting"] .fallback-eye { animation: fallback-greet-open 800ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+body[data-companion-reaction="greeting"] .fallback-mouth { animation: fallback-greet-smile 800ms ease-out both; }
+
 @keyframes fallback-breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
 @keyframes fallback-blink { 0%, 39%, 46%, 100% { transform: scaleY(1); } 42% { transform: scaleY(0.08); } }
 @keyframes fallback-wake { from { transform: scaleY(0.08); } 70% { transform: scaleY(1.18); } to { transform: scaleY(1); } }
-@keyframes fallback-listen { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12, 1.08); } }
+/* Eyes open wide and stay wide. The old cue peaked at 1.12 and was
+   indistinguishable from the idle breath on a 720x1280 panel. */
+@keyframes fallback-listen { 0%, 100% { transform: scale(1.14, 1.3); } 50% { transform: scale(1.2, 1.42); } }
+@keyframes fallback-ponder { 0%, 100% { transform: scaleX(0.7) rotate(-5deg); } 50% { transform: scaleX(0.7) rotate(5deg); } }
+@keyframes fallback-sleep-breathe { 0%, 100% { transform: translateY(6px); } 50% { transform: translateY(18px) scaleY(1.02); } }
+@keyframes fallback-poke-shake {
+  0%, 100% { transform: translateX(0); }
+  14% { transform: translateX(-12px); }
+  30% { transform: translateX(12px); }
+  47% { transform: translateX(-8px); }
+  64% { transform: translateX(8px); }
+  82% { transform: translateX(-3px); }
+}
+@keyframes fallback-poke-blink {
+  0%, 100% { transform: scaleY(1); }
+  17%, 73% { transform: scaleY(0.08); }
+  37%, 90% { transform: scaleY(1); }
+}
+@keyframes fallback-greet-rise { from { transform: translateY(18px); opacity: 0.6; } to { transform: translateY(0); opacity: 1; } }
+@keyframes fallback-greet-open { from { transform: translateY(18px) scaleY(0.06); } 30% { transform: translateY(0) scaleY(1.22); } to { transform: translateY(0) scaleY(1); } }
+@keyframes fallback-greet-smile { from { transform: scale(0.5, 1); } 42% { transform: scale(1.3, 2.4); } to { transform: scale(1.2, 1.8); } }
 /* Eyes settle closed while Miso thinks, with a slow breathing squeeze so the
    face still reads as awake rather than asleep or offline. */
 @keyframes fallback-think-eyes { 0%, 100% { transform: scaleY(0.1); } 50% { transform: scaleY(0.16); } }
 @keyframes fallback-dot { 0%, 100% { transform: scaleY(0.62); } 45% { transform: scaleY(1.28); } }
 @keyframes fallback-talk { 0%, 100% { transform: scale(0.82, 1); } 22% { transform: scale(0.82, 4.8); } 56% { transform: scale(0.82, 1.6); } 78% { transform: scale(0.82, 3.7); } }
 @keyframes fallback-pulse { 0%, 100% { opacity: 0.48; } 50% { opacity: 0.72; } }
+@keyframes listening-ring {
+  0%, 100% { opacity: 0.55; box-shadow: inset 0 0 26px rgba(231, 111, 100, 0.35); }
+  50% { opacity: 1; box-shadow: inset 0 0 54px rgba(231, 111, 100, 0.6); }
+}
 @keyframes fallback-shake { 0%, 100% { transform: translateX(0); } 18% { transform: translateX(-8px); } 36% { transform: translateX(8px); } 56% { transform: translateX(-5px); } 76% { transform: translateX(5px); } }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,0 +1,333 @@
+{
+  "artboard": {
+    "name": "Miso",
+    "width": 720,
+    "height": 1280
+  },
+  "groups": [
+    {
+      "id": "face",
+      "x": 360,
+      "y": 500
+    }
+  ],
+  "shapes": [
+    {
+      "id": "footer-slot",
+      "type": "rect",
+      "x": 360,
+      "y": 1120,
+      "z": 99998,
+      "width": 250,
+      "height": 26,
+      "cornerRadius": 13,
+      "fill": {
+        "color": "#33173f46"
+      }
+    },
+    {
+      "id": "status-sky",
+      "type": "ellipse",
+      "x": 470,
+      "y": 980,
+      "z": 99994,
+      "width": 66,
+      "height": 66,
+      "fill": {
+        "color": "#6dc5d1"
+      },
+      "stroke": {
+        "color": "#44ffffff",
+        "thickness": 5
+      }
+    },
+    {
+      "id": "status-amber",
+      "type": "ellipse",
+      "x": 360,
+      "y": 980,
+      "z": 99988,
+      "width": 66,
+      "height": 66,
+      "fill": {
+        "color": "#f1c85b"
+      },
+      "stroke": {
+        "color": "#44ffffff",
+        "thickness": 5
+      }
+    },
+    {
+      "id": "status-coral",
+      "type": "ellipse",
+      "x": 250,
+      "y": 980,
+      "z": 99982,
+      "width": 66,
+      "height": 66,
+      "fill": {
+        "color": "#e76f64"
+      },
+      "stroke": {
+        "color": "#44ffffff",
+        "thickness": 5
+      }
+    },
+    {
+      "id": "error-right-b",
+      "type": "rect",
+      "x": 132,
+      "y": -84,
+      "z": 99976,
+      "parent": "face",
+      "rotation": -45.00000125223908,
+      "opacity": 0,
+      "width": 96,
+      "height": 15,
+      "cornerRadius": 8,
+      "fill": {
+        "color": "#e76f64"
+      }
+    },
+    {
+      "id": "error-right-a",
+      "type": "rect",
+      "x": 132,
+      "y": -84,
+      "z": 99972,
+      "parent": "face",
+      "rotation": 45.00000125223908,
+      "opacity": 0,
+      "width": 96,
+      "height": 15,
+      "cornerRadius": 8,
+      "fill": {
+        "color": "#e76f64"
+      }
+    },
+    {
+      "id": "error-left-b",
+      "type": "rect",
+      "x": -132,
+      "y": -84,
+      "z": 99968,
+      "parent": "face",
+      "rotation": -45.00000125223908,
+      "opacity": 0,
+      "width": 96,
+      "height": 15,
+      "cornerRadius": 8,
+      "fill": {
+        "color": "#e76f64"
+      }
+    },
+    {
+      "id": "error-left-a",
+      "type": "rect",
+      "x": -132,
+      "y": -84,
+      "z": 99964,
+      "parent": "face",
+      "rotation": 45.00000125223908,
+      "opacity": 0,
+      "width": 96,
+      "height": 15,
+      "cornerRadius": 8,
+      "fill": {
+        "color": "#e76f64"
+      }
+    },
+    {
+      "id": "tool-dot-right",
+      "type": "ellipse",
+      "x": 56,
+      "y": 92,
+      "z": 99960,
+      "parent": "face",
+      "opacity": 0,
+      "width": 26,
+      "height": 26,
+      "fill": {
+        "color": "#f1f5d8"
+      }
+    },
+    {
+      "id": "tool-dot-center",
+      "type": "ellipse",
+      "x": 0,
+      "y": 92,
+      "z": 99956,
+      "parent": "face",
+      "opacity": 0,
+      "width": 26,
+      "height": 26,
+      "fill": {
+        "color": "#f1f5d8"
+      }
+    },
+    {
+      "id": "tool-dot-left",
+      "type": "ellipse",
+      "x": -56,
+      "y": 92,
+      "z": 99952,
+      "parent": "face",
+      "opacity": 0,
+      "width": 26,
+      "height": 26,
+      "fill": {
+        "color": "#f1f5d8"
+      }
+    },
+    {
+      "id": "mute-slash",
+      "type": "rect",
+      "x": 0,
+      "y": 94,
+      "z": 99948,
+      "parent": "face",
+      "rotation": -15.999999876058132,
+      "opacity": 0,
+      "width": 218,
+      "height": 15,
+      "cornerRadius": 8,
+      "fill": {
+        "color": "#e76f64"
+      }
+    },
+    {
+      "id": "mouth",
+      "type": "rect",
+      "x": 0,
+      "y": 92,
+      "z": 99944,
+      "parent": "face",
+      "width": 150,
+      "height": 18,
+      "cornerRadius": 9,
+      "fill": {
+        "color": "#f1f5d8"
+      }
+    },
+    {
+      "id": "right-cheek",
+      "type": "ellipse",
+      "x": 205,
+      "y": 78,
+      "z": 99940,
+      "parent": "face",
+      "width": 54,
+      "height": 28,
+      "fill": {
+        "color": "#55e76f64"
+      }
+    },
+    {
+      "id": "left-cheek",
+      "type": "ellipse",
+      "x": -205,
+      "y": 78,
+      "z": 99936,
+      "parent": "face",
+      "width": 54,
+      "height": 28,
+      "fill": {
+        "color": "#55e76f64"
+      }
+    },
+    {
+      "id": "right-eye",
+      "type": "ellipse",
+      "x": 132,
+      "y": -84,
+      "z": 99932,
+      "parent": "face",
+      "width": 64,
+      "height": 126,
+      "fill": {
+        "color": "#f1f5d8"
+      }
+    },
+    {
+      "id": "left-eye",
+      "type": "ellipse",
+      "x": -132,
+      "y": -84,
+      "z": 99928,
+      "parent": "face",
+      "width": 64,
+      "height": 126,
+      "fill": {
+        "color": "#f1f5d8"
+      }
+    },
+    {
+      "id": "screen-glint",
+      "type": "rect",
+      "x": 360,
+      "y": 220,
+      "z": 99924,
+      "width": 388,
+      "height": 10,
+      "cornerRadius": 5,
+      "fill": {
+        "color": "#66ffffff"
+      }
+    },
+    {
+      "id": "screen",
+      "type": "rect",
+      "x": 360,
+      "y": 510,
+      "z": 99920,
+      "width": 610,
+      "height": 680,
+      "cornerRadius": 76,
+      "fill": {
+        "color": "#173f46"
+      },
+      "stroke": {
+        "color": "#d7f2de",
+        "thickness": 8
+      }
+    },
+    {
+      "id": "screen-shadow",
+      "type": "rect",
+      "x": 370,
+      "y": 530,
+      "z": 99914,
+      "width": 610,
+      "height": 680,
+      "cornerRadius": 76,
+      "fill": {
+        "color": "#33203a43"
+      }
+    },
+    {
+      "id": "body-light",
+      "type": "ellipse",
+      "x": 100,
+      "y": 80,
+      "z": 99910,
+      "opacity": 0.2199999988079071,
+      "width": 650,
+      "height": 520,
+      "fill": {
+        "color": "#a9e2cf"
+      }
+    },
+    {
+      "id": "__background",
+      "type": "rect",
+      "x": 360,
+      "y": 640,
+      "z": 99906,
+      "width": 720,
+      "height": 1280,
+      "fill": {
+        "color": "#78cdb5"
+      }
+    }
+  ]
+}

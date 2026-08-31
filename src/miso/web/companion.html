@@ -7,13 +7,14 @@
     <meta name="theme-color" content="#78cdb5">
     <title>Miso · Companion</title>
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
-    <link rel="stylesheet" href="/companion.css?v=13">
+    <link rel="stylesheet" href="/companion.css?v=14">
     <script defer src="/vendor/rive/rive.js"></script>
-    <script defer src="/companion.js?v=13"></script>
+    <script defer src="/companion.js?v=14"></script>
   </head>
-  <body data-companion-state="idle" data-connection="connecting">
+  <body data-companion-state="active" data-connection="connecting">
     <main class="companion-stage" aria-labelledby="companion-title">
       <h1 id="companion-title" class="sr-only">Miso companion face</h1>
+      <div class="listening-ring" aria-hidden="true"></div>
       <canvas id="rive-face" class="face-renderer is-hidden" width="720" height="1280" aria-hidden="true"></canvas>
 
       <svg id="fallback-face" class="face-renderer fallback-face" viewBox="0 0 720 1280" role="img" aria-labelledby="fallback-title fallback-description">
