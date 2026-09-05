@@ -60,6 +60,7 @@ from miso.toolpick import ToolPicker
 from miso.transcription import (
     EnergySpeechDetector,
     FallbackTranscriber,
+    OpenAITranscriber,
     Transcriber,
     TranscriptionManager,
     UtteranceAssembler,
@@ -1403,12 +1404,24 @@ def _jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
 def _transcription_lanes(settings: Settings) -> tuple[Transcriber, ...]:
     """Order the transcription lanes fastest first, offline last.
 
-    Wispr Flow answers in a few hundred milliseconds but needs the uplink. The
-    resident whisper server keeps the model in memory and answers with no
-    network at all. The CLI stays last because it reloads the model for every
-    utterance, which is the latency this ordering exists to avoid.
+    The hosted lanes answer in a few hundred milliseconds but need the uplink.
+    The resident whisper server keeps the model in memory and answers with no
+    network at all; measured on the Pi it is only marginally faster than the
+    CLI, because the cost there is the encoder rather than the model load. The
+    CLI stays last so a lane that spawns a process is never the first choice.
     """
     lanes: list[Transcriber] = []
+    if settings.stt_cloud_api_key:
+        lanes.append(
+            OpenAITranscriber(
+                settings.stt_cloud_api_key,
+                base_url=settings.stt_cloud_base_url,
+                model=settings.stt_cloud_model,
+                response_format=settings.stt_cloud_response_format,
+                languages=settings.stt_languages,
+                timeout_seconds=settings.stt_cloud_timeout_seconds,
+            )
+        )
     if settings.stt_wispr_api_key:
         lanes.append(
             WisprFlowTranscriber(

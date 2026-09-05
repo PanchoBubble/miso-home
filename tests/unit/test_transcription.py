@@ -10,6 +10,7 @@ from miso.audio import AudioFormat
 from miso.transcription import (
     EnergySpeechDetector,
     FallbackTranscriber,
+    OpenAITranscriber,
     TranscriptionError,
     TranscriptionManager,
     TranscriptionResult,
@@ -18,6 +19,7 @@ from miso.transcription import (
     WhisperCppTranscriber,
     WhisperServerTranscriber,
     WisprFlowTranscriber,
+    guess_language,
     normalized_words,
     word_error_rate,
 )
@@ -340,6 +342,77 @@ class WisprFlowTranscriberTests(unittest.TestCase):
             lane = WisprFlowTranscriber("test-key", base_url=stub.url)
             with self.assertRaises(TranscriptionError):
                 lane.transcribe(utterance())
+
+
+class OpenAITranscriberTests(unittest.TestCase):
+    def test_posts_multipart_and_keeps_the_reported_language(self) -> None:
+        payload = {"text": " Enciende la luz.", "language": "spanish"}
+        with JSONStubServer(payload) as stub:
+            lane = OpenAITranscriber("sk-test", base_url=stub.url)
+            result = lane.transcribe(utterance())
+
+        self.assertEqual(result.text, "Enciende la luz.")
+        # whisper-1 names the language in English; a raw "spanish" here would
+        # make the conversation answer a Spanish question in English.
+        self.assertEqual(result.language, "es")
+        self.assertEqual(result.model, "whisper-1")
+        path, body = stub.requests[-1]
+        self.assertEqual(path, "/audio/transcriptions")
+        self.assertIn(b'name="model"', body)
+        self.assertIn(b"whisper-1", body)
+        self.assertIn(b"verbose_json", body)
+        self.assertIn(b'filename="utterance.wav"', body)
+        # No language is pinned: forcing one would transcribe the other into
+        # nonsense in a bilingual house.
+        self.assertNotIn(b'name="language"', body)
+
+    def test_a_model_that_reports_no_language_falls_back_to_the_words(
+        self,
+    ) -> None:
+        with JSONStubServer({"text": "pon un temporizador de cinco minutos"}) as stub:
+            lane = OpenAITranscriber(
+                "sk-test",
+                base_url=stub.url,
+                model="gpt-4o-mini-transcribe",
+                response_format="json",
+            )
+            result = lane.transcribe(utterance())
+
+        self.assertEqual(result.language, "es")
+
+    def test_the_provider_is_a_base_url_not_a_code_change(self) -> None:
+        with JSONStubServer({"text": "hello", "language": "english"}) as stub:
+            lane = OpenAITranscriber(
+                "gsk-test", base_url=stub.url, model="whisper-large-v3-turbo"
+            )
+            result = lane.transcribe(utterance())
+
+        self.assertEqual(result.model, "whisper-large-v3-turbo")
+        self.assertEqual(result.language, "en")
+
+    def test_an_unconfigured_key_never_reaches_the_network(self) -> None:
+        lane = OpenAITranscriber(None)
+        self.assertFalse(lane.available())
+        with self.assertRaises(TranscriptionError):
+            lane.transcribe(utterance())
+
+    def test_a_server_error_is_a_transcription_error(self) -> None:
+        with JSONStubServer({"error": "nope"}, status=500) as stub:
+            lane = OpenAITranscriber("sk-test", base_url=stub.url)
+            with self.assertRaises(TranscriptionError):
+                lane.transcribe(utterance())
+
+
+class LanguageGuessTests(unittest.TestCase):
+    def test_function_words_decide_the_language(self) -> None:
+        self.assertEqual(guess_language("enciende la luz de la cocina"), "es")
+        self.assertEqual(guess_language("turn on the kitchen light"), "en")
+        self.assertEqual(guess_language("anade leche a la lista"), "es")
+
+    def test_no_signal_returns_no_verdict(self) -> None:
+        # Better to leave the caller's default in charge than invent one.
+        self.assertEqual(guess_language("ok"), "")
+        self.assertEqual(guess_language(""), "")
 
 
 class WhisperServerTranscriberTests(unittest.TestCase):

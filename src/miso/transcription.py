@@ -583,6 +583,118 @@ class WisprFlowTranscriber:
         )
 
 
+# whisper-1's verbose_json names the language in English rather than as a code.
+# Without a verdict a Spanish question comes back tagged English and Miso
+# answers in the wrong language, so the name is mapped back to a code.
+_LANGUAGE_NAMES = {
+    "english": "en",
+    "spanish": "es",
+    "castilian": "es",
+}
+
+
+def _language_code(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    raw = value.strip().casefold()
+    if raw in _LANGUAGE_NAMES:
+        return _LANGUAGE_NAMES[raw]
+    # Already a code, or a language Miso does not speak. Either way the
+    # conversation decides what to do with it.
+    return raw[:5]
+
+
+class OpenAITranscriber:
+    """Hosted OpenAI-compatible /audio/transcriptions lane.
+
+    The same request shape serves OpenAI, Groq, and anything else speaking that
+    API, so switching provider is a base URL and a model name rather than code.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "whisper-1",
+        response_format: str = "verbose_json",
+        languages: tuple[str, ...] = ("en", "es"),
+        timeout_seconds: float = 6.0,
+    ) -> None:
+        self._api_key = api_key.strip() if api_key else None
+        self.base_url = base_url.rstrip("/")
+        self.model = Path(model)
+        self._model = model
+        self.response_format = response_format
+        self.languages = tuple(code.casefold() for code in languages if code.strip())
+        self.timeout_seconds = timeout_seconds
+
+    @property
+    def name(self) -> str:
+        return "openai"
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    def available(self) -> bool:
+        return self._api_key is not None
+
+    def transcribe(self, utterance: Utterance) -> TranscriptionResult:
+        if self._api_key is None:
+            raise TranscriptionError("cloud transcription key is not configured")
+        fields = {
+            "model": self._model,
+            "response_format": self.response_format,
+            "temperature": "0",
+        }
+        # No language is pinned: the household speaks two, and forcing one
+        # would silently transcribe the other into nonsense.
+        body, content_type = _multipart(
+            fields, "file", "utterance.wav", wav_bytes(utterance)
+        )
+        request = Request(
+            f"{self.base_url}/audio/transcriptions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": content_type,
+            },
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.load(response)
+        except HTTPError as error:
+            raise TranscriptionError(
+                f"cloud transcription returned HTTP {error.code}"
+            ) from error
+        except (URLError, OSError) as error:
+            raise TranscriptionError("cloud transcription is unreachable") from error
+        except json.JSONDecodeError as error:
+            raise TranscriptionError(
+                "cloud transcription returned invalid JSON"
+            ) from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            raise TranscriptionError("cloud transcription omitted the transcript")
+        elapsed = max(0, round((time.monotonic() - started) * 1000))
+        text = payload["text"]
+        language = _language_code(payload.get("language"))
+        if not language:
+            # The 4o transcribe models answer json only and name no language.
+            # Guessing from the text keeps bilingual replies working rather
+            # than defaulting every Spanish answer to English.
+            language = guess_language(text, self.languages)
+        return _plain_result(
+            text,
+            language=language,
+            model=self._model,
+            utterance=utterance,
+            inference_milliseconds=elapsed,
+        )
+
+
 class WhisperServerTranscriber:
     """Local whisper.cpp server lane, which keeps the model resident.
 
@@ -1040,6 +1152,48 @@ def _probability(value: object) -> float | None:
 def _special_token(text: str) -> bool:
     stripped = text.strip()
     return stripped.startswith("<|") and stripped.endswith("|>")
+
+
+# Function words, not vocabulary: they are short, extremely common, and rarely
+# shared between the two languages, so a handful of them decides a sentence
+# without needing a model. Only used when a lane returns no language of its own.
+_SPANISH_MARKERS = frozenset(
+    {
+        "el", "la", "los", "las", "un", "una", "de", "del", "y", "que", "en",
+        "por", "para", "con", "es", "esta", "este", "esa", "ese", "muy",
+        "pon", "ponme", "enciende", "apaga", "anade", "quita", "cuanto",
+        "cuando", "donde", "como", "porque", "manana", "hoy", "ahora",
+        "minutos", "segundos", "horas", "luz", "cocina", "lista", "compra",
+        "temporizador", "gracias", "hola", "si", "no", "mi", "me", "te", "se",
+    }
+)
+_ENGLISH_MARKERS = frozenset(
+    {
+        "the", "a", "an", "of", "and", "that", "in", "for", "with", "is",
+        "are", "this", "these", "those", "very", "set", "turn", "add",
+        "remove", "how", "when", "where", "what", "why", "tomorrow", "today",
+        "now", "minutes", "seconds", "hours", "light", "kitchen", "list",
+        "shopping", "timer", "thanks", "hello", "yes", "no", "my", "me", "to",
+    }
+)
+
+
+def guess_language(text: str, languages: tuple[str, ...] = ("en", "es")) -> str:
+    """Pick English or Spanish from the words alone, for lanes that say nothing.
+
+    Returns an empty string when the text gives no useful signal, which leaves
+    the caller's existing default in charge rather than inventing a verdict.
+    """
+    if "es" not in languages:
+        return languages[0] if languages else ""
+    words = set(normalized_words(text))
+    if not words:
+        return ""
+    spanish = len(words & _SPANISH_MARKERS)
+    english = len(words & _ENGLISH_MARKERS)
+    if spanish == english:
+        return ""
+    return "es" if spanish > english else "en"
 
 
 def _english_spanish_code_switch(text: str) -> bool:

@@ -139,8 +139,19 @@ class Settings:
     # recogniser runs on every sound in the house and hands the state machine
     # whatever the room said. See docs/miso-transcription-benchmark.md.
     stt_gated: bool = True
-    # Hosted dictation lane. Audio leaves the house on this lane; the local
-    # lanes below are what answers when it is unset or unreachable.
+    # Hosted OpenAI-compatible lane. Audio leaves the house on this lane. The
+    # key defaults to the one the LLM lane already uses, so one credential
+    # covers both; the base URL and model make it point at Groq or anything
+    # else speaking the same API. Unset to keep Miso fully offline.
+    stt_cloud_api_key: str | None = field(default=None, repr=False)
+    stt_cloud_base_url: str = "https://api.openai.com/v1"
+    stt_cloud_model: str = "whisper-1"
+    # whisper-1 answers verbose_json and names the language, which is what
+    # keeps bilingual replies working. The 4o transcribe models answer json
+    # only; the text-based guess covers them.
+    stt_cloud_response_format: str = "verbose_json"
+    stt_cloud_timeout_seconds: float = 6.0
+    # Hosted dictation lane, approval-gated by Wispr. Audio leaves the house.
     stt_wispr_api_key: str | None = field(default=None, repr=False)
     stt_wispr_base_url: str = "https://platform-api.wisprflow.ai/api/v1/dash"
     stt_wispr_timeout_seconds: float = 4.0
@@ -271,6 +282,9 @@ class Settings:
             stt_threads = int(source.get("MISO_STT_THREADS", "4"))
             stt_timeout_seconds = float(source.get("MISO_STT_TIMEOUT_SECONDS", "45"))
             stt_result_capacity = int(source.get("MISO_STT_RESULT_CAPACITY", "16"))
+            stt_cloud_timeout_seconds = float(
+                source.get("MISO_STT_CLOUD_TIMEOUT_SECONDS", "6")
+            )
             stt_wispr_timeout_seconds = float(
                 source.get("MISO_STT_WISPR_TIMEOUT_SECONDS", "4")
             )
@@ -515,6 +529,19 @@ class Settings:
             stt_gated=_boolean(
                 source.get("MISO_STT_GATED", "true"), "MISO_STT_GATED"
             ),
+            stt_cloud_api_key=(
+                source.get("MISO_STT_CLOUD_API_KEY", "").strip()
+                or source.get("MISO_OPENAI_API_KEY", "").strip()
+                or None
+            ),
+            stt_cloud_base_url=source.get(
+                "MISO_STT_CLOUD_BASE_URL", "https://api.openai.com/v1"
+            ).strip(),
+            stt_cloud_model=source.get("MISO_STT_CLOUD_MODEL", "whisper-1").strip(),
+            stt_cloud_response_format=source.get(
+                "MISO_STT_CLOUD_RESPONSE_FORMAT", "verbose_json"
+            ).strip(),
+            stt_cloud_timeout_seconds=stt_cloud_timeout_seconds,
             stt_wispr_api_key=(
                 source.get("MISO_STT_WISPR_API_KEY", "").strip() or None
             ),
@@ -843,6 +870,18 @@ class Settings:
             raise ConfigError("MISO_STT_PROMPT must be at most 500 characters")
         if not 1 <= self.stt_result_capacity <= 1_000:
             raise ConfigError("MISO_STT_RESULT_CAPACITY must be between 1 and 1000")
+        if not self.stt_cloud_base_url.startswith("https://"):
+            raise ConfigError("MISO_STT_CLOUD_BASE_URL must use HTTPS")
+        if not self.stt_cloud_model:
+            raise ConfigError("MISO_STT_CLOUD_MODEL must not be empty")
+        if self.stt_cloud_response_format not in {"json", "verbose_json"}:
+            raise ConfigError(
+                "MISO_STT_CLOUD_RESPONSE_FORMAT must be json or verbose_json"
+            )
+        if not 0.5 <= self.stt_cloud_timeout_seconds <= 60:
+            raise ConfigError(
+                "MISO_STT_CLOUD_TIMEOUT_SECONDS must be between 0.5 and 60"
+            )
         if not self.stt_wispr_base_url.startswith("https://"):
             raise ConfigError("MISO_STT_WISPR_BASE_URL must use HTTPS")
         if not 0.5 <= self.stt_wispr_timeout_seconds <= 60:
