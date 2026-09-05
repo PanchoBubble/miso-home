@@ -1,4 +1,4 @@
-const CACHE_NAME = "miso-shell-v14";
+const CACHE_NAME = "miso-shell-v15";
 const SHELL_PATHS = [
   "/",
   "/index.html",

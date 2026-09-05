@@ -51,6 +51,7 @@ body[data-companion-state="listening"] .listening-ring {
 
 .companion-status,
 .companion-caption,
+.weather-panel,
 .dashboard-link {
   position: absolute;
   z-index: 4;
@@ -61,7 +62,7 @@ body[data-companion-state="listening"] .listening-ring {
   backdrop-filter: blur(12px);
 }
 .companion-caption {
-  inset: auto clamp(22px, 6vw, 46px) max(70px, calc(env(safe-area-inset-bottom) + 54px));
+  inset: auto clamp(22px, 6vw, 46px) max(31%, calc(env(safe-area-inset-bottom) + 54px));
   padding: clamp(16px, 3.4vw, 25px) clamp(18px, 4.2vw, 32px);
   border-radius: clamp(20px, 4vw, 28px);
   text-align: center;
@@ -106,7 +107,7 @@ body[data-companion-state="listening"] .listening-ring {
   text-transform: uppercase;
 }
 .caption-copy {
-  max-height: min(38vh, 430px);
+  max-height: min(30vh, 340px);
   margin: 0;
   overflow-y: auto;
   color: var(--cream);
@@ -233,3 +234,61 @@ body[data-companion-reaction="greeting"] .fallback-mouth { animation: fallback-g
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Polled weather, always on. It sits in the bottom band beside the two body
+   buttons, so a glance at the panel answers "do I need a coat" without
+   waking Miso or saying anything. */
+.weather-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.weather-panel {
+  inset: auto clamp(14px, 4vw, 34px) 17.5% auto;
+  z-index: 4;
+  width: min(46%, 330px);
+  min-height: 11.7%;
+  padding: clamp(8px, 1.8vw, 14px) clamp(10px, 2.4vw, 18px);
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 2vw, 14px);
+  border-radius: clamp(16px, 3.4vw, 24px);
+}
+.weather-panel[hidden] { display: none; }
+.weather-icon {
+  flex: 0 0 auto;
+  width: clamp(30px, 8vw, 52px);
+  height: clamp(30px, 8vw, 52px);
+  color: var(--mint-light);
+}
+.weather-copy { min-width: 0; }
+.weather-headline {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: clamp(6px, 1.6vw, 12px);
+  color: var(--cream);
+  font-size: clamp(1.1rem, 4.4vw, 2rem);
+  font-weight: 800;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.weather-rain {
+  color: var(--mint-light);
+  font-size: clamp(0.6rem, 2.1vw, 0.95rem);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+/* Rain that has already started is the one thing worth a colour change. */
+.weather-panel[data-weather-raining="true"] .weather-rain { color: var(--amber); }
+.weather-place {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: rgba(241, 245, 216, 0.7);
+  font-size: clamp(0.55rem, 1.7vw, 0.78rem);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A reading nobody has refreshed for three poll cycles is shown, but shown
+   as doubtful, rather than passing for current weather. */
+.weather-panel[data-weather-stale="true"] { opacity: 0.5; }
+body[data-companion-state="sleep"] .weather-panel { opacity: 0.35; }
+body[data-companion-state="sleep"] .weather-panel[data-weather-stale="true"] { opacity: 0.22; }
+.weather-panel { transition: opacity 320ms ease-out; }

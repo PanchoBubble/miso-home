@@ -401,3 +401,18 @@ def conversation_error_publisher(
         )
 
     return publish
+
+
+def weather_publisher(
+    events: LiveEventStore,
+) -> Callable[[Mapping[str, object]], None]:
+    """Push each polled forecast to the companion panel.
+
+    The forecast is public data about a place, not about the household, so it
+    is shared rather than private: every screen in the house shows it.
+    """
+
+    def publish(panel: Mapping[str, object]) -> None:
+        events.publish("weather_update", dict(panel), actor=SYSTEM_ACTOR)
+
+    return publish

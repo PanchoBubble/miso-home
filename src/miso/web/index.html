@@ -304,6 +304,21 @@
 
           <section class="control-section">
             <div class="section-heading">
+              <div><h3>Weather location</h3><p>The place Miso answers for and shows on its face.</p></div>
+            </div>
+            <div class="field-grid">
+              <label for="weather-home">Home location</label>
+              <input id="weather-home" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="London">
+            </div>
+            <div class="button-row">
+              <button id="save-weather-home" type="button">Save location</button>
+              <button id="clear-weather-home" class="quiet-button" type="button">Clear</button>
+            </div>
+            <p id="weather-home-state" class="mini-state" aria-live="polite">Not set</p>
+          </section>
+
+          <section class="control-section">
+            <div class="section-heading">
               <div><h3>Providers</h3><p>Live availability from the Miso runtime.</p></div>
               <button id="refresh-status" class="quiet-button" type="button">Refresh</button>
             </div>

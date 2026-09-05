@@ -7,9 +7,9 @@
     <meta name="theme-color" content="#78cdb5">
     <title>Miso · Companion</title>
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
-    <link rel="stylesheet" href="/companion.css?v=14">
+    <link rel="stylesheet" href="/companion.css?v=15">
     <script defer src="/vendor/rive/rive.js"></script>
-    <script defer src="/companion.js?v=14"></script>
+    <script defer src="/companion.js?v=15"></script>
   </head>
   <body data-companion-state="active" data-connection="connecting">
     <main class="companion-stage" aria-labelledby="companion-title">
@@ -47,12 +47,65 @@
         </g>
 
         <g stroke="#ffffff" stroke-opacity="0.27" stroke-width="5">
-          <circle cx="250" cy="980" r="33" fill="#e76f64"/>
-          <circle cx="360" cy="980" r="33" fill="#f1c85b"/>
-          <circle cx="470" cy="980" r="33" fill="#6dc5d1"/>
+          <circle cx="150" cy="980" r="33" fill="#e76f64"/>
+          <circle cx="258" cy="980" r="33" fill="#f1c85b"/>
         </g>
         <rect x="235" y="1107" width="250" height="26" rx="13" fill="#173f46" opacity="0.2"/>
       </svg>
+
+      <svg class="weather-sprite" aria-hidden="true" focusable="false">
+        <defs>
+          <symbol id="wx-clear" viewBox="0 0 48 48">
+            <circle cx="24" cy="24" r="10" fill="currentColor"/>
+            <g stroke="currentColor" stroke-width="3.4" stroke-linecap="round">
+              <path d="M24 4v6M24 38v6M4 24h6M38 24h6M10 10l4 4M34 34l4 4M38 10l-4 4M14 34l-4 4"/>
+            </g>
+          </symbol>
+          <symbol id="wx-partly" viewBox="0 0 48 48">
+            <circle cx="18" cy="17" r="8" fill="currentColor"/>
+            <g stroke="currentColor" stroke-width="3" stroke-linecap="round">
+              <path d="M18 2v5M18 27v3M3 17h5M28 17h5M7 6l3 3M29 6l-3 3"/>
+            </g>
+            <path d="M17 40a8 8 0 0 1 0-16 11 11 0 0 1 21 3 6 6 0 0 1-2 13z" fill="currentColor"/>
+          </symbol>
+          <symbol id="wx-cloud" viewBox="0 0 48 48">
+            <path d="M15 39a9 9 0 0 1 1-18 12 12 0 0 1 23 3 7 7 0 0 1-2 15z" fill="currentColor"/>
+          </symbol>
+          <symbol id="wx-fog" viewBox="0 0 48 48">
+            <path d="M15 30a9 9 0 0 1 1-18 12 12 0 0 1 23 3 7 7 0 0 1-2 15z" fill="currentColor"/>
+            <g stroke="currentColor" stroke-width="3.4" stroke-linecap="round">
+              <path d="M9 37h30M14 43h22"/>
+            </g>
+          </symbol>
+          <symbol id="wx-rain" viewBox="0 0 48 48">
+            <path d="M15 30a9 9 0 0 1 1-18 12 12 0 0 1 23 3 7 7 0 0 1-2 15z" fill="currentColor"/>
+            <g stroke="currentColor" stroke-width="3.4" stroke-linecap="round">
+              <path d="M16 35l-3 8M25 35l-3 8M34 35l-3 8"/>
+            </g>
+          </symbol>
+          <symbol id="wx-snow" viewBox="0 0 48 48">
+            <path d="M15 30a9 9 0 0 1 1-18 12 12 0 0 1 23 3 7 7 0 0 1-2 15z" fill="currentColor"/>
+            <g stroke="currentColor" stroke-width="3.4" stroke-linecap="round">
+              <path d="M15 39h4M23 39h4M31 39h4M17 35v8M25 35v8M33 35v8"/>
+            </g>
+          </symbol>
+          <symbol id="wx-storm" viewBox="0 0 48 48">
+            <path d="M15 30a9 9 0 0 1 1-18 12 12 0 0 1 23 3 7 7 0 0 1-2 15z" fill="currentColor"/>
+            <path d="M26 33l-9 8h6l-3 7 10-9h-6z" fill="currentColor"/>
+          </symbol>
+        </defs>
+      </svg>
+
+      <aside id="weather-panel" class="weather-panel" aria-live="polite" hidden>
+        <svg class="weather-icon" aria-hidden="true" focusable="false"><use id="weather-icon-use" href="#wx-cloud"></use></svg>
+        <div class="weather-copy">
+          <p class="weather-headline">
+            <span id="weather-temperature">--</span>
+            <span class="weather-rain" id="weather-rain"></span>
+          </p>
+          <p class="weather-place" id="weather-place"></p>
+        </div>
+      </aside>
 
       <div class="companion-status" role="status" aria-live="polite">
         <span class="connection-dot" aria-hidden="true"></span>

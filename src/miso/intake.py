@@ -287,6 +287,8 @@ _WEATHER_LOCATION = re.compile(
 def _match_weather(text: str, language: str) -> Mapping[str, object] | None:
     if not any(word in text for word in _WEATHER_WORDS):
         return None
+    if _match_weather_home(text, language) is not None:
+        return None
     arguments: dict[str, object] = {"language": "es" if language == "es" else "en"}
     location = _WEATHER_LOCATION.search(text)
     if location is not None:
@@ -294,6 +296,53 @@ def _match_weather(text: str, language: str) -> Mapping[str, object] | None:
         if place not in ("the morning", "la mañana", "la manana", "the evening", "la tarde"):
             arguments["location"] = place
     return arguments
+
+
+# Changing where "the weather" means is a different request from asking for
+# it, and it has to be matched first or the query intent swallows it.
+_WEATHER_PLACE = r"(?P<place>[\wáéíóúüñ][\wáéíóúüñ' -]{1,80})"
+_WEATHER_HOME_PATTERNS = (
+    re.compile(
+        r"^(?:set|change|update)\s+(?:the\s+|our\s+|my\s+)?(?:home\s+)?weather\s*"
+        r"(?:location|city|place|town)?\s+(?:to|as)\s+" + _WEATHER_PLACE + r"$"
+    ),
+    re.compile(
+        r"^(?:set|change|update)\s+(?:the\s+|our\s+|my\s+)?(?:home\s+)?"
+        r"(?:location|city|town)\s+for\s+(?:the\s+)?weather\s+to\s+"
+        + _WEATHER_PLACE
+        + r"$"
+    ),
+    re.compile(
+        r"^(?:we\s+(?:live|are)\s+in|home\s+is)\s+" + _WEATHER_PLACE + r"$"
+    ),
+    re.compile(
+        r"^(?:cambia|pon|configura|ajusta)\s+"
+        r"(?:la\s+ubicaci[oó]n\s+del\s+tiempo|el\s+tiempo\s+de\s+casa|"
+        r"el\s+tiempo|la\s+ciudad\s+del\s+tiempo)\s+(?:a|en)\s+"
+        + _WEATHER_PLACE
+        + r"$"
+    ),
+    re.compile(r"^(?:vivimos|estamos)\s+en\s+" + _WEATHER_PLACE + r"$"),
+)
+
+
+def _match_weather_home(text: str, language: str) -> Mapping[str, object] | None:
+    for pattern in _WEATHER_HOME_PATTERNS:
+        found = pattern.match(text)
+        if found is not None:
+            return {
+                "location": found.group("place").strip(),
+                "language": "es" if language == "es" else "en",
+            }
+    return None
+
+
+def _render_weather_home(result: ToolResult, language: str) -> str:
+    # An unknown place is REJECTED, which the fast lane hands back to the
+    # model rather than answering here.
+    if not result.ok:
+        return _failure_phrase(language)
+    return result.summary or _failure_phrase(language)
 
 
 def _render_weather(result: ToolResult, language: str) -> str:
@@ -390,6 +439,12 @@ def default_intents() -> tuple[FastIntent, ...]:
         FastIntent("timer_list", "timer_list", _match_timer_list, _render_timer_list),
         FastIntent("shopping_add", "shopping_add", _match_shopping_add, _render_shopping_add),
         FastIntent("shopping_list", "shopping_list", _match_shopping_list, _render_shopping_list),
+        FastIntent(
+            "weather_set_home",
+            "weather_set_home",
+            _match_weather_home,
+            _render_weather_home,
+        ),
         FastIntent("weather_get", "weather_get", _match_weather, _render_weather),
         FastIntent(
             "tools_refresh", "tools_refresh", _match_tools_refresh, _render_tools_refresh

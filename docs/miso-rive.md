@@ -16,7 +16,7 @@ The managed Pi kiosk opens this route by default. The dashboard remains availabl
 
 A `.riv` is a compiled binary and cannot be edited in place, so the face is authored as source under `ops/face/`:
 
-- `ops/face/scene.json` holds the static geometry: the artboard, the `face` group, and all 22 shapes.
+- `ops/face/scene.json` holds the static geometry: the artboard, the `face` group, and all 21 shapes.
 - `ops/face/build.mjs` declares every animation and the state machine, then writes the asset.
 - `ops/face/package.json` pins `rive-mcp-server` 0.5.0, the same generator that produced the original asset.
 
@@ -75,6 +75,18 @@ The `Touch` layer reacts to a `pointerdown` anywhere on the companion stage:
 Touch reactions sit on their own state machine layer because every state on the `State` layer is reachable from Any State: a reaction placed there would be pulled back out the moment its numeric condition still held. The `Touch` layer's `rest` state keys no properties, so the `State` layer shows through between reactions.
 
 Touching the face never arms the microphone. Starting and stopping a turn stays on the BMO buttons.
+
+## Weather panel
+
+The bottom band of the face carries two drawn body buttons on the left and the
+weather panel on the right. The panel is DOM, not `.riv`: `#weather-panel` in
+`companion.html`, styled in `companion.css`, drawn from the icon symbols in the
+same file so it renders on a Pi image with no colour emoji font.
+
+It is always on. It shows the temperature, the rain line, and the place and
+condition, and it dims with the face when Miso sleeps. The panel never calls a
+weather service: it renders `weather` from `/api/status` at load and then each
+`weather_update` live event. See `docs/miso-weather.md`.
 
 ## Fallback and motion policy
 

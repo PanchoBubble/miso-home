@@ -141,6 +141,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b"Local household assistant", content)
         self.assertIn(b"What can I help with?", content)
+        self.assertIn(b'id="weather-home"', content)
         self.assertIn(b'id="side-panel"', content)
         self.assertIn(b'id="turn-progress"', content)
         self.assertIn(b'rel="manifest"', content)
@@ -193,7 +194,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b'url.pathname.startsWith("/api/")', service_worker)
         self.assertIn(b'request.headers.has("Authorization")', service_worker)
-        self.assertIn(b'miso-shell-v14', service_worker)
+        self.assertIn(b'miso-shell-v15', service_worker)
         self.assertIn(b'"/companion"', service_worker)
         self.assertIn(b'"/assets/miso-face.riv"', service_worker)
         self.assertIn(b'"/vendor/rive/rive.wasm"', service_worker)
@@ -238,15 +239,71 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(identity["actor"]["source"], "web")
         self.assertEqual(identity["voice_actor"]["id"], "household:voice")
 
+    def test_weather_home_is_set_from_the_dashboard_and_reported_in_status(
+        self,
+    ) -> None:
+        # Resolving a real place needs the network, so the validated tool the
+        # endpoint delegates to is replaced with a local double. Everything
+        # either side of it is the production path.
+        def set_home(arguments, _context):
+            name = str(arguments["location"]).title()
+            self.server.weather_home.set(name)
+            return {"location": {"name": name}, "summary": f"Home is now {name}."}
+
+        self.server.tool_registry.register(
+            ToolDefinition(
+                name="weather_set_home",
+                description="Set the home weather location.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"location": {"type": "string", "minLength": 1}},
+                    "required": ["location"],
+                    "additionalProperties": False,
+                },
+                handler=set_home,
+            ),
+            replace=True,
+        )
+
+        response, content = self.request("GET", "/api/status")
+        weather = json.loads(content)["weather"]
+        self.assertIsNone(weather["home"])
+        self.assertFalse(weather["available"])
+
+        response, content = self.request(
+            "POST", "/api/weather/location", {"location": "barcelona"}
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(content)["home"], "Barcelona")
+        self.assertEqual(self.server.weather_home.location(), "Barcelona")
+
+        response, content = self.request("GET", "/api/status")
+        self.assertEqual(json.loads(content)["weather"]["home"], "Barcelona")
+
+        response, content = self.request(
+            "POST", "/api/weather/location", {"location": 42}
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(content)["error"], "weather_location_invalid")
+        self.assertEqual(self.server.weather_home.location(), "Barcelona")
+
+        response, content = self.request(
+            "POST", "/api/weather/location", {"location": ""}
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(json.loads(content)["home"])
+        self.assertIsNone(self.server.weather_home.location())
+
     def test_companion_face_assets_are_local_and_privacy_bounded(self) -> None:
         response, content = self.request("GET", "/companion")
         self.assertEqual(response.status, 200)
         self.assertIn(b'id="rive-face"', content)
         self.assertIn(b'id="fallback-face"', content)
         self.assertIn(b'/vendor/rive/rive.js', content)
-        self.assertIn(b'/companion.js?v=14', content)
-        self.assertIn(b'/companion.css?v=14', content)
+        self.assertIn(b'/companion.js?v=15', content)
+        self.assertIn(b'/companion.css?v=15', content)
         self.assertIn(b'id="companion-caption"', content)
+        self.assertIn(b'id="weather-panel"', content)
         self.assertNotIn(b'https://', content)
 
         response, javascript = self.request("GET", "/companion.js")
@@ -258,6 +315,11 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn(b'/api/events?after=', javascript)
         self.assertIn(b'assistant_caption', javascript)
         self.assertIn(b'captionCopy.textContent = normalized', javascript)
+        # The panel draws the polled snapshot the service already holds; it
+        # never calls a weather service of its own.
+        self.assertIn(b'weather_update', javascript)
+        self.assertIn(b'showWeather(payload.weather)', javascript)
+        self.assertNotIn(b"open-meteo.com", javascript.lower())
         self.assertIn(b'caption.dataset.captionState', javascript)
 
         response, companion = self.request("GET", "/companion")

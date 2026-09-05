@@ -26,25 +26,9 @@
       }
     },
     {
-      "id": "status-sky",
-      "type": "ellipse",
-      "x": 470,
-      "y": 980,
-      "z": 99994,
-      "width": 66,
-      "height": 66,
-      "fill": {
-        "color": "#6dc5d1"
-      },
-      "stroke": {
-        "color": "#44ffffff",
-        "thickness": 5
-      }
-    },
-    {
       "id": "status-amber",
       "type": "ellipse",
-      "x": 360,
+      "x": 258,
       "y": 980,
       "z": 99988,
       "width": 66,
@@ -60,7 +44,7 @@
     {
       "id": "status-coral",
       "type": "ellipse",
-      "x": 250,
+      "x": 150,
       "y": 980,
       "z": 99982,
       "width": 66,

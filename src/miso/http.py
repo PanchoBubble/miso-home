@@ -45,6 +45,7 @@ from miso.live_events import (
     conversation_event_publisher,
     user_capture_publisher,
     user_transcript_publisher,
+    weather_publisher,
 )
 from miso.memory import MemoryStore, SearchResult, utc_now
 from miso.providers import ChatRequest, ProviderCancelled
@@ -59,21 +60,34 @@ from miso.speech import PiperBackend, PiperVoice, SpeechError, SpeechManager
 from miso.toolpick import ToolPicker
 from miso.transcription import (
     EnergySpeechDetector,
+    FallbackTranscriber,
+    Transcriber,
     TranscriptionManager,
     UtteranceAssembler,
     WhisperCppTranscriber,
+    WhisperServerTranscriber,
+    WisprFlowTranscriber,
 )
 from miso.wake import OpenWakeWordModel, WakeWordManager
 from miso.tools import (
     DeveloperShellController,
     GoogleCalendarConfig,
     HouseholdStore,
+    ToolStatus,
     REFRESH_TOOL_NAME,
     ScheduledItemWorker,
     ToolDirectoryLoader,
     ToolRegistry,
+    WEATHER_LOCATION_SETTING,
     WeatherConfig,
+    WeatherHome,
+    WeatherPoller,
+    WeatherSnapshot,
+    WeatherSnapshotStore,
     create_runtime_registry,
+    create_weather_poller,
+    weather_panel,
+    weather_status,
 )
 from miso.tools.audit import JsonlAuditLog, audit_event
 
@@ -135,6 +149,9 @@ class MisoHTTPServer(ThreadingHTTPServer):
         conversation_manager: ConversationManager,
         button_manager: ButtonManager,
         live_events: LiveEventStore,
+        weather_snapshots: WeatherSnapshotStore,
+        weather_poller: WeatherPoller | None,
+        weather_home: WeatherHome,
         identity_policy: HouseholdIdentityPolicy,
         access_verifier: AccessJWTVerifier | None,
         started_at: float,
@@ -158,6 +175,9 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.fast_lane = fast_lane
         self.tool_picker = tool_picker
         self.live_events = live_events
+        self.weather_snapshots = weather_snapshots
+        self.weather_poller = weather_poller
+        self.weather_home = weather_home
         self.memory_store = MemoryStore(settings.database_path)
         self.household_store = HouseholdStore(settings.database_path)
         self.identity_policy = identity_policy
@@ -186,9 +206,13 @@ class MisoHTTPServer(ThreadingHTTPServer):
         self.speech_manager.start()
         self.conversation_manager.start()
         self.button_manager.start()
+        if self.weather_poller is not None:
+            self.weather_poller.start()
         try:
             super().serve_forever(poll_interval)
         finally:
+            if self.weather_poller is not None:
+                self.weather_poller.stop()
             self.button_manager.stop()
             self.conversation_manager.stop()
             self.speech_manager.stop()
@@ -198,6 +222,8 @@ class MisoHTTPServer(ThreadingHTTPServer):
             self.scheduled_worker.stop()
 
     def server_close(self) -> None:
+        if self.weather_poller is not None:
+            self.weather_poller.stop()
         self.button_manager.stop()
         self.conversation_manager.stop()
         self.speech_manager.stop()
@@ -335,6 +361,8 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         HTTPStatus.OK,
                         {"cancelled": self.miso.speech_manager.cancel(request_id)},
                     )
+            elif parsed.path == "/api/weather/location":
+                self._weather_location(payload)
             elif parsed.path == "/api/wake-calibration":
                 self._wake_calibration(payload)
             elif parsed.path == "/api/memory":
@@ -367,6 +395,41 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     LOGGER.warning("Cloudflare Access identity email is invalid")
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
+
+        def _weather_location(self, payload: dict[str, object]) -> None:
+            """Set or clear the household weather location from the dashboard.
+
+            The change goes through the same validated, audited tool a voice
+            request uses, so the dashboard cannot take a shortcut around it.
+            """
+            raw = payload.get("location")
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                self.miso.weather_home.set(None)
+                self._json(HTTPStatus.OK, {"home": None})
+                return
+            if not isinstance(raw, str):
+                self._json(
+                    HTTPStatus.BAD_REQUEST, {"error": "weather_location_invalid"}
+                )
+                return
+            result = self.miso.tool_registry.invoke(
+                "weather_set_home", {"location": raw}, actor=self._actor()
+            )
+            if not result.ok:
+                status = (
+                    HTTPStatus.BAD_REQUEST
+                    if result.status is ToolStatus.REJECTED
+                    else HTTPStatus.SERVICE_UNAVAILABLE
+                )
+                self._json(status, {"error": result.error or "weather_set_home_failed"})
+                return
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "home": self.miso.weather_home.location(),
+                    "location": (result.output or {}).get("location"),
+                },
+            )
 
         def _wake_calibration(self, payload: dict[str, object]) -> None:
             if payload.get("action") != "capture" or payload.get("consent") is not True:
@@ -526,6 +589,13 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                     "transcription": self.miso.transcription_manager.status(),
                     "speech": self.miso.speech_manager.status(),
                     "conversation": self.miso.conversation_manager.status(),
+                    "weather": {
+                        "home": self.miso.weather_home.location(),
+                        **weather_status(
+                            self.miso.weather_snapshots,
+                            self.miso.settings.weather_language,
+                        ),
+                    },
                     "buttons": self.miso.button_manager.status(),
                     "developer_mode": self.miso.developer_shell.status(),
                 },
@@ -1396,6 +1466,46 @@ def _jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
     return events
 
 
+def _transcription_lanes(settings: Settings) -> tuple[Transcriber, ...]:
+    """Order the transcription lanes fastest first, offline last.
+
+    Wispr Flow answers in a few hundred milliseconds but needs the uplink. The
+    resident whisper server keeps the model in memory and answers with no
+    network at all. The CLI stays last because it reloads the model for every
+    utterance, which is the latency this ordering exists to avoid.
+    """
+    lanes: list[Transcriber] = []
+    if settings.stt_wispr_api_key:
+        lanes.append(
+            WisprFlowTranscriber(
+                settings.stt_wispr_api_key,
+                base_url=settings.stt_wispr_base_url,
+                languages=settings.stt_languages,
+                timeout_seconds=settings.stt_wispr_timeout_seconds,
+            )
+        )
+    if settings.stt_server_url:
+        lanes.append(
+            WhisperServerTranscriber(
+                settings.stt_server_url,
+                model=settings.stt_model,
+                timeout_seconds=settings.stt_server_timeout_seconds,
+                prompt=settings.stt_prompt,
+            )
+        )
+    lanes.append(
+        WhisperCppTranscriber(
+            settings.stt_executable,
+            settings.stt_model,
+            threads=settings.stt_threads,
+            timeout_seconds=settings.stt_timeout_seconds,
+            work_directory=Path("/run/miso"),
+            prompt=settings.stt_prompt,
+        )
+    )
+    return tuple(lanes)
+
+
 def create_server(
     settings: Settings,
     port: int | None = None,
@@ -1430,11 +1540,39 @@ def create_server(
             default_calendar_id=settings.google_calendar_default_id,
             voice_account_email=settings.google_calendar_voice_email,
         )
+    weather_config = WeatherConfig(
+        default_location=settings.weather_default_location,
+        units=settings.weather_units,
+        language=settings.weather_language,
+        poll_seconds=settings.weather_poll_seconds,
+    )
+    weather_snapshots = WeatherSnapshotStore()
+    # The env var seeds the location; once anyone sets one it lives in the
+    # database and survives a restart, so the dashboard wins from then on.
+    weather_home = WeatherHome(
+        memory.read_setting(WEATHER_LOCATION_SETTING) or settings.weather_default_location,
+        persist=lambda location: memory.write_setting(
+            WEATHER_LOCATION_SETTING, location, actor=SYSTEM_ACTOR
+        ),
+    )
     registry = tool_registry or create_runtime_registry(
         settings.state_dir,
         settings.database_path,
         calendar_config,
-        WeatherConfig(default_location=settings.weather_default_location),
+        weather_config,
+        weather_snapshots=weather_snapshots,
+        weather_home=weather_home,
+    )
+    publish_weather = weather_publisher(live_events)
+
+    def _publish_weather_snapshot(snapshot: WeatherSnapshot) -> None:
+        publish_weather(weather_panel(snapshot, settings.weather_language))
+
+    weather_poller = create_weather_poller(
+        weather_config,
+        weather_snapshots,
+        home=weather_home,
+        on_update=_publish_weather_snapshot,
     )
     registry.audit_sink = LiveAuditSink(registry.audit_sink, live_events)
     registry.add_result_listener(LiveToolResultPublisher(live_events))
@@ -1491,13 +1629,9 @@ def create_server(
     transcription = transcription_manager or TranscriptionManager(
         enabled=settings.stt_enabled,
         audio=audio,
-        transcriber=WhisperCppTranscriber(
-            settings.stt_executable,
-            settings.stt_model,
-            threads=settings.stt_threads,
-            timeout_seconds=settings.stt_timeout_seconds,
-            work_directory=Path("/run/miso"),
-            prompt=settings.stt_prompt,
+        transcriber=FallbackTranscriber(
+            _transcription_lanes(settings),
+            cooldown_seconds=settings.stt_lane_cooldown_seconds,
         ),
         detector=EnergySpeechDetector(settings.stt_vad_threshold_dbfs),
         assembler=UtteranceAssembler(
@@ -1512,6 +1646,7 @@ def create_server(
             pre_roll_milliseconds=settings.stt_vad_pre_roll_milliseconds,
         ),
         result_capacity=settings.stt_result_capacity,
+        gated=settings.stt_gated,
     )
     calibration = wake_calibration or WakeCalibration(
         enabled=settings.audio_enabled and settings.stt_enabled,
@@ -1580,6 +1715,12 @@ def create_server(
         wake_phrase=settings.wake_phrase,
         listen_timeout_seconds=settings.conversation_listen_timeout_seconds,
         checkback_timeout_seconds=settings.conversation_checkback_timeout_seconds,
+        follow_up_timeout_seconds=settings.conversation_follow_up_timeout_seconds,
+        session_timeout_seconds=settings.conversation_session_timeout_seconds,
+        transcribe_timeout_seconds=(
+            settings.conversation_transcribe_timeout_seconds
+        ),
+        maximum_discards=settings.conversation_maximum_discards,
         acknowledgement=settings.conversation_acknowledgement,
         acknowledge_wake=settings.conversation_acknowledge_wake,
         languages=settings.stt_languages,
@@ -1625,6 +1766,9 @@ def create_server(
         conversation_manager=conversation,
         button_manager=buttons,
         live_events=live_events,
+        weather_snapshots=weather_snapshots,
+        weather_poller=weather_poller,
+        weather_home=weather_home,
         identity_policy=identity_policy,
         access_verifier=access_verifier,
         started_at=time.monotonic(),

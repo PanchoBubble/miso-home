@@ -86,6 +86,7 @@ function friendlyToolName(name) {
     shopping_list: "Shopping list checked",
     shopping_complete: "Shopping item completed",
     weather_get: "Weather checked",
+    weather_set_home: "Weather location set",
     developer_command: "Developer command",
   }[name] || name.replaceAll("_", " ");
 }
@@ -149,6 +150,7 @@ async function loadStatus() {
     state.reconnectTimer = null;
     renderProviders(data.providers);
     renderDeveloper(data.developer_mode);
+    renderWeatherHome(data.weather);
   } catch (error) {
     setConnected(false, error.message === "unauthorized" ? "Access needed" : "Offline");
     scheduleReconnect();
@@ -396,6 +398,49 @@ function renderDeveloper(status) {
     ? `Scope: ${status.scope} · expires ${new Date(status.expires_at).toLocaleTimeString()}`
     : `Disabled · scope ${status.scope}`;
   $("#run-developer").disabled = !status.enabled;
+}
+
+// The location the panel and every voice answer share. Saving it goes through
+// the same validated tool a spoken request uses, so an unknown place is
+// refused here rather than becoming a poller that fails every quarter hour.
+function renderWeatherHome(weather) {
+  const state_ = $("#weather-home-state");
+  const field = $("#weather-home");
+  const home = weather && typeof weather.home === "string" ? weather.home : "";
+  if (document.activeElement !== field) field.value = home;
+  if (!home) {
+    state_.textContent = "Not set · Miso will ask for a place";
+    return;
+  }
+  if (!weather.available) {
+    state_.textContent = `${home} · waiting for the first reading`;
+    return;
+  }
+  const updated = new Date(weather.updated_at);
+  const reading = [weather.conditions, weather.rain_text].filter(Boolean).join(" · ");
+  state_.textContent = `${home} · ${reading} · updated ${updated.toLocaleTimeString()}`;
+}
+
+async function saveWeatherHome(location) {
+  const button = $("#save-weather-home");
+  const state_ = $("#weather-home-state");
+  button.disabled = true;
+  state_.textContent = location ? `Checking ${location}\u2026` : "Clearing\u2026";
+  try {
+    const payload = await api("/api/weather/location", {
+      method: "POST",
+      body: JSON.stringify({ location }),
+    });
+    $("#weather-home").value = payload.home || "";
+    state_.textContent = payload.home
+      ? `${payload.home} \u00b7 saved, refreshing now`
+      : "Cleared";
+    loadStatus();
+  } catch (error) {
+    state_.textContent = `Could not save: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function scrollConversation() {
@@ -1400,6 +1445,11 @@ $("#memory-results").addEventListener("click", (event) => {
     searchMemory();
   }
 });
+$("#save-weather-home").addEventListener("click", () => saveWeatherHome($("#weather-home").value.trim()));
+$("#weather-home").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") saveWeatherHome($("#weather-home").value.trim());
+});
+$("#clear-weather-home").addEventListener("click", () => saveWeatherHome(""));
 $("#refresh-status").addEventListener("click", loadStatus);
 $("#refresh-activity").addEventListener("click", loadActivity);
 $("#service-status").addEventListener("click", loadStatus);

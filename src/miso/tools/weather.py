@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import threading
 import time
@@ -13,14 +14,29 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from miso.memory import utc_now
 from miso.tools.base import ToolContext, ToolDefinition, ToolRegistry, ToolRejected
 
 
+LOGGER = logging.getLogger("miso.weather")
+
 GEOCODING_ENDPOINT = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
+# Place names are resolved in one language so a Spanish and an English request
+# for the same town share a cache entry and the same polled snapshot.
+GEOCODING_LANGUAGE = "en"
 ATTRIBUTION = "Weather data by Open-Meteo.com"
 ATTRIBUTION_URL = "https://open-meteo.com/"
 MAX_RESPONSE_BYTES = 512 * 1024
+# Today and tomorrow: enough for "is it going to rain" without asking the
+# poller to carry a week nobody looks at on a 720x1280 panel.
+POLL_FORECAST_DAYS = 2
+DEFAULT_POLL_SECONDS = 900.0
+MIN_POLL_SECONDS = 60.0
+MAX_POLL_SECONDS = 86_400.0
+# A snapshot older than this stops standing in for a live lookup, so a poller
+# that has been failing quietly cannot answer with yesterday's rain.
+STALE_SNAPSHOT_MULTIPLIER = 3.0
 
 
 class WeatherTransport(Protocol):
@@ -30,8 +46,11 @@ class WeatherTransport(Protocol):
 @dataclass(frozen=True, slots=True)
 class WeatherConfig:
     default_location: str | None = None
+    units: str = "metric"
+    language: str = "en"
     request_timeout_seconds: float = 6.0
     cache_seconds: float = 600.0
+    poll_seconds: float = DEFAULT_POLL_SECONDS
 
     def __post_init__(self) -> None:
         location = self.default_location
@@ -41,6 +60,10 @@ class WeatherConfig:
             or any(ord(character) < 32 for character in location)
         ):
             raise ValueError("weather default location is invalid")
+        if self.units not in {"metric", "imperial"}:
+            raise ValueError("weather units must be metric or imperial")
+        if self.language not in {"en", "es"}:
+            raise ValueError("weather language must be en or es")
         if (
             not math.isfinite(self.request_timeout_seconds)
             or not 0 < self.request_timeout_seconds <= 20
@@ -48,6 +71,141 @@ class WeatherConfig:
             raise ValueError("weather request timeout must be between 0 and 20 seconds")
         if not math.isfinite(self.cache_seconds) or not 0 <= self.cache_seconds <= 3600:
             raise ValueError("weather cache must be between 0 and 3600 seconds")
+        if not math.isfinite(self.poll_seconds) or self.poll_seconds < 0:
+            raise ValueError("weather poll interval must not be negative")
+        if self.poll_seconds and not MIN_POLL_SECONDS <= self.poll_seconds <= MAX_POLL_SECONDS:
+            raise ValueError(
+                "weather poll interval must be 0 or between 60 and 86400 seconds"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class WeatherSnapshot:
+    """One polled forecast, held in memory and rendered per request."""
+
+    payload: Mapping[str, object]
+    location_key: str
+    units: str
+    forecast_days: int
+    polled_at: float
+    polled_at_utc: str
+
+
+class WeatherSnapshotStore:
+    """The household forecast the poller keeps warm, in memory only.
+
+    Nothing here is written to disk: a restart simply polls again, and the
+    snapshot holds public forecast data rather than anything about the house.
+    """
+
+    def __init__(self, *, now: Callable[[], float] = time.monotonic) -> None:
+        self.now = now
+        self._lock = threading.Lock()
+        self._snapshot: WeatherSnapshot | None = None
+        self._failure: str | None = None
+
+    def store(
+        self,
+        payload: Mapping[str, object],
+        *,
+        location_key: str,
+        units: str,
+        forecast_days: int,
+    ) -> WeatherSnapshot:
+        snapshot = WeatherSnapshot(
+            payload=dict(payload),
+            location_key=location_key,
+            units=units,
+            forecast_days=forecast_days,
+            polled_at=self.now(),
+            polled_at_utc=utc_now(),
+        )
+        with self._lock:
+            self._snapshot = snapshot
+            self._failure = None
+        return snapshot
+
+    def current(self) -> tuple[WeatherSnapshot, float] | None:
+        """Return the snapshot with its age, so callers judge staleness once."""
+        with self._lock:
+            snapshot = self._snapshot
+        if snapshot is None:
+            return None
+        return snapshot, max(0.0, self.now() - snapshot.polled_at)
+
+    def clear(self) -> None:
+        """Forget the snapshot, because it describes the wrong place now."""
+        with self._lock:
+            self._snapshot = None
+            self._failure = None
+
+    def record_failure(self, reason: str) -> None:
+        # The last good snapshot is kept: a stale forecast plus a visible
+        # failure beats a blank panel during a short outage.
+        with self._lock:
+            self._failure = reason
+
+    def failure(self) -> str | None:
+        with self._lock:
+            return self._failure
+
+
+WEATHER_LOCATION_SETTING = "weather.location"
+
+
+def validate_location(value: str) -> str:
+    """Bound a caller-supplied place name the same way everywhere."""
+    location = value.strip()
+    if not location:
+        raise ToolRejected("weather location must not be empty")
+    if len(location) > 120 or any(ord(character) < 32 for character in location):
+        raise ToolRejected("weather location is invalid")
+    return location
+
+
+class WeatherHome:
+    """The household's weather location, changeable while Miso is running.
+
+    The env file only seeds this. Once anyone sets a location from the
+    dashboard or by voice it is stored in the database and wins, so a household
+    can move Miso without editing a root-owned file or restarting the service.
+    """
+
+    def __init__(
+        self,
+        location: str | None = None,
+        *,
+        persist: Callable[[str | None], None] | None = None,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._location = validate_location(location) if location else None
+        self._persist = persist
+        self._listeners: list[Callable[[str | None], None]] = []
+
+    def add_listener(self, listener: Callable[[str | None], None]) -> None:
+        """Register a change listener; each one is called after a set()."""
+        self._listeners.append(listener)
+
+    def location(self) -> str | None:
+        with self._lock:
+            return self._location
+
+    def set(self, location: str | None) -> str | None:
+        resolved = validate_location(location) if location else None
+        with self._lock:
+            if resolved == self._location:
+                return resolved
+            self._location = resolved
+        if self._persist is not None:
+            self._persist(resolved)
+        for listener in self._listeners:
+            try:
+                listener(resolved)
+            except Exception:
+                # A screen or a poller failing to react must not undo a
+                # setting the household just made.
+                LOGGER.exception("weather home listener failed")
+        return resolved
 
 
 class OpenMeteoWeatherAdapter:
@@ -59,48 +217,122 @@ class OpenMeteoWeatherAdapter:
         *,
         transport: WeatherTransport | None = None,
         now: Callable[[], float] = time.monotonic,
+        snapshots: WeatherSnapshotStore | None = None,
+        home: WeatherHome | None = None,
     ) -> None:
         self.config = config
         self.transport = transport or _https_json_get
         self.now = now
-        self._cache: dict[tuple[str, int, str, str], tuple[float, dict[str, object]]] = {}
+        self.snapshots = snapshots
+        self.home = home or WeatherHome(config.default_location)
+        self._cache: dict[tuple[str, int, str], tuple[float, dict[str, object]]] = {}
         self._lock = threading.Lock()
 
     def weather_get(
         self, arguments: Mapping[str, object], context: ToolContext
     ) -> Mapping[str, object]:
-        raw_location = arguments.get("location", self.config.default_location)
+        raw_location = arguments.get("location", self.home.location())
         if not isinstance(raw_location, str) or not raw_location.strip():
             raise ToolRejected("location is required because no home location is configured")
-        location = raw_location.strip()
-        if any(ord(character) < 32 for character in location):
-            raise ToolRejected("location contains invalid characters")
+        location = validate_location(raw_location)
         forecast_days = int(arguments.get("forecast_days", 1))
-        units = str(arguments.get("units", "metric"))
-        language = str(arguments.get("language", "en"))
-        cache_key = (location.casefold(), forecast_days, units, language)
+        units = str(arguments.get("units", self.config.units))
+        language = str(arguments.get("language", self.config.language))
+
+        polled = self._polled(location, forecast_days, units)
+        if polled is not None:
+            snapshot, payload = polled
+            return {
+                **render_forecast(payload, language),
+                "cached": True,
+                "source": "poll",
+                "polled_at": snapshot.polled_at_utc,
+            }
+        cache_key = (location.casefold(), forecast_days, units)
         cached = self._cached(cache_key)
         if cached is not None:
-            return {**cached, "cached": True}
+            return {**render_forecast(cached, language), "cached": True, "source": "cache"}
 
         context.raise_if_cancelled()
         timeout = min(self.config.request_timeout_seconds, context.remaining_seconds())
         try:
-            place = self._geocode(location, language, timeout)
+            place = self._geocode(location, timeout)
             context.raise_if_cancelled()
             timeout = min(self.config.request_timeout_seconds, context.remaining_seconds())
-            result = self._forecast(place, forecast_days, units, language, timeout)
+            payload = self._forecast(place, forecast_days, units, timeout)
         except ToolRejected:
             raise
         except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
             raise ToolRejected("weather service is temporarily unavailable") from error
         context.raise_if_cancelled()
-        result["cached"] = False
         with self._lock:
-            self._cache[cache_key] = (self.now(), dict(result))
-        return result
+            self._cache[cache_key] = (self.now(), dict(payload))
+        return {**render_forecast(payload, language), "cached": False, "source": "live"}
 
-    def _cached(self, key: tuple[str, int, str, str]) -> dict[str, object] | None:
+    def weather_set_home(
+        self, arguments: Mapping[str, object], context: ToolContext
+    ) -> Mapping[str, object]:
+        """Set the household location, after checking the place is real."""
+        raw_location = arguments.get("location")
+        if not isinstance(raw_location, str):
+            raise ToolRejected("location is required")
+        location = validate_location(raw_location)
+        language = str(arguments.get("language", self.config.language))
+        context.raise_if_cancelled()
+        timeout = min(self.config.request_timeout_seconds, context.remaining_seconds())
+        try:
+            # Resolving first means a typo is refused now rather than becoming
+            # a poller that quietly fails every fifteen minutes.
+            place = self._geocode(location, timeout)
+        except ToolRejected:
+            raise
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+            raise ToolRejected("weather service is temporarily unavailable") from error
+        name = str(place["name"])
+        self.home.set(name)
+        if language == "es":
+            summary = f"El tiempo de casa ahora es {name}."
+        else:
+            summary = f"Home weather is now set to {name}."
+        return {
+            "location": {
+                "name": name,
+                "admin1": place["admin1"],
+                "country": place["country"],
+                "timezone": place["timezone"],
+            },
+            "summary": summary,
+        }
+
+    def fetch(
+        self, location: str, forecast_days: int, units: str, timeout: float
+    ) -> dict[str, object]:
+        """Fetch one language-neutral forecast, bypassing every cache."""
+        place = self._geocode(location, timeout)
+        return self._forecast(place, forecast_days, units, timeout)
+
+    def _polled(
+        self, location: str, forecast_days: int, units: str
+    ) -> tuple[WeatherSnapshot, Mapping[str, object]] | None:
+        if self.snapshots is None:
+            return None
+        current = self.snapshots.current()
+        if current is None:
+            return None
+        snapshot, age = current
+        if (
+            snapshot.location_key != location.casefold()
+            or snapshot.units != units
+            or snapshot.forecast_days < forecast_days
+            or age > self.config.poll_seconds * STALE_SNAPSHOT_MULTIPLIER
+        ):
+            return None
+        payload = dict(snapshot.payload)
+        forecast = list(payload["forecast"])  # type: ignore[arg-type]
+        payload["forecast"] = forecast[:forecast_days]
+        return snapshot, payload
+
+    def _cached(self, key: tuple[str, int, str]) -> dict[str, object] | None:
         with self._lock:
             item = self._cache.get(key)
             if item is None:
@@ -111,11 +343,14 @@ class OpenMeteoWeatherAdapter:
                 return None
             return dict(value)
 
-    def _geocode(
-        self, location: str, language: str, timeout: float
-    ) -> dict[str, object]:
+    def _geocode(self, location: str, timeout: float) -> dict[str, object]:
         query = urlencode(
-            {"name": location, "count": 1, "language": language, "format": "json"}
+            {
+                "name": location,
+                "count": 1,
+                "language": GEOCODING_LANGUAGE,
+                "format": "json",
+            }
         )
         payload = _json_object(self.transport(f"{GEOCODING_ENDPOINT}?{query}", timeout))
         results = payload.get("results")
@@ -144,7 +379,6 @@ class OpenMeteoWeatherAdapter:
         place: Mapping[str, object],
         forecast_days: int,
         units: str,
-        language: str,
         timeout: float,
     ) -> dict[str, object]:
         parameters = {
@@ -171,11 +405,9 @@ class OpenMeteoWeatherAdapter:
         current_units = _mapping(payload, "current_units")
         daily = _mapping(payload, "daily")
         daily_units = _mapping(payload, "daily_units")
-        current_weather_code = int(_number(current, "weather_code"))
         current_result = {
             "observed_at": _text(current, "time"),
-            "conditions": _condition(current_weather_code, language),
-            "weather_code": current_weather_code,
+            "weather_code": int(_number(current, "weather_code")),
             "temperature": _number(current, "temperature_2m"),
             "apparent_temperature": _number(current, "apparent_temperature"),
             "precipitation": _number(current, "precipitation"),
@@ -190,13 +422,11 @@ class OpenMeteoWeatherAdapter:
         lows = _list(daily, "temperature_2m_min", forecast_days)
         precipitation = _list(daily, "precipitation_probability_max", forecast_days)
         forecast = []
-        for index, date in enumerate(dates):
-            code = int(_finite_number(codes[index]))
+        for index, date in enumerate(dates[:forecast_days]):
             forecast.append(
                 {
                     "date": str(date),
-                    "conditions": _condition(code, language),
-                    "weather_code": code,
+                    "weather_code": int(_finite_number(codes[index])),
                     "temperature_max": _finite_number(highs[index]),
                     "temperature_min": _finite_number(lows[index]),
                     "precipitation_probability_max": _finite_number(
@@ -220,10 +450,202 @@ class OpenMeteoWeatherAdapter:
             "location": place_result,
             "current": current_result,
             "forecast": forecast,
-            "summary": _summary(place_result, current_result, forecast[0], language),
             "attribution": ATTRIBUTION,
             "attribution_url": ATTRIBUTION_URL,
         }
+
+
+class WeatherPoller:
+    """Keep one household forecast warm so answers never wait on the network.
+
+    The screen reads the same snapshot the voice answer does, so the panel and
+    Miso can never disagree about whether it is going to rain.
+    """
+
+    def __init__(
+        self,
+        adapter: OpenMeteoWeatherAdapter,
+        snapshots: WeatherSnapshotStore,
+        *,
+        home: WeatherHome,
+        units: str = "metric",
+        interval_seconds: float = DEFAULT_POLL_SECONDS,
+        forecast_days: int = POLL_FORECAST_DAYS,
+        on_update: Callable[[WeatherSnapshot], None] | None = None,
+    ) -> None:
+        if not MIN_POLL_SECONDS <= interval_seconds <= MAX_POLL_SECONDS:
+            raise ValueError("weather poll interval must be between 60 and 86400 seconds")
+        if not 1 <= forecast_days <= 7:
+            raise ValueError("weather poll forecast days must be between 1 and 7")
+        self.adapter = adapter
+        self.snapshots = snapshots
+        self.home = home
+        self.units = units
+        self.interval_seconds = interval_seconds
+        self.forecast_days = forecast_days
+        self.on_update = on_update
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run, name="miso-weather-poll", daemon=True
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        with self._lock:
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self.adapter.config.request_timeout_seconds * 2))
+
+    def poke(self) -> None:
+        """Ask the running loop to refresh now, after a location change."""
+        self._wake.set()
+
+    def refresh_once(self) -> WeatherSnapshot | None:
+        location = self.home.location()
+        if not location:
+            # Nothing is configured yet. The dashboard and the set-home tool
+            # both wake the loop, so there is nothing to retry here.
+            return None
+        try:
+            payload = self.adapter.fetch(
+                location,
+                self.forecast_days,
+                self.units,
+                self.adapter.config.request_timeout_seconds,
+            )
+        except ToolRejected as error:
+            self.snapshots.record_failure(str(error))
+            LOGGER.warning("weather poll rejected: %s", error)
+            return None
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+            self.snapshots.record_failure("weather service is temporarily unavailable")
+            # The location is household data and stays out of the log line.
+            LOGGER.warning("weather poll failed: %s", type(error).__name__)
+            return None
+        snapshot = self.snapshots.store(
+            payload,
+            location_key=location.casefold(),
+            units=self.units,
+            forecast_days=self.forecast_days,
+        )
+        if self.on_update is not None:
+            try:
+                self.on_update(snapshot)
+            except Exception:
+                # Publishing to the screen must never stop the next poll.
+                LOGGER.exception("weather snapshot listener failed")
+        return snapshot
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.clear()
+            self.refresh_once()
+            # A poke lands as soon as someone changes the location, so a new
+            # place is on the screen in a second rather than at the next poll.
+            self._wake.wait(self.interval_seconds)
+            if self._stop.is_set():
+                return
+
+
+def create_weather_poller(
+    config: WeatherConfig,
+    snapshots: WeatherSnapshotStore,
+    *,
+    home: WeatherHome | None = None,
+    transport: WeatherTransport | None = None,
+    on_update: Callable[[WeatherSnapshot], None] | None = None,
+) -> WeatherPoller | None:
+    """Build the household poller, or None when polling is switched off.
+
+    The poller exists even with no location set yet: the household can set one
+    from the dashboard later, and the poller picks it up on the next poke.
+    """
+    if not config.poll_seconds:
+        return None
+    resolved_home = home or WeatherHome(config.default_location)
+    poller = WeatherPoller(
+        OpenMeteoWeatherAdapter(config, transport=transport, home=resolved_home),
+        snapshots,
+        home=resolved_home,
+        units=config.units,
+        interval_seconds=config.poll_seconds,
+        on_update=on_update,
+    )
+    # A new location makes the stored snapshot the wrong town, so it is dropped
+    # rather than left on the screen until the refresh lands.
+    resolved_home.add_listener(lambda _location: (snapshots.clear(), poller.poke()))
+    return poller
+
+
+def render_forecast(
+    payload: Mapping[str, object], language: str
+) -> dict[str, object]:
+    """Add the spoken summary and condition words to a neutral forecast."""
+    current = dict(_mapping(payload, "current"))
+    current["conditions"] = _condition(int(_number(current, "weather_code")), language)
+    forecast = [
+        {**dict(day), "conditions": _condition(int(_number(day, "weather_code")), language)}
+        for day in payload["forecast"]  # type: ignore[union-attr]
+        if isinstance(day, Mapping)
+    ]
+    location = _mapping(payload, "location")
+    return {
+        **dict(payload),
+        "current": current,
+        "forecast": forecast,
+        "summary": _summary(location, current, forecast[0], language),
+    }
+
+
+def weather_panel(snapshot: WeatherSnapshot, language: str) -> dict[str, object]:
+    """The compact shape the companion screen and /api/status both render."""
+    rendered = render_forecast(snapshot.payload, language)
+    current = _mapping(rendered, "current")
+    today = rendered["forecast"][0]  # type: ignore[index]
+    raining_now = _number(current, "precipitation") > 0
+    chance = _number(today, "precipitation_probability_max")
+    return {
+        "location": _mapping(rendered, "location")["name"],
+        "conditions": current["conditions"],
+        "weather_code": current["weather_code"],
+        "temperature": _number(current, "temperature"),
+        "temperature_unit": current["temperature_unit"],
+        "temperature_max": _number(today, "temperature_max"),
+        "temperature_min": _number(today, "temperature_min"),
+        "rain_chance": chance,
+        "raining_now": raining_now,
+        "rain_text": _rain_label(today, raining_now, chance, language),
+        "updated_at": snapshot.polled_at_utc,
+        "attribution": ATTRIBUTION,
+    }
+
+
+def weather_status(
+    snapshots: WeatherSnapshotStore, language: str = "en"
+) -> dict[str, object]:
+    """Weather for /api/status: the panel plus why it might be missing."""
+    current = snapshots.current()
+    failure = snapshots.failure()
+    if current is None:
+        return {"available": False, "error": failure}
+    snapshot, age = current
+    return {
+        "available": True,
+        "error": failure,
+        "age_seconds": round(age, 1),
+        **weather_panel(snapshot, language),
+    }
 
 
 def weather_tool_definition(adapter: OpenMeteoWeatherAdapter) -> ToolDefinition:
@@ -243,7 +665,7 @@ def weather_tool_definition(adapter: OpenMeteoWeatherAdapter) -> ToolDefinition:
         "units": {"type": "string", "enum": ["metric", "imperial"]},
         "language": {"type": "string", "enum": ["en", "es"]},
     }
-    required = [] if adapter.config.default_location else ["location"]
+    required = [] if adapter.home.location() else ["location"]
     return ToolDefinition(
         name="weather_get",
         description=(
@@ -263,15 +685,57 @@ def weather_tool_definition(adapter: OpenMeteoWeatherAdapter) -> ToolDefinition:
     )
 
 
+def weather_set_home_tool_definition(
+    adapter: OpenMeteoWeatherAdapter,
+) -> ToolDefinition:
+    return ToolDefinition(
+        name="weather_set_home",
+        description=(
+            "Set the household's home weather location, the place used when "
+            "nobody names one; cambia la ubicación del tiempo de casa."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120,
+                    "description": "City or place name to use as home, such as Madrid",
+                },
+                "language": {"type": "string", "enum": ["en", "es"]},
+            },
+            "required": ["location"],
+            "additionalProperties": False,
+        },
+        handler=adapter.weather_set_home,
+        timeout_seconds=8,
+        redact_fields=frozenset({"location"}),
+    )
+
+
 def register_weather_tools(
     registry: ToolRegistry,
     config: WeatherConfig,
     *,
     transport: WeatherTransport | None = None,
     now: Callable[[], float] = time.monotonic,
+    snapshots: WeatherSnapshotStore | None = None,
+    home: WeatherHome | None = None,
 ) -> OpenMeteoWeatherAdapter:
-    adapter = OpenMeteoWeatherAdapter(config, transport=transport, now=now)
+    adapter = OpenMeteoWeatherAdapter(
+        config, transport=transport, now=now, snapshots=snapshots, home=home
+    )
     registry.register(weather_tool_definition(adapter))
+    registry.register(weather_set_home_tool_definition(adapter))
+
+    # Whether `location` is required depends on whether a home is set, so the
+    # schema is rebuilt when the household changes it.
+    adapter.home.add_listener(
+        lambda _location: registry.register(
+            weather_tool_definition(adapter), replace=True
+        )
+    )
     return adapter
 
 
@@ -369,6 +833,11 @@ _CONDITIONS = {
     96: ("thunderstorms with light hail", "tormentas con granizo ligero"),
     99: ("thunderstorms with heavy hail", "tormentas con granizo intenso"),
 }
+_SNOW_CODES = frozenset({71, 73, 75, 77, 85, 86})
+# Above this it is worth carrying an umbrella; below the lower bound Miso says
+# the day is dry rather than reading out a number nobody acts on.
+RAIN_LIKELY_PERCENT = 60.0
+RAIN_POSSIBLE_PERCENT = 30.0
 
 
 def _condition(code: int, language: str) -> str:
@@ -379,6 +848,50 @@ def _condition(code: int, language: str) -> str:
 def _format_number(value: object) -> str:
     number = _finite_number(value)
     return str(int(number)) if number.is_integer() else f"{number:.1f}"
+
+
+def _is_snow(today: Mapping[str, object]) -> bool:
+    return int(_number(today, "weather_code")) in _SNOW_CODES
+
+
+def _rain_phrase(
+    current: Mapping[str, object], today: Mapping[str, object], language: str
+) -> str:
+    snow = _is_snow(today) or int(_number(current, "weather_code")) in _SNOW_CODES
+    if _number(current, "precipitation") > 0:
+        if language == "es":
+            return "Está nevando ahora" if snow else "Está lloviendo ahora"
+        return "It is snowing right now" if snow else "It is raining right now"
+    chance = _format_number(_number(today, "precipitation_probability_max"))
+    percent = _number(today, "precipitation_probability_max")
+    if language == "es":
+        precipitation = "Nieve" if snow else "Lluvia"
+        if percent >= RAIN_LIKELY_PERCENT:
+            return f"{precipitation} probable hoy, {chance}%"
+        if percent >= RAIN_POSSIBLE_PERCENT:
+            return f"{precipitation} posible hoy, {chance}%"
+        return "No se espera lluvia hoy"
+    precipitation = "Snow" if snow else "Rain"
+    if percent >= RAIN_LIKELY_PERCENT:
+        return f"{precipitation.lower()} is likely today, {chance}% chance"
+    if percent >= RAIN_POSSIBLE_PERCENT:
+        return f"{precipitation.lower()} is possible today, {chance}% chance"
+    return "no rain expected today"
+
+
+def _rain_label(
+    today: Mapping[str, object], raining_now: bool, chance: float, language: str
+) -> str:
+    """The short rain line on the panel, where space is one line of text."""
+    snow = _is_snow(today)
+    if raining_now:
+        if language == "es":
+            return "Nevando ahora" if snow else "Lloviendo ahora"
+        return "Snowing now" if snow else "Raining now"
+    percent = _format_number(chance)
+    if language == "es":
+        return f"{'Nieve' if snow else 'Lluvia'} {percent}%"
+    return f"{'Snow' if snow else 'Rain'} {percent}%"
 
 
 def _summary(
@@ -392,16 +905,14 @@ def _summary(
     temperature_unit = str(current["temperature_unit"])
     high = _format_number(today["temperature_max"])
     low = _format_number(today["temperature_min"])
-    rain = _format_number(today["precipitation_probability_max"])
+    rain = _rain_phrase(current, today, language)
     if language == "es":
         return (
-            f"En {name} ahora hay {current['conditions']}, con {temperature}{temperature_unit}. "
-            f"Hoy se espera una máxima de {high}{temperature_unit}, una mínima de "
-            f"{low}{temperature_unit} y hasta un {rain}% de probabilidad de precipitación. "
-            f"{ATTRIBUTION}."
+            f"En {name} hay {current['conditions']} a {temperature}{temperature_unit}. "
+            f"{rain}. Máxima de {high}{temperature_unit} y mínima de "
+            f"{low}{temperature_unit}."
         )
     return (
-        f"In {name}, it is currently {current['conditions']} at {temperature}{temperature_unit}. "
-        f"Today's high is {high}{temperature_unit}, the low is {low}{temperature_unit}, "
-        f"with up to a {rain}% chance of precipitation. {ATTRIBUTION}."
+        f"In {name} it is {current['conditions']} at {temperature}{temperature_unit}, "
+        f"and {rain}. High {high}{temperature_unit}, low {low}{temperature_unit}."
     )

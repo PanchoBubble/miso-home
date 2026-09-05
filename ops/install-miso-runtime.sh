@@ -17,6 +17,7 @@ TUNNEL_BOOTSTRAP_SOURCE="${SOURCE_ROOT}/ops/cloudflared/miso-bootstrap.yml"
 CONVERSATION_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-conversation.env"
 BUTTONS_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-buttons.env"
 CALENDAR_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-calendar.env"
+WEATHER_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-weather.env"
 DISPLAY_UNIT_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-display.service"
 DISPLAY_ENV_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-display.env"
 DISPLAY_TMPFILES_SOURCE="${SOURCE_ROOT}/ops/systemd/miso-display.tmpfiles"
@@ -113,6 +114,10 @@ fi
 if [[ ! -e /etc/miso/miso-calendar.env ]]; then
   install -o root -g root -m 0644 "${CALENDAR_ENV_SOURCE}" \
     /etc/miso/miso-calendar.env
+fi
+if [[ ! -e /etc/miso/miso-weather.env ]]; then
+  install -o root -g root -m 0644 "${WEATHER_ENV_SOURCE}" \
+    /etc/miso/miso-weather.env
 fi
 if [[ ! -e /etc/miso/miso-display.env ]]; then
   install -o root -g root -m 0644 "${DISPLAY_ENV_SOURCE}" \

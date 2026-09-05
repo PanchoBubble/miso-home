@@ -26,6 +26,21 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(journal, "wal")
         self.assertEqual(self.store.integrity_check(), "ok")
 
+    def test_household_settings_round_trip_and_clear(self) -> None:
+        self.assertIsNone(self.store.read_setting("weather.location"))
+        self.store.write_setting("weather.location", "London")
+        self.assertEqual(self.store.read_setting("weather.location"), "London")
+        self.store.write_setting("weather.location", "Madrid")
+        self.assertEqual(self.store.read_setting("weather.location"), "Madrid")
+        self.store.write_setting("weather.location", None)
+        self.assertIsNone(self.store.read_setting("weather.location"))
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT actor_id FROM household_settings WHERE key = ?",
+                ("weather.location",),
+            ).fetchone()
+        self.assertEqual(row["actor_id"], VOICE_ACTOR.actor_id)
+
     def test_v2_database_migrates_existing_records_to_shared_voice_identity(self) -> None:
         legacy_path = Path(self.temporary.name) / "legacy.sqlite3"
         connection = sqlite3.connect(legacy_path)

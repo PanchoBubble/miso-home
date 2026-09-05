@@ -1,8 +1,11 @@
-"""Offline utterance segmentation and whisper.cpp transcription."""
+"""Utterance segmentation and the transcription lanes that consume it."""
 
 from __future__ import annotations
 
+import base64
+import io
 import json
+import logging
 import math
 import os
 import re
@@ -12,12 +15,15 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 import wave
 from array import array
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from miso.audio import AudioFormat
 
@@ -28,8 +34,11 @@ _LANGUAGE_PATTERN = re.compile(
 )
 
 
+LOGGER = logging.getLogger("miso.transcription")
+
+
 class TranscriptionError(RuntimeError):
-    """Raised when local transcription cannot produce a valid result."""
+    """Raised when a transcription lane cannot produce a valid result."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +211,15 @@ class UtteranceAssembler:
             return None
         return self._finish(truncated=False)
 
+    def reset(self) -> None:
+        """Drop everything buffered so far without producing an utterance."""
+        self._chunks = []
+        self._active = False
+        self._speech_milliseconds = 0
+        self._silence_milliseconds = 0
+        self._duration_milliseconds = 0
+        self._pre_roll.clear()
+
     def _finish_if_needed(self) -> Utterance | None:
         if self._duration_milliseconds >= self.maximum_utterance_milliseconds:
             return self._finish(truncated=True)
@@ -259,6 +277,7 @@ class CaptureSource(Protocol):
 
 class Transcriber(Protocol):
     model: Path
+    model_name: str
 
     def available(self) -> bool: ...
 
@@ -284,6 +303,10 @@ class WhisperCppTranscriber:
         self.timeout_seconds = timeout_seconds
         self.work_directory = work_directory
         self.prompt = prompt
+
+    @property
+    def model_name(self) -> str:
+        return self.model.name
 
     def available(self) -> bool:
         return (
@@ -423,6 +446,349 @@ class WhisperCppTranscriber:
         )
 
 
+def wav_bytes(utterance: Utterance) -> bytes:
+    """Wrap raw capture PCM in a WAV container the transcription lanes accept."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as output:
+        output.setnchannels(utterance.channels)
+        output.setsampwidth(2)
+        output.setframerate(utterance.sample_rate)
+        output.writeframes(utterance.pcm)
+    return buffer.getvalue()
+
+
+def _plain_result(
+    text: str,
+    *,
+    language: str,
+    model: str,
+    utterance: Utterance,
+    inference_milliseconds: int,
+    confidence: float | None = None,
+) -> TranscriptionResult:
+    """Build a result for a lane that returns text without token detail."""
+    audio_milliseconds = max(1, utterance.duration_milliseconds)
+    normalized = language.strip().casefold()[:5]
+    return TranscriptionResult(
+        text=text.strip(),
+        language=normalized,
+        model_language=normalized,
+        language_confidence=None,
+        confidence=confidence,
+        segments=(),
+        audio_milliseconds=utterance.duration_milliseconds,
+        inference_milliseconds=inference_milliseconds,
+        real_time_factor=inference_milliseconds / audio_milliseconds,
+        model=model,
+        truncated=utterance.truncated,
+    )
+
+
+class WisprFlowTranscriber:
+    """Hosted Wispr Flow lane: base64 WAV over one warm HTTPS connection.
+
+    Flow is a dictation model rather than a raw recogniser, so it removes
+    filler words and repairs names on its own. Audio leaves the house on this
+    lane; the local lanes below are what runs when it is unavailable.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        base_url: str = "https://platform-api.wisprflow.ai/api/v1/dash",
+        languages: tuple[str, ...] = ("en", "es"),
+        timeout_seconds: float = 4.0,
+    ) -> None:
+        self._api_key = api_key.strip() if api_key else None
+        self.base_url = base_url.rstrip("/")
+        self.languages = tuple(code.casefold() for code in languages if code.strip())
+        self.timeout_seconds = timeout_seconds
+        self.model = Path("wispr-flow")
+        self._warmed_at = 0.0
+
+    @property
+    def name(self) -> str:
+        return "wispr-flow"
+
+    @property
+    def model_name(self) -> str:
+        return "wispr-flow"
+
+    def available(self) -> bool:
+        return self._api_key is not None
+
+    def warm_up(self) -> None:
+        """Complete the TLS handshake before there is an utterance to send.
+
+        Flow documents a warm-up endpoint precisely because the handshake is a
+        visible share of a short request. The wake phrase is the natural moment
+        to pay it, roughly a second before the audio is ready.
+        """
+        if self._api_key is None:
+            return
+        now = time.monotonic()
+        if now - self._warmed_at < 45:
+            return
+        self._warmed_at = now
+        request = Request(f"{self.base_url}/warmup_dash", method="GET")
+        try:
+            with urlopen(request, timeout=min(self.timeout_seconds, 2)) as response:
+                response.read(1)
+        except (HTTPError, URLError, OSError) as error:
+            LOGGER.debug("wispr flow warm-up failed: %s", error)
+
+    def transcribe(self, utterance: Utterance) -> TranscriptionResult:
+        if self._api_key is None:
+            raise TranscriptionError("wispr flow API key is not configured")
+        payload = {
+            "audio": base64.b64encode(wav_bytes(utterance)).decode("ascii"),
+            "language": list(self.languages),
+            "context": {"app": {"type": "assistant"}},
+        }
+        request = Request(
+            f"{self.base_url}/api",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                body = json.load(response)
+        except HTTPError as error:
+            raise TranscriptionError(
+                f"wispr flow returned HTTP {error.code}"
+            ) from error
+        except (URLError, OSError) as error:
+            raise TranscriptionError("wispr flow is unreachable") from error
+        except json.JSONDecodeError as error:
+            raise TranscriptionError("wispr flow returned invalid JSON") from error
+        if not isinstance(body, dict):
+            raise TranscriptionError("wispr flow JSON root is invalid")
+        text = body.get("text")
+        if not isinstance(text, str):
+            raise TranscriptionError("wispr flow omitted the transcript")
+        language = body.get("detected_language")
+        elapsed = max(0, round((time.monotonic() - started) * 1000))
+        return _plain_result(
+            text,
+            language=language if isinstance(language, str) and language else "en",
+            model="wispr-flow",
+            utterance=utterance,
+            inference_milliseconds=elapsed,
+        )
+
+
+class WhisperServerTranscriber:
+    """Local whisper.cpp server lane, which keeps the model resident.
+
+    The CLI lane below reloads ggml-tiny from disk for every utterance, and
+    that load is most of its measured latency. This lane pays it once at boot.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        model: Path,
+        timeout_seconds: float = 10.0,
+        prompt: str = "",
+        language: str = "auto",
+    ) -> None:
+        self.url = url.rstrip("/")
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.prompt = prompt
+        self.language = language
+        self._unreachable_until = 0.0
+
+    @property
+    def name(self) -> str:
+        return "whisper-server"
+
+    @property
+    def model_name(self) -> str:
+        return self.model.name
+
+    def available(self) -> bool:
+        if time.monotonic() < self._unreachable_until:
+            return False
+        try:
+            with urlopen(f"{self.url}/", timeout=1) as response:
+                response.read(1)
+        except HTTPError:
+            # A 404 on the root path still proves something is listening.
+            return True
+        except (URLError, OSError):
+            self._unreachable_until = time.monotonic() + 10
+            return False
+        return True
+
+    def transcribe(self, utterance: Utterance) -> TranscriptionResult:
+        fields = {
+            "temperature": "0.0",
+            "response_format": "json",
+            "language": self.language,
+        }
+        if self.prompt:
+            fields["prompt"] = self.prompt
+        body, content_type = _multipart(
+            fields, "file", "utterance.wav", wav_bytes(utterance)
+        )
+        request = Request(
+            f"{self.url}/inference",
+            data=body,
+            headers={"Content-Type": content_type},
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.load(response)
+        except HTTPError as error:
+            raise TranscriptionError(
+                f"whisper server returned HTTP {error.code}"
+            ) from error
+        except (URLError, OSError) as error:
+            self._unreachable_until = time.monotonic() + 10
+            raise TranscriptionError("whisper server is unreachable") from error
+        except json.JSONDecodeError as error:
+            raise TranscriptionError("whisper server returned invalid JSON") from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            raise TranscriptionError("whisper server omitted the transcript")
+        elapsed = max(0, round((time.monotonic() - started) * 1000))
+        return _plain_result(
+            payload["text"],
+            # whisper.cpp's json format carries no language verdict. Reporting
+            # a guess here would let the conversation drop a good transcript as
+            # a foreign language, so the field is left for the caller to skip.
+            language=str(payload.get("language") or ""),
+            model=self.model.name,
+            utterance=utterance,
+            inference_milliseconds=elapsed,
+        )
+
+
+def _multipart(
+    fields: dict[str, str], file_field: str, filename: str, content: bytes
+) -> tuple[bytes, str]:
+    boundary = uuid.uuid4().hex
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
+            f"\r\n\r\n{value}\r\n".encode("utf-8")
+        )
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}";'
+        f' filename="{filename}"\r\nContent-Type: audio/wav\r\n\r\n'.encode(
+            "utf-8"
+        )
+    )
+    parts.append(content)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+class FallbackTranscriber:
+    """Try transcription lanes in order and remember which one answered.
+
+    A lane that fails is put in a short cooldown rather than retried on the
+    next utterance: when the house loses its uplink, paying the hosted lane's
+    timeout on every sentence is slower than having no hosted lane at all.
+    """
+
+    def __init__(
+        self,
+        lanes: tuple[Transcriber, ...],
+        *,
+        cooldown_seconds: float = 30.0,
+    ) -> None:
+        if not lanes:
+            raise ValueError("at least one transcription lane is required")
+        self.lanes = lanes
+        self.cooldown_seconds = cooldown_seconds
+        self._cooldowns: dict[int, float] = {}
+        self._lock = threading.Lock()
+        self._lane_counts: dict[str, int] = {}
+        self._last_lane: str | None = None
+
+    @property
+    def model(self) -> Path:
+        return self.lanes[0].model
+
+    @property
+    def model_name(self) -> str:
+        for lane in self._ready_lanes():
+            return _lane_name(lane)
+        return _lane_name(self.lanes[0])
+
+    @property
+    def last_lane(self) -> str | None:
+        with self._lock:
+            return self._last_lane
+
+    def lane_counts(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._lane_counts)
+
+    def warm_up(self) -> None:
+        for lane in self._ready_lanes():
+            warm = getattr(lane, "warm_up", None)
+            if callable(warm):
+                warm()
+            # Only the lane that would actually take the next utterance is
+            # worth warming; warming the rest wakes services for nothing.
+            return
+
+    def available(self) -> bool:
+        return any(True for _ in self._ready_lanes())
+
+    def transcribe(self, utterance: Utterance) -> TranscriptionResult:
+        errors: list[str] = []
+        for lane in self._ready_lanes():
+            name = _lane_name(lane)
+            try:
+                result = lane.transcribe(utterance)
+            except TranscriptionError as error:
+                errors.append(f"{name}: {error}")
+                LOGGER.info("transcription lane %s failed: %s", name, error)
+                with self._lock:
+                    self._cooldowns[id(lane)] = (
+                        time.monotonic() + self.cooldown_seconds
+                    )
+                continue
+            with self._lock:
+                self._last_lane = name
+                self._lane_counts[name] = self._lane_counts.get(name, 0) + 1
+            return result
+        raise TranscriptionError(
+            "; ".join(errors) if errors else "no transcription lane is available"
+        )
+
+    def _ready_lanes(self):
+        now = time.monotonic()
+        for lane in self.lanes:
+            with self._lock:
+                until = self._cooldowns.get(id(lane), 0.0)
+            if now < until:
+                continue
+            if not lane.available():
+                continue
+            yield lane
+
+
+def _lane_name(lane: object) -> str:
+    name = getattr(lane, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return getattr(lane, "model_name", type(lane).__name__)
+
+
 class TranscriptionManager:
     """Consume captured utterances and retain a bounded result stream."""
 
@@ -435,12 +801,22 @@ class TranscriptionManager:
         detector: EnergySpeechDetector,
         assembler: UtteranceAssembler,
         result_capacity: int,
+        gated: bool = False,
     ) -> None:
         self.enabled = enabled
         self.audio = audio
         self.transcriber = transcriber
         self.detector = detector
         self.assembler = assembler
+        # An ungated worker transcribes every sound in the room forever. That
+        # burns a core on the neighbours' television and, worse, hands the
+        # conversation whatever it heard, so a passing remark becomes a turn.
+        # When gated, only the conversation opens the microphone.
+        self.gated = gated
+        self._gate = threading.Event()
+        if not gated:
+            self._gate.set()
+        self._gated_out = 0
         self._results: deque[TranscriptionResult] = deque(maxlen=result_capacity)
         self._activity: deque[SpeechActivity] = deque(maxlen=result_capacity * 2)
         self._condition = threading.Condition()
@@ -451,6 +827,37 @@ class TranscriptionManager:
         self._last_error: str | None = None
         self._processed = 0
         self._failures = 0
+
+    def open_gate(self) -> None:
+        """Accept microphone audio because the conversation is expecting it."""
+        self._gate.set()
+
+    def warm_up(self) -> None:
+        """Give the active lane a head start, off the conversation thread."""
+        warm = getattr(self.transcriber, "warm_up", None)
+        if not callable(warm):
+            return
+        threading.Thread(
+            target=self._warm_up_quietly, args=(warm,),
+            name="miso-transcription-warmup", daemon=True,
+        ).start()
+
+    @staticmethod
+    def _warm_up_quietly(warm) -> None:
+        try:
+            warm()
+        except Exception:
+            LOGGER.debug("transcription warm-up failed", exc_info=True)
+
+    def close_gate(self) -> None:
+        """Stop assembling utterances until the conversation asks again."""
+        if not self.gated:
+            return
+        self._gate.clear()
+
+    @property
+    def gate_open(self) -> bool:
+        return self._gate.is_set()
 
     def start(self) -> None:
         if not self.enabled or (self._thread is not None and self._thread.is_alive()):
@@ -505,11 +912,20 @@ class TranscriptionManager:
             "enabled": self.enabled,
             "available": self.transcriber.available() if self.enabled else False,
             "state": state,
-            "model": self.transcriber.model.name,
+            "model": self.transcriber.model_name,
             "processed": processed,
             "failures": failures,
             "queued_results": queued,
             "queued_activity": queued_activity,
+            "lane": getattr(self.transcriber, "last_lane", None),
+            "lane_counts": (
+                self.transcriber.lane_counts()
+                if callable(getattr(self.transcriber, "lane_counts", None))
+                else {}
+            ),
+            "gated": self.gated,
+            "gate_open": self._gate.is_set(),
+            "gated_out_chunks": self._gated_out,
             "last_error": error,
             "latest": latest_summary,
         }
@@ -525,9 +941,17 @@ class TranscriptionManager:
                 self._set_state("unavailable", "whisper.cpp executable or model missing")
                 self._stop.wait(1)
                 continue
-            self._set_state("listening")
+            self._set_state("listening" if self._gate.is_set() else "gated")
             chunk = self.audio.read_capture(timeout=0.25)
             if chunk is None:
+                continue
+            if not self._gate.is_set():
+                # Keep draining so the shared capture buffer stays current;
+                # a gate that reopens onto a second of stale room audio would
+                # transcribe the sentence before the wake phrase.
+                if self.assembler.active:
+                    self.assembler.reset()
+                self._gated_out += 1
                 continue
             was_active = self.assembler.active
             utterance = self.assembler.feed(

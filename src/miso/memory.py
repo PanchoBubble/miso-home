@@ -12,7 +12,7 @@ from typing import Iterable, Mapping, Sequence
 
 from miso.identity import Actor, VOICE_ACTOR, normalize_email, private_owner
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MIGRATION_1 = """
 CREATE TABLE conversations (
@@ -206,6 +206,16 @@ CREATE INDEX live_events_visibility_owner_id
 """
 
 
+MIGRATION_6 = """
+CREATE TABLE household_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    actor_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+"""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -292,6 +302,40 @@ class MemoryStore:
                     f"BEGIN IMMEDIATE;\n{MIGRATION_5}\n"
                     "PRAGMA user_version = 5;\nCOMMIT;"
                 )
+            if version < 6:
+                connection.executescript(
+                    f"BEGIN IMMEDIATE;\n{MIGRATION_6}\n"
+                    "PRAGMA user_version = 6;\nCOMMIT;"
+                )
+
+    def read_setting(self, key: str) -> str | None:
+        """Read one household setting, or None when it has never been set."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM household_settings WHERE key = ?", (key,)
+            ).fetchone()
+        if row is None or row["value"] is None:
+            return None
+        return str(row["value"])
+
+    def write_setting(
+        self, key: str, value: str | None, *, actor: Actor = VOICE_ACTOR
+    ) -> None:
+        """Store a household setting, or clear it when value is None."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO household_settings(key, value, actor_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    actor_id = excluded.actor_id,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, actor.actor_id, utc_now()),
+            )
+            connection.commit()
 
     def integrity_check(self) -> str:
         with self.connect() as connection:

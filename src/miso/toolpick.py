@@ -68,8 +68,19 @@ class PickedReply:
 # model call to phrase its result, so a tool Miso cannot already speak about
 # has nothing to say afterwards, and keeping the list explicit means a newly
 # registered tool never becomes reachable by model output on its own.
+# Changing a household setting is not something to infer from an utterance
+# that already missed the deterministic parsers. The fast lane's explicit
+# phrasings and the main model both still reach these tools; a small model's
+# guess must not.
+_UNPICKABLE = frozenset({"weather_set_home"})
+
+
 def default_pickable() -> dict[str, ReplyRenderer]:
-    return {intent.tool: intent.render for intent in default_intents()}
+    return {
+        intent.tool: intent.render
+        for intent in default_intents()
+        if intent.tool not in _UNPICKABLE
+    }
 
 
 # Vocabulary that makes a missed utterance worth one selection call. Narrow on

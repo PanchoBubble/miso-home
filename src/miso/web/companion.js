@@ -15,6 +15,9 @@ const CAPTION_MIN_VISIBLE_MS = 6000;
 const CAPTION_MAX_VISIBLE_MS = 20000;
 const CAPTION_MS_PER_CHARACTER = 55;
 const CAPTURE_CUE_MAX_AGE_MS = 5000;
+// The panel keeps showing the last polled forecast, but stops presenting it as
+// current once the poller has missed roughly three turns.
+const WEATHER_STALE_AFTER_MS = 2_700_000;
 const CAPTURE_CUE_TIMEOUT_MS = 20000;
 
 // Shown while the microphone is still capturing, so a wake that landed
@@ -23,6 +26,16 @@ const CAPTURE_CUES = Object.freeze({
   capturing: "Listening\u2026",
   transcribing: "Working out what you said\u2026",
 });
+
+// Open-Meteo weather codes, grouped down to the glyphs the panel draws.
+const WEATHER_ICONS = Object.freeze([
+  { codes: [0], icon: "wx-clear" },
+  { codes: [1, 2], icon: "wx-partly" },
+  { codes: [3], icon: "wx-cloud" },
+  { codes: [45, 48], icon: "wx-fog" },
+  { codes: [71, 73, 75, 77, 85, 86], icon: "wx-snow" },
+  { codes: [95, 96, 99], icon: "wx-storm" },
+]);
 
 // Codes are the contract with the Rive `state` input built by
 // ops/face/build.mjs. Keep both tables and docs/miso-rive.md in step.
@@ -67,6 +80,8 @@ const companion = {
   resizeObserver: null,
   captionTimer: null,
   sleepTimer: null,
+  weatherTimer: null,
+  weatherUpdatedAt: 0,
   reactionTimer: null,
 };
 
@@ -77,7 +92,56 @@ const statusCopy = document.querySelector("#companion-status-copy");
 const caption = document.querySelector("#companion-caption");
 const captionCopy = document.querySelector("#companion-caption-copy");
 const captionSpeaker = document.querySelector(".caption-speaker");
+const weatherPanel = document.querySelector("#weather-panel");
+const weatherIcon = document.querySelector("#weather-icon-use");
+const weatherTemperature = document.querySelector("#weather-temperature");
+const weatherRain = document.querySelector("#weather-rain");
+const weatherPlace = document.querySelector("#weather-place");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+function weatherIconName(code) {
+  const match = WEATHER_ICONS.find((entry) => entry.codes.includes(code));
+  // Everything left over is some form of drizzle, rain, or shower.
+  return match ? match.icon : "wx-rain";
+}
+
+function formatTemperature(value, unit) {
+  const rounded = Math.round(Number(value));
+  if (!Number.isFinite(rounded)) return "--";
+  // Open-Meteo already sends the degree sign with the unit.
+  return `${rounded}${unit || ""}`;
+}
+
+// One timer that fires when this reading goes stale, rather than a ticker:
+// the panel has nothing to check between the poller's updates.
+function markWeatherStale() {
+  if (companion.weatherTimer) window.clearTimeout(companion.weatherTimer);
+  companion.weatherTimer = null;
+  const remaining = companion.weatherUpdatedAt + WEATHER_STALE_AFTER_MS - Date.now();
+  weatherPanel.dataset.weatherStale = remaining <= 0 ? "true" : "false";
+  if (remaining <= 0) return;
+  companion.weatherTimer = window.setTimeout(() => {
+    companion.weatherTimer = null;
+    weatherPanel.dataset.weatherStale = "true";
+  }, remaining);
+}
+
+// The panel renders whatever the poller last stored. It never fetches weather
+// itself, so every screen in the house shows the same reading Miso speaks.
+function showWeather(panel) {
+  if (!panel || typeof panel !== "object" || panel.available === false) return;
+  const code = Number(panel.weather_code);
+  weatherIcon.setAttribute("href", `#${weatherIconName(code)}`);
+  weatherTemperature.textContent = formatTemperature(panel.temperature, panel.temperature_unit);
+  weatherRain.textContent = typeof panel.rain_text === "string" ? panel.rain_text : "";
+  const place = [panel.location, panel.conditions].filter(Boolean).join(" \u00b7 ");
+  weatherPlace.textContent = place;
+  weatherPanel.dataset.weatherRaining = panel.raining_now ? "true" : "false";
+  const updated = Date.parse(panel.updated_at);
+  companion.weatherUpdatedAt = Number.isFinite(updated) ? updated : Date.now();
+  weatherPanel.hidden = false;
+  markWeatherStale();
+}
 
 function requestHeaders() {
   return companion.token ? { Authorization: `Bearer ${companion.token}` } : {};
@@ -249,6 +313,7 @@ async function loadInitialState() {
     const payload = await response.json();
     document.body.dataset.connection = "online";
     applyCompanionState(payload.conversation?.state || "idle");
+    showWeather(payload.weather);
   } catch (_error) {
     document.body.dataset.connection = "offline";
     applyCompanionState("offline");
@@ -296,6 +361,9 @@ function handleLiveEvent(event) {
     && Date.now() - Date.parse(event.created_at) <= CAPTION_MAX_AGE_MS
   ) {
     showCaption(event.payload.text, true, "You");
+  }
+  if (event.type === "weather_update") {
+    showWeather(event.payload);
   }
   if (
     event.type === "assistant_error"
@@ -368,6 +436,7 @@ window.addEventListener("beforeunload", () => {
   clearCaption();
   if (companion.sleepTimer) window.clearTimeout(companion.sleepTimer);
   if (companion.reactionTimer) window.clearTimeout(companion.reactionTimer);
+  if (companion.weatherTimer) window.clearTimeout(companion.weatherTimer);
   useFallback();
 });
 

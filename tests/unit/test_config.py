@@ -133,6 +133,30 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "WEATHER_DEFAULT_LOCATION"):
             Settings.from_env({"MISO_WEATHER_DEFAULT_LOCATION": "x" * 121})
 
+    def test_weather_poll_units_and_language_are_bounded(self) -> None:
+        settings = Settings.from_env(
+            {
+                "MISO_WEATHER_UNITS": "Imperial",
+                "MISO_WEATHER_LANGUAGE": "ES",
+                "MISO_WEATHER_POLL_SECONDS": "600",
+            }
+        )
+        self.assertEqual(settings.weather_units, "imperial")
+        self.assertEqual(settings.weather_language, "es")
+        self.assertEqual(settings.weather_poll_seconds, 600)
+        # Zero is the documented way to turn polling off.
+        self.assertEqual(
+            Settings.from_env({"MISO_WEATHER_POLL_SECONDS": "0"}).weather_poll_seconds, 0
+        )
+        with self.assertRaisesRegex(ConfigError, "WEATHER_UNITS"):
+            Settings.from_env({"MISO_WEATHER_UNITS": "kelvin"})
+        with self.assertRaisesRegex(ConfigError, "WEATHER_LANGUAGE"):
+            Settings.from_env({"MISO_WEATHER_LANGUAGE": "fr"})
+        with self.assertRaisesRegex(ConfigError, "WEATHER_POLL_SECONDS"):
+            Settings.from_env({"MISO_WEATHER_POLL_SECONDS": "30"})
+        with self.assertRaisesRegex(ConfigError, "must be numeric"):
+            Settings.from_env({"MISO_WEATHER_POLL_SECONDS": "often"})
+
     def test_rejects_invalid_provider_timeout(self) -> None:
         with self.assertRaisesRegex(ConfigError, "must be numeric"):
             Settings.from_env({"MISO_PROVIDER_TIMEOUT": "slow"})
@@ -392,6 +416,33 @@ class LanguageAndWakeSettingsTests(unittest.TestCase):
         self.assertTrue(self._settings().conversation_acknowledge_wake)
         settings = self._settings(MISO_CONVERSATION_ACKNOWLEDGE_WAKE="false")
         self.assertFalse(settings.conversation_acknowledge_wake)
+
+    def test_the_recogniser_is_gated_and_the_hosted_lane_is_opt_in(self) -> None:
+        settings = self._settings()
+        self.assertTrue(settings.stt_gated)
+        # No key means no audio leaves the house.
+        self.assertIsNone(settings.stt_wispr_api_key)
+
+    def test_the_hosted_lane_must_use_https(self) -> None:
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_STT_WISPR_BASE_URL="http://platform-api.example")
+
+    def test_the_local_server_must_stay_on_loopback(self) -> None:
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_STT_SERVER_URL="http://192.168.1.20:8910")
+        self.assertEqual(
+            self._settings(MISO_STT_SERVER_URL="").stt_server_url, ""
+        )
+
+    def test_conversation_windows_are_bounded(self) -> None:
+        settings = self._settings()
+        self.assertEqual(settings.conversation_follow_up_timeout_seconds, 4.0)
+        self.assertEqual(settings.conversation_session_timeout_seconds, 45.0)
+        self.assertEqual(settings.conversation_maximum_discards, 3)
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_CONVERSATION_SESSION_TIMEOUT_SECONDS="1")
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_CONVERSATION_MAXIMUM_DISCARDS="0")
 
 if __name__ == "__main__":
     unittest.main()
