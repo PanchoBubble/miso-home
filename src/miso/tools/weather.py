@@ -866,6 +866,12 @@ _CONDITIONS = {
     99: ("thunderstorms with heavy hail", "tormentas con granizo intenso"),
 }
 _SNOW_CODES = frozenset({71, 73, 75, 77, 85, 86})
+# WMO codes whose condition word already says something is falling. When the
+# probability sits below "possible" for one of these, "light drizzle and no
+# rain expected" would contradict itself, so the rain clause is left out.
+_PRECIPITATION_CODES = frozenset(
+    {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99}
+) | _SNOW_CODES
 # Above this it is worth carrying an umbrella; below the lower bound Miso says
 # the day is dry rather than reading out a number nobody acts on.
 RAIN_LIKELY_PERCENT = 60.0
@@ -905,6 +911,11 @@ def _rain_outlook(
         snow = _is_snow(day)
     chance = _format_number(_number(day, "precipitation_probability_max"))
     percent = _number(day, "precipitation_probability_max")
+    if (
+        percent < RAIN_POSSIBLE_PERCENT
+        and int(_number(day, "weather_code")) in _PRECIPITATION_CODES
+    ):
+        return ""
     if language == "es":
         precipitation = "Nieve" if snow else "Lluvia"
         if percent >= RAIN_LIKELY_PERCENT:
@@ -950,12 +961,14 @@ def _summary(
     if language == "es":
         return (
             f"En {name} hay {current['conditions']} a {temperature}{temperature_unit}. "
-            f"{rain}. Máxima de {high}{temperature_unit} y mínima de "
+            + (f"{rain}. " if rain else "")
+            + f"Máxima de {high}{temperature_unit} y mínima de "
             f"{low}{temperature_unit}."
         )
     return (
-        f"In {name} it is {current['conditions']} at {temperature}{temperature_unit}, "
-        f"and {rain}. High {high}{temperature_unit}, low {low}{temperature_unit}."
+        f"In {name} it is {current['conditions']} at {temperature}{temperature_unit}"
+        + (f", and {rain}" if rain else "")
+        + f". High {high}{temperature_unit}, low {low}{temperature_unit}."
     )
 
 
@@ -993,9 +1006,9 @@ def _day_summary(
     if language == "es":
         return (
             f"En {name} {when} se espera {day['conditions']}, con máxima de "
-            f"{high}{unit} y mínima de {low}{unit}. {rain}."
+            f"{high}{unit} y mínima de {low}{unit}." + (f" {rain}." if rain else "")
         )
     return (
         f"In {name} {when} expect {day['conditions']}, high {high}{unit}, "
-        f"low {low}{unit}, and {rain}."
+        f"low {low}{unit}" + (f", and {rain}." if rain else ".")
     )

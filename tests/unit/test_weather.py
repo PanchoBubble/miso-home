@@ -194,6 +194,19 @@ class WeatherToolTests(unittest.TestCase):
         beyond = registry.invoke("weather_get", {"location": "London", "day": 7})
         self.assertEqual(beyond.status, ToolStatus.REJECTED)
 
+    def test_a_drizzle_code_with_a_low_chance_does_not_deny_rain(self) -> None:
+        registry = self.registry(
+            transport=FakeWeatherTransport(weather_code=51, rain_chance=18.0)
+        )
+        tomorrow = registry.invoke("weather_get", {"location": "London", "day": 1})
+        self.assertEqual(
+            tomorrow.summary,
+            "In London tomorrow expect light drizzle, high 21°C, low 13°C.",
+        )
+        today = registry.invoke("weather_get", {"location": "London"})
+        self.assertNotIn("no rain", today.summary)
+        self.assertIn("light drizzle", today.summary)
+
     def test_location_is_required_without_home_default(self) -> None:
         registry = self.registry(transport=FakeWeatherTransport())
         self.assertEqual(registry.get("weather_get").input_schema["required"], ["location"])
