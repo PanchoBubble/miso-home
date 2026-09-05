@@ -165,3 +165,64 @@ gives it a way to be confidently wrong.
 The remaining Spanish gap therefore has to be closed after transcription, not
 inside it: the fast-lane matcher needs tolerance for near-miss number words.
 That is tracked separately.
+
+## Transcription lanes
+
+Change date: 2026-09-05. The numbers above were all measured against
+`whisper-cli`, which is forked once per utterance: write a temporary WAV, spawn
+a process, load `ggml-tiny.bin` from disk, infer, parse JSON, exit. On a live
+pipeline that fires on every short segment, the model load dominates and the
+compute hides behind it, so a 1.7 s median for roughly two seconds of audio is
+mostly startup, not recognition.
+
+Transcription is now a chain of lanes, tried in order. A lane that fails falls
+through to the next and then sits out `MISO_STT_LANE_COOLDOWN_SECONDS`
+(30 s by default) rather than being retried on the next sentence: once the
+uplink is gone, paying the hosted timeout on every utterance is slower than
+having no hosted lane at all.
+
+| Lane | Where | Notes |
+| --- | --- | --- |
+| `wispr-flow` | hosted | Base64 16 kHz WAV to `POST /api`, `Authorization: Bearer`. Dictation-tuned rather than a raw recogniser: it drops filler words and repairs names. Audio leaves the house. Unset the key to disable. |
+| `whisper-server` | local | `miso-whisper.service`, model resident, `POST /inference` multipart on loopback. Same model and prompt as the CLI. |
+| `whisper-cli` | local | Unchanged, last resort. Reloads the model per utterance. |
+
+The wake phrase warms the hosted lane's connection (`GET /warmup_dash`, at most
+once every 45 s) so the TLS handshake is paid during the second between the
+wake and the end of the sentence rather than inside the request.
+
+`MISO_STT_VAD_END_SILENCE_MILLISECONDS` dropped from 600 to 400. That silence
+is paid on every sentence before the recogniser starts at all.
+
+### Not measured yet
+
+None of the lane latencies have been measured on the Pi. `ops/benchmark-whisper.py`
+still scores the CLI only, and the whisper-server lane also runs with
+`--suppress-nst`, which the benchmarked CLI invocation did not. Both the
+accuracy and the latency claims in the table above are design intent, not
+results. Re-run the six-case set against each lane before treating them as
+equivalent to the numbers earlier in this document.
+
+Alternatives considered and rejected for this pass:
+
+- **Wispr Flow desktop app / Handy**: neither is deployable here. Wispr Flow's
+  app is closed-source macOS and Windows; its *API* is what Miso uses. Handy is
+  open source but is an x64 desktop GUI with no Linux ARM build and no headless
+  mode.
+- **Parakeet TDT 0.6B v3 via sherpa-onnx**: multilingual including Spanish and
+  CPU-fast, and it is what Handy switched to. Worth benchmarking against
+  `ggml-tiny` on the Pi, but it is a 600 M parameter model on four A76 cores
+  and nothing here has measured it.
+
+## Gating the recogniser
+
+The worker used to transcribe every utterance the VAD produced, forever,
+regardless of what the conversation was doing. That had three costs: a core
+spent on the room's own conversation, a queue in front of the utterance that
+was actually addressed to Miso, and transcripts of background speech handed to
+the state machine as requests. `MISO_STT_GATED=true` runs the recogniser only
+while the conversation is in a state that expects speech.
+
+The trade is the wake-phrase-by-transcription fallback, which needed the
+recogniser running while Miso was idle. openWakeWord and the talk button both
+still work; set `MISO_STT_GATED=false` to get the fallback back.

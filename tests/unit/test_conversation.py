@@ -30,6 +30,20 @@ class EventSource:
         self.results = deque()
         self.activity = deque()
         self.condition = threading.Condition()
+        self.gate_open = False
+        self.gate_history = []
+        self.warmed = 0
+
+    def open_gate(self) -> None:
+        self.gate_open = True
+        self.gate_history.append(True)
+
+    def close_gate(self) -> None:
+        self.gate_open = False
+        self.gate_history.append(False)
+
+    def warm_up(self) -> None:
+        self.warmed += 1
 
     def put_wake(self, source: str = "model") -> None:
         with self.condition:
@@ -117,6 +131,9 @@ class FakeProvider:
         self.fail = False
         self.block = False
         self.partial = False
+        # Only a reply that asks something keeps the microphone open, so a
+        # test that needs a second turn has to make Miso ask for one.
+        self.question = False
         self.entered = threading.Event()
 
     def health(self):
@@ -140,7 +157,10 @@ class FakeProvider:
             )
             yield ChatChunk(done=True)
             return
-        yield ChatChunk(text="Second response" if "second" in latest else "First response")
+        answer = "Second response" if "second" in latest else "First response"
+        if self.question:
+            answer = f"{answer}. Anything else?"
+        yield ChatChunk(text=answer)
         yield ChatChunk(done=True)
 
 
@@ -290,6 +310,9 @@ class ConversationManagerTests(unittest.TestCase):
         acknowledge_wake=True,
         languages=("en", "es"),
         echo_guard=0.6,
+        follow_up=1,
+        session=45,
+        maximum_discards=3,
     ):
         router = ProviderRouter(
             ProviderSet(pi=self.provider, lan=None, hosted=None), self.audit
@@ -313,7 +336,155 @@ class ConversationManagerTests(unittest.TestCase):
             wake_phrase="Miso",
             listen_timeout_seconds=listen,
             checkback_timeout_seconds=checkback,
+            follow_up_timeout_seconds=follow_up,
+            session_timeout_seconds=session,
+            maximum_discards=maximum_discards,
         )
+
+    def test_the_recogniser_only_runs_while_miso_is_expecting_speech(self) -> None:
+        manager = self.manager()
+        manager.start()
+        try:
+            self.assertFalse(self.source.gate_open)
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.assertTrue(self.source.gate_open)
+
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "idle")
+            self.assertFalse(self.source.gate_open)
+        finally:
+            manager.stop()
+
+    def test_a_wake_warms_the_transcription_lane(self) -> None:
+        manager = self.manager()
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            wait_until(lambda: self.source.warmed >= 1, "the lane to be warmed")
+        finally:
+            manager.stop()
+
+    def test_a_button_talk_warms_the_transcription_lane(self) -> None:
+        manager = self.manager()
+        manager.start()
+        try:
+            self.source.put_wake(source="button")
+            wait_for(manager, "listening")
+            wait_until(lambda: self.source.warmed >= 1, "the lane to be warmed")
+        finally:
+            manager.stop()
+
+    def test_a_plain_answer_closes_the_microphone(self) -> None:
+        # The regression this guards: every answer reopened an eight second
+        # listening window, and any noise inside it reopened another, so the
+        # microphone never closed and the room's conversation became Miso's.
+        manager = self.manager()
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "idle")
+
+            latest = manager.status()["latest_transition"]
+            self.assertEqual(latest["reason"], "answer completed")
+        finally:
+            manager.stop()
+
+    def test_an_answer_that_asks_something_keeps_listening(self) -> None:
+        self.provider.question = True
+        manager = self.manager(follow_up=5)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, tell me hello")
+            wait_for(manager, "follow_up")
+
+            latest = manager.status()["latest_transition"]
+            self.assertEqual(latest["reason"], "question awaiting an answer")
+        finally:
+            manager.stop()
+
+    def test_a_tool_turn_closes_even_when_it_ends_in_a_question(self) -> None:
+        tools = ToolRegistry(self.audit)
+        tools.register(
+            ToolDefinition(
+                name="test_action",
+                description="Return a result that ends in a question.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+                handler=lambda _arguments, _context: {
+                    "summary": "Timer set. Anything else?"
+                },
+            )
+        )
+        manager = self.manager(tools=tools)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            self.source.put_activity()
+            self.source.put_result("Miso, run the tool")
+            wait_for(manager, "idle")
+
+            latest = manager.status()["latest_transition"]
+            self.assertEqual(latest["reason"], "tool completed")
+        finally:
+            manager.stop()
+
+    def test_repeated_noise_stops_re_arming_the_listening_window(self) -> None:
+        # Each discarded transcript used to buy another full listening window,
+        # which is what let a conversation in the next room hold the
+        # microphone open indefinitely.
+        manager = self.manager(listen=30, maximum_discards=3, echo_guard=0)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            for _ in range(3):
+                self.source.put_activity()
+                wait_for(manager, "transcribing")
+                self.source.put_result("bonjour tout le monde", language="fr")
+            wait_for(manager, "idle")
+
+            latest = manager.status()["latest_transition"]
+            self.assertEqual(latest["reason"], "unsupported language ignored")
+        finally:
+            manager.stop()
+
+    def test_the_session_budget_closes_a_window_noise_keeps_re_arming(self) -> None:
+        manager = self.manager(listen=30, session=5, maximum_discards=50)
+        manager.start()
+        try:
+            self.source.put_wake()
+            wait_for(manager, "listening")
+            deadline = manager._deadline
+            self.assertIsNotNone(deadline)
+            # The listening window is thirty seconds, but the session it lives
+            # inside is five, and the window may never outlast it.
+            self.assertLess(deadline - time.monotonic(), 5.1)
+        finally:
+            manager.stop()
+
+    def test_dismissals_end_the_session_without_matching_the_whole_transcript(
+        self,
+    ) -> None:
+        for phrase in ("that's all", "stop listening", "ya está", "gracias"):
+            with self.subTest(phrase=phrase):
+                self.assertTrue(ConversationManager._is_goodbye(phrase))
+        for phrase in ("ok", "vale", "stop the timer", "thanks for the timer"):
+            with self.subTest(phrase=phrase):
+                self.assertFalse(ConversationManager._is_goodbye(phrase))
 
     def test_tool_picker_answers_when_the_fast_lane_misses(self) -> None:
         from miso.intake import FastLane
@@ -342,7 +513,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("Miso, get a countdown going for five minutes")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual(
                 [item[1] for item in speech.calls],
@@ -376,7 +547,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("Miso, set a timer for 5 minutes")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual(
                 [item[1] for item in speech.calls],
@@ -413,7 +584,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("Miso, tell me a story")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual(
                 [item[1] for item in speech.calls],
@@ -438,7 +609,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("Miso, tell me hello")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
             self.assertEqual(heard, [("tell me hello", "en")])
         finally:
             manager.stop()
@@ -460,7 +631,7 @@ class ConversationManagerTests(unittest.TestCase):
                 lambda: cues == ["capturing", "transcribing"], "transcribing cue"
             )
             self.source.put_result("Miso, tell me hello")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
             self.assertEqual(cues, ["capturing", "transcribing"])
         finally:
             manager.stop()
@@ -484,6 +655,7 @@ class ConversationManagerTests(unittest.TestCase):
     def test_turn_first_audio_latency_is_recorded_separately_from_tools(self) -> None:
         latency = InMemoryAuditLog()
         manager = self.manager(latency=latency, listen=5, checkback=5, echo_guard=0)
+        self.provider.question = True
         manager.start()
         try:
             self.source.put_wake()
@@ -569,7 +741,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("Miso, tell me hello")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual([item[1] for item in speech.calls], ["Yes?", "First response"])
             self.assertEqual(responses, [("Yes?", "en"), ("First response", "en")])
@@ -654,7 +826,7 @@ class ConversationManagerTests(unittest.TestCase):
             self.assertEqual(manager.status()["state"], "routing")
             self.assertEqual(manager.status()["interruptions"], 0)
 
-            wait_for(manager, "follow_up", timeout=4)
+            wait_for(manager, "idle", timeout=4)
             self.assertEqual(manager.status()["errors"], 0)
             self.assertIn("First response", [item[1] for item in speech.calls])
         finally:
@@ -682,7 +854,7 @@ class ConversationManagerTests(unittest.TestCase):
             self.source.put_wake()
             wait_for(manager, "listening")
             self.source.put_result("run tool")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             conversation_id = str(manager.status()["conversation_id"])
             events = self.store.events(conversation_id)
@@ -723,7 +895,7 @@ class ConversationManagerTests(unittest.TestCase):
             self.source.put_wake()
             wait_for(manager, "listening")
             self.source.put_result("run tool")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual(speech.calls[-1][1], "It is cloudy and 18 degrees.")
         finally:
@@ -818,7 +990,7 @@ class ConversationManagerTests(unittest.TestCase):
 
             self.source.put_activity()
             self.source.put_result("Miso, tell me hello")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual(
                 [item[1] for item in speech.calls], ["Yes?", "First response"]
@@ -838,7 +1010,7 @@ class ConversationManagerTests(unittest.TestCase):
             time.sleep(0.7)
             self.source.put_activity()
             self.source.put_result("Miso, tell me hello")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual(
                 [item[1] for item in speech.calls], ["Yes?", "Half an answer"]
@@ -999,7 +1171,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("set a timer for five minutes")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             events = self.store.events(str(manager.status()["conversation_id"]))
             self.assertEqual(events[0].content, "set a timer for five minutes")
@@ -1016,7 +1188,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("the timer")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             events = self.store.events(str(manager.status()["conversation_id"]))
             self.assertEqual(events[0].content, "the timer")
@@ -1051,7 +1223,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("Miso, tell me hello")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual([item[1] for item in speech.calls], ["First response"])
             events = self.store.events(str(manager.status()["conversation_id"]))
@@ -1098,7 +1270,7 @@ class ConversationManagerTests(unittest.TestCase):
             wait_for(manager, "listening")
             self.source.put_activity()
             self.source.put_result("bore da sut mae", language="cy")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             events = self.store.events(str(manager.status()["conversation_id"]))
             self.assertEqual([event.role for event in events], ["user", "assistant"])
@@ -1131,7 +1303,7 @@ class ConversationManagerTests(unittest.TestCase):
             self.source.put_wake(source="button")
             wait_for(manager, "listening")
             self.source.put_result("first request")
-            wait_for(manager, "follow_up")
+            wait_for(manager, "idle")
 
             self.assertEqual([item[1] for item in speech.calls], ["First response"])
         finally:

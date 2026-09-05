@@ -135,9 +135,23 @@ class Settings:
         "Set a timer for twenty seconds. Add bread to the shopping list."
     )
     stt_result_capacity: int = 16
+    # Only transcribe while the conversation is expecting speech. Ungated, the
+    # recogniser runs on every sound in the house and hands the state machine
+    # whatever the room said. See docs/miso-transcription-benchmark.md.
+    stt_gated: bool = True
+    # Hosted dictation lane. Audio leaves the house on this lane; the local
+    # lanes below are what answers when it is unset or unreachable.
+    stt_wispr_api_key: str | None = field(default=None, repr=False)
+    stt_wispr_base_url: str = "https://platform-api.wisprflow.ai/api/v1/dash"
+    stt_wispr_timeout_seconds: float = 4.0
+    # Resident local whisper.cpp. Empty disables the lane and falls through to
+    # the CLI, which reloads the model for every single utterance.
+    stt_server_url: str = "http://127.0.0.1:8910"
+    stt_server_timeout_seconds: float = 15.0
+    stt_lane_cooldown_seconds: float = 30.0
     stt_vad_threshold_dbfs: float = -38.0
     stt_vad_minimum_speech_milliseconds: int = 250
-    stt_vad_end_silence_milliseconds: int = 600
+    stt_vad_end_silence_milliseconds: int = 400
     stt_vad_maximum_utterance_milliseconds: int = 15_000
     stt_vad_pre_roll_milliseconds: int = 200
     tts_enabled: bool = False
@@ -163,6 +177,10 @@ class Settings:
     conversation_enabled: bool = True
     conversation_listen_timeout_seconds: float = 8.0
     conversation_checkback_timeout_seconds: float = 5.0
+    conversation_follow_up_timeout_seconds: float = 4.0
+    conversation_session_timeout_seconds: float = 45.0
+    conversation_transcribe_timeout_seconds: float = 20.0
+    conversation_maximum_discards: int = 3
     conversation_acknowledgement: str = "Yes?"
     conversation_acknowledge_wake: bool = True
     conversation_echo_guard_seconds: float = 0.6
@@ -253,6 +271,15 @@ class Settings:
             stt_threads = int(source.get("MISO_STT_THREADS", "4"))
             stt_timeout_seconds = float(source.get("MISO_STT_TIMEOUT_SECONDS", "45"))
             stt_result_capacity = int(source.get("MISO_STT_RESULT_CAPACITY", "16"))
+            stt_wispr_timeout_seconds = float(
+                source.get("MISO_STT_WISPR_TIMEOUT_SECONDS", "4")
+            )
+            stt_server_timeout_seconds = float(
+                source.get("MISO_STT_SERVER_TIMEOUT_SECONDS", "15")
+            )
+            stt_lane_cooldown_seconds = float(
+                source.get("MISO_STT_LANE_COOLDOWN_SECONDS", "30")
+            )
             stt_vad_threshold_dbfs = float(
                 source.get("MISO_STT_VAD_THRESHOLD_DBFS", "-38")
             )
@@ -260,7 +287,7 @@ class Settings:
                 source.get("MISO_STT_VAD_MINIMUM_SPEECH_MILLISECONDS", "250")
             )
             stt_vad_end_silence_milliseconds = int(
-                source.get("MISO_STT_VAD_END_SILENCE_MILLISECONDS", "600")
+                source.get("MISO_STT_VAD_END_SILENCE_MILLISECONDS", "400")
             )
             stt_vad_maximum_utterance_milliseconds = int(
                 source.get("MISO_STT_VAD_MAXIMUM_UTTERANCE_MILLISECONDS", "15000")
@@ -272,6 +299,18 @@ class Settings:
             tts_chunk_bytes = int(source.get("MISO_TTS_CHUNK_BYTES", "4096"))
             tts_timeout_seconds = float(source.get("MISO_TTS_TIMEOUT_SECONDS", "60"))
             tts_result_capacity = int(source.get("MISO_TTS_RESULT_CAPACITY", "16"))
+            conversation_follow_up_timeout_seconds = float(
+                source.get("MISO_CONVERSATION_FOLLOW_UP_TIMEOUT_SECONDS", "4")
+            )
+            conversation_session_timeout_seconds = float(
+                source.get("MISO_CONVERSATION_SESSION_TIMEOUT_SECONDS", "45")
+            )
+            conversation_transcribe_timeout_seconds = float(
+                source.get("MISO_CONVERSATION_TRANSCRIBE_TIMEOUT_SECONDS", "20")
+            )
+            conversation_maximum_discards = int(
+                source.get("MISO_CONVERSATION_MAXIMUM_DISCARDS", "3")
+            )
             conversation_listen_timeout_seconds = float(
                 source.get("MISO_CONVERSATION_LISTEN_TIMEOUT_SECONDS", "8")
             )
@@ -473,6 +512,22 @@ class Settings:
                 "Set a timer for twenty seconds. Add bread to the shopping list.",
             ).strip(),
             stt_result_capacity=stt_result_capacity,
+            stt_gated=_boolean(
+                source.get("MISO_STT_GATED", "true"), "MISO_STT_GATED"
+            ),
+            stt_wispr_api_key=(
+                source.get("MISO_STT_WISPR_API_KEY", "").strip() or None
+            ),
+            stt_wispr_base_url=source.get(
+                "MISO_STT_WISPR_BASE_URL",
+                "https://platform-api.wisprflow.ai/api/v1/dash",
+            ).strip(),
+            stt_wispr_timeout_seconds=stt_wispr_timeout_seconds,
+            stt_server_url=source.get(
+                "MISO_STT_SERVER_URL", "http://127.0.0.1:8910"
+            ).strip(),
+            stt_server_timeout_seconds=stt_server_timeout_seconds,
+            stt_lane_cooldown_seconds=stt_lane_cooldown_seconds,
             stt_vad_threshold_dbfs=stt_vad_threshold_dbfs,
             stt_vad_minimum_speech_milliseconds=(
                 stt_vad_minimum_speech_milliseconds
@@ -529,6 +584,16 @@ class Settings:
             conversation_listen_timeout_seconds=(
                 conversation_listen_timeout_seconds
             ),
+            conversation_follow_up_timeout_seconds=(
+                conversation_follow_up_timeout_seconds
+            ),
+            conversation_session_timeout_seconds=(
+                conversation_session_timeout_seconds
+            ),
+            conversation_transcribe_timeout_seconds=(
+                conversation_transcribe_timeout_seconds
+            ),
+            conversation_maximum_discards=conversation_maximum_discards,
             conversation_checkback_timeout_seconds=(
                 conversation_checkback_timeout_seconds
             ),
@@ -778,6 +843,26 @@ class Settings:
             raise ConfigError("MISO_STT_PROMPT must be at most 500 characters")
         if not 1 <= self.stt_result_capacity <= 1_000:
             raise ConfigError("MISO_STT_RESULT_CAPACITY must be between 1 and 1000")
+        if not self.stt_wispr_base_url.startswith("https://"):
+            raise ConfigError("MISO_STT_WISPR_BASE_URL must use HTTPS")
+        if not 0.5 <= self.stt_wispr_timeout_seconds <= 60:
+            raise ConfigError(
+                "MISO_STT_WISPR_TIMEOUT_SECONDS must be between 0.5 and 60"
+            )
+        if self.stt_server_url and not self.stt_server_url.startswith(
+            ("http://127.0.0.1", "http://localhost", "https://")
+        ):
+            raise ConfigError(
+                "MISO_STT_SERVER_URL must be loopback HTTP or HTTPS"
+            )
+        if not 1 <= self.stt_server_timeout_seconds <= 600:
+            raise ConfigError(
+                "MISO_STT_SERVER_TIMEOUT_SECONDS must be between 1 and 600"
+            )
+        if not 0 <= self.stt_lane_cooldown_seconds <= 3_600:
+            raise ConfigError(
+                "MISO_STT_LANE_COOLDOWN_SECONDS must be between 0 and 3600"
+            )
         if not -120 <= self.stt_vad_threshold_dbfs <= 0:
             raise ConfigError("MISO_STT_VAD_THRESHOLD_DBFS must be between -120 and 0")
         if not 20 <= self.stt_vad_minimum_speech_milliseconds <= 10_000:
@@ -826,6 +911,22 @@ class Settings:
         if not 1 <= self.conversation_checkback_timeout_seconds <= 120:
             raise ConfigError(
                 "MISO_CONVERSATION_CHECKBACK_TIMEOUT_SECONDS must be between 1 and 120"
+            )
+        if not 1 <= self.conversation_follow_up_timeout_seconds <= 120:
+            raise ConfigError(
+                "MISO_CONVERSATION_FOLLOW_UP_TIMEOUT_SECONDS must be between 1 and 120"
+            )
+        if not 5 <= self.conversation_session_timeout_seconds <= 600:
+            raise ConfigError(
+                "MISO_CONVERSATION_SESSION_TIMEOUT_SECONDS must be between 5 and 600"
+            )
+        if not 1 <= self.conversation_transcribe_timeout_seconds <= 600:
+            raise ConfigError(
+                "MISO_CONVERSATION_TRANSCRIBE_TIMEOUT_SECONDS must be between 1 and 600"
+            )
+        if not 1 <= self.conversation_maximum_discards <= 20:
+            raise ConfigError(
+                "MISO_CONVERSATION_MAXIMUM_DISCARDS must be between 1 and 20"
             )
         if not 0 <= self.conversation_echo_memory_seconds <= 120:
             raise ConfigError(

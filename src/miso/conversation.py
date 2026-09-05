@@ -205,12 +205,79 @@ def _echo_overlap(candidate: str, spoken: str) -> float:
     return sum(1 for word in heard if word in said) / len(heard)
 
 
+# Short enough to appear inside a real request, so these end the session only
+# when they are the entire transcript. Bare confirmations ("ok", "vale") are
+# deliberately absent: after Miso asks a question they are the answer.
+_GOODBYE_EXACT = frozenset(
+    {
+        "bye",
+        "goodbye",
+        "good bye",
+        "thanks",
+        "thank you",
+        "thanks miso",
+        "gracias miso",
+        "gracias",
+    }
+)
+
+# Unambiguous dismissals. Nobody opens a request with these, so they end the
+# session wherever they start the transcript.
+_GOODBYE_PREFIXES = frozenset(
+    {
+        "that is all",
+        "that s all",
+        "that s it",
+        "nothing else",
+        "stop listening",
+        "stop it",
+        "never mind",
+        "nevermind",
+        "forget it",
+        "go to sleep",
+        "adios",
+        "adiós",
+        "hasta luego",
+        "eso es todo",
+        "nada más",
+        "nada mas",
+        "ya está",
+        "ya esta",
+        "déjalo",
+        "dejalo",
+        "olvídalo",
+        "olvidalo",
+        "para ya",
+        "deja de escuchar",
+        "duérmete",
+        "duermete",
+    }
+)
+
 _VOICE_ADDRESSABLE = frozenset(
     {
         ConversationState.LISTENING,
         ConversationState.FOLLOW_UP,
     }
 )
+
+# The only states in which the recogniser should be running at all. Outside
+# these Miso is idle or busy, and anything the microphone picks up is the
+# household talking among itself.
+_CAPTURING_STATES = frozenset(
+    {
+        ConversationState.ACKNOWLEDGING,
+        ConversationState.LISTENING,
+        ConversationState.TRANSCRIBING,
+        ConversationState.CHECKING_BACK,
+        ConversationState.FOLLOW_UP,
+    }
+)
+
+# A reply that ends in a question is Miso asking for something, so the answer
+# is expected and the microphone stays open for it. Anything else is a
+# finished statement and the turn is over.
+_QUESTION_ENDING = re.compile(r"[?？]\s*$")
 
 # States in which there is nothing to interrupt.
 _INACTIVE_STATES = frozenset(
@@ -279,6 +346,12 @@ class TranscriptionEvents(Protocol):
     def get_activity(
         self, timeout: float | None = None
     ) -> SpeechActivity | None: ...
+
+    def open_gate(self) -> None: ...
+
+    def close_gate(self) -> None: ...
+
+    def warm_up(self) -> None: ...
 
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
@@ -440,6 +513,10 @@ class ConversationManager:
         wake_phrase: str,
         listen_timeout_seconds: float,
         checkback_timeout_seconds: float,
+        follow_up_timeout_seconds: float = 4.0,
+        session_timeout_seconds: float = 45.0,
+        transcribe_timeout_seconds: float = 20.0,
+        maximum_discards: int = 3,
         acknowledgement: str = "Yes?",
         acknowledge_wake: bool = True,
         languages: tuple[str, ...] = ("en", "es"),
@@ -458,6 +535,12 @@ class ConversationManager:
     ) -> None:
         if listen_timeout_seconds <= 0 or checkback_timeout_seconds <= 0:
             raise ValueError("conversation timeouts must be positive")
+        if follow_up_timeout_seconds <= 0 or session_timeout_seconds <= 0:
+            raise ValueError("conversation timeouts must be positive")
+        if transcribe_timeout_seconds <= 0:
+            raise ValueError("conversation timeouts must be positive")
+        if maximum_discards < 1:
+            raise ValueError("maximum discards must be at least one")
         if not 0 <= echo_guard_seconds <= 10:
             raise ValueError("echo guard must be between 0 and 10 seconds")
         if not 0 <= echo_memory_seconds <= 120:
@@ -483,6 +566,10 @@ class ConversationManager:
         self.wake_phrase = wake_phrase.strip()
         self.listen_timeout_seconds = listen_timeout_seconds
         self.checkback_timeout_seconds = checkback_timeout_seconds
+        self.follow_up_timeout_seconds = follow_up_timeout_seconds
+        self.session_timeout_seconds = session_timeout_seconds
+        self.transcribe_timeout_seconds = transcribe_timeout_seconds
+        self.maximum_discards = maximum_discards
         self.echo_guard_seconds = echo_guard_seconds
         self.echo_memory_seconds = echo_memory_seconds
         self.acknowledgement = acknowledgement.strip()
@@ -507,6 +594,12 @@ class ConversationManager:
         self._active_cancel: threading.Event | None = None
         self._generation = 0
         self._deadline: float | None = None
+        # A wake gives the household one bounded session. Every window inside
+        # it is clamped to this, so noise that keeps re-arming the listen
+        # timer can no longer hold the microphone open indefinitely.
+        self._session_deadline: float | None = None
+        self._discards = 0
+        self._follow_up_reason = "checkback"
         self._checked_back = False
         self._language = "en"
         self._turns = 0
@@ -676,6 +769,54 @@ class ConversationManager:
                 return True
         return False
 
+    def _warm_transcription(self) -> None:
+        try:
+            self.transcription.warm_up()
+        except AttributeError:
+            pass
+
+    def _apply_capture_gate(self, state: ConversationState) -> None:
+        """Run the recogniser only while the conversation is expecting speech."""
+        try:
+            if state in _CAPTURING_STATES:
+                self.transcription.open_gate()
+            else:
+                self.transcription.close_gate()
+        except AttributeError:
+            # An ungated transcription source (a test double, or a manager
+            # built before gating) simply keeps its old always-on behaviour.
+            pass
+
+    def _arm_deadline_locked(self, seconds: float) -> None:
+        """Open a listening window, never past the session's own budget."""
+        deadline = time.monotonic() + seconds
+        if self._session_deadline is not None:
+            deadline = min(deadline, self._session_deadline)
+        self._deadline = deadline
+
+    def _discard_locked(self, reason: str) -> bool:
+        """Account for a transcript that was heard but not worth acting on.
+
+        Re-arming the full listening window here is what let a conversation in
+        the next room hold the microphone open forever: every discarded
+        transcript bought another eight seconds. The window is still re-armed,
+        but it is clamped to the session budget and gives up after a few
+        consecutive discards.
+        """
+        self._discards += 1
+        if self._discards >= self.maximum_discards:
+            if self._state is not ConversationState.IDLE:
+                self._transition_locked(ConversationState.IDLE, reason)
+            self._conversation_id = None
+            self._checked_back = False
+            self._deadline = None
+            self._session_deadline = None
+            return True
+        if self._state is ConversationState.TRANSCRIBING:
+            self._transition_locked(ConversationState.LISTENING, reason)
+        self._arm_deadline_locked(self.listen_timeout_seconds)
+        return False
+
     def _transition_locked(self, target: ConversationState, reason: str) -> None:
         previous = self._state
         if target is previous:
@@ -687,6 +828,7 @@ class ConversationManager:
         transition = StateTransition(previous, target, reason[:120], time.time())
         self._state = target
         self._transitions.append(transition)
+        self._apply_capture_gate(target)
         self.audit_sink.record(
             audit_event(
                 "conversation_transition",
@@ -739,6 +881,8 @@ class ConversationManager:
             self._conversation_id = None
             self._checked_back = False
             self._deadline = None
+            self._session_deadline = None
+            self._discards = 0
         return True
 
     def _handle_wake(self, event: WakeEvent) -> None:
@@ -759,6 +903,14 @@ class ConversationManager:
             self._language = "en"
             self._checked_back = False
             self._deadline = None
+            self._discards = 0
+            self._follow_up_reason = "checkback"
+            # A wake buys one bounded session. Every window inside it is
+            # clamped to this, so noise that keeps re-arming the listening
+            # timer can no longer hold the microphone open indefinitely.
+            self._session_deadline = (
+                time.monotonic() + self.session_timeout_seconds
+            )
             self._last_error = None
             self._ignore_activity_before = event.detected_at
             button = event.source == WAKE_SOURCE_BUTTON
@@ -773,14 +925,23 @@ class ConversationManager:
                 # feedback the sound used to.
                 origin = "button" if button else "wake"
                 self._turn_origin = (origin, _monotonic_for(event.detected_at))
-                self._deadline = time.monotonic() + self.listen_timeout_seconds
+                self._arm_deadline_locked(self.listen_timeout_seconds)
                 self._transition_locked(
                     ConversationState.LISTENING,
                     "button talk" if button else "wake detected",
                 )
-                return
-            self._turn_origin = ("wake", _monotonic_for(event.detected_at))
-            self._transition_locked(ConversationState.ACKNOWLEDGING, "wake detected")
+                immediate = True
+            else:
+                self._turn_origin = ("wake", _monotonic_for(event.detected_at))
+                self._transition_locked(
+                    ConversationState.ACKNOWLEDGING, "wake detected"
+                )
+                immediate = False
+        # The hosted lane's TLS handshake is a visible share of a short
+        # request, and a wake is about a second before there is audio to send.
+        self._warm_transcription()
+        if immediate:
+            return
         self._start_cue(
             self.acknowledgement,
             "en",
@@ -795,11 +956,7 @@ class ConversationManager:
             with self._lock:
                 if self._state is ConversationState.TRANSCRIBING:
                     self._active_cancel = None
-                    self._deadline = time.monotonic() + self.listen_timeout_seconds
-                    self._transition_locked(
-                        ConversationState.LISTENING,
-                        "short utterance discarded",
-                    )
+                    self._discard_locked("short utterance discarded")
                     discarded = True
             if discarded:
                 self._publish_capture("discarded")
@@ -834,7 +991,12 @@ class ConversationManager:
                 # leaves the request permanently unanswered.
                 return
             if self._state is state:
-                self._deadline = None
+                # Capture plus recognition is bounded work, so it gets a
+                # bounded window. Leaving the deadline unset here meant a lost
+                # utterance held the microphone open with nothing to expire.
+                self._arm_deadline_locked(
+                    self.listen_timeout_seconds + self.transcribe_timeout_seconds
+                )
                 if self._turn_origin is None:
                     self._turn_origin = (
                         "follow_up",
@@ -888,11 +1050,7 @@ class ConversationManager:
         text = self._without_wake_phrase(result.text)
         if not text:
             with self._lock:
-                if self._state is ConversationState.TRANSCRIBING:
-                    self._transition_locked(
-                        ConversationState.LISTENING, "wake-only transcript ignored"
-                    )
-                self._deadline = time.monotonic() + self.listen_timeout_seconds
+                self._discard_locked("wake-only transcript ignored")
             self._publish_capture("discarded")
             return
         detected = (result.model_language or "").casefold()
@@ -903,11 +1061,7 @@ class ConversationManager:
             # worth acting on.
             LOGGER.info("dropped transcript detected as %s", detected)
             with self._lock:
-                if self._state is ConversationState.TRANSCRIBING:
-                    self._transition_locked(
-                        ConversationState.LISTENING, "unsupported language ignored"
-                    )
-                self._deadline = time.monotonic() + self.listen_timeout_seconds
+                self._discard_locked("unsupported language ignored")
             self._publish_capture("discarded")
             return
         language = (
@@ -920,11 +1074,7 @@ class ConversationManager:
         if self._is_own_echo(text):
             LOGGER.debug("dropped transcript matching Miso's own recent speech")
             with self._lock:
-                if self._state is ConversationState.TRANSCRIBING:
-                    self._transition_locked(
-                        ConversationState.LISTENING, "own speech ignored"
-                    )
-                self._deadline = time.monotonic() + self.listen_timeout_seconds
+                self._discard_locked("own speech ignored")
             self._publish_capture("discarded")
             return
         if self._is_goodbye(text):
@@ -1118,13 +1268,7 @@ class ConversationManager:
                 speaker.feed(spoken)
             speaker.finish()
             if not cancel.is_set() and self._is_current(generation):
-                with self._lock:
-                    self._checked_back = False
-                    self._deadline = time.monotonic() + self.listen_timeout_seconds
-                    self._active_cancel = None
-                    self._transition_locked(
-                        ConversationState.FOLLOW_UP, "response completed"
-                    )
+                self._close_or_follow_up(spoken, used_tool=used_tool)
         except ProviderCancelled:
             return
         except Exception as error:
@@ -1132,6 +1276,42 @@ class ConversationManager:
                 self._recover(error)
         finally:
             speaker.close()
+
+    def _close_or_follow_up(self, spoken: str, *, used_tool: bool) -> None:
+        """Decide whether the answer ended the turn or invited another one.
+
+        Leaving the microphone open after every answer is what made Miso
+        transcribe the rest of the evening. A turn that ran a tool is a
+        completed instruction and closes immediately; a plain statement closes
+        too. Only a reply that asks the household something keeps the
+        microphone open, and then only long enough to hear the answer.
+        """
+        follow_up = not used_tool and bool(_QUESTION_ENDING.search(spoken.strip()))
+        with self._lock:
+            self._active_cancel = None
+            self._checked_back = False
+            self._discards = 0
+            if not follow_up:
+                self._deadline = None
+                self._session_deadline = None
+                # The conversation record itself is left in place: the next
+                # wake opens a new one anyway, and keeping it means the status
+                # page can still show what the last exchange was about.
+                self._transition_locked(
+                    ConversationState.IDLE,
+                    "tool completed" if used_tool else "answer completed",
+                )
+                return
+            self._follow_up_reason = "question"
+            # A real turn just happened, so the household is still here: the
+            # session budget starts again rather than counting from the wake.
+            self._session_deadline = (
+                time.monotonic() + self.session_timeout_seconds
+            )
+            self._arm_deadline_locked(self.follow_up_timeout_seconds)
+            self._transition_locked(
+                ConversationState.FOLLOW_UP, "question awaiting an answer"
+            )
 
     def _record_first_audio(
         self,
@@ -1245,13 +1425,16 @@ class ConversationManager:
                 )
             with self._lock:
                 self._active_cancel = None
-                self._deadline = (
-                    None if timeout is None else time.monotonic() + timeout
-                )
+                if timeout is None:
+                    self._deadline = None
+                else:
+                    self._arm_deadline_locked(timeout)
                 self._transition_locked(target, reason)
                 if target is ConversationState.IDLE:
                     self._conversation_id = None
                     self._checked_back = False
+                    self._session_deadline = None
+                    self._discards = 0
         except Exception as error:
             if not cancel.is_set() and self._is_current(generation):
                 self._recover(error)
@@ -1267,6 +1450,7 @@ class ConversationManager:
         return self.speech.wait(request_id, 1)
 
     def _handle_timeout(self) -> None:
+        cue = "checkback"
         with self._lock:
             if self._deadline is None or time.monotonic() < self._deadline:
                 return
@@ -1275,16 +1459,31 @@ class ConversationManager:
             self._timeouts += 1
             checked_back = self._checked_back
             language = self._language
+            if state is ConversationState.TRANSCRIBING:
+                # The recogniser owes an answer that never arrived. Without
+                # this the microphone stays open on no deadline at all.
+                self._close_session_locked("transcription timed out")
+                return
             if state not in {ConversationState.LISTENING, ConversationState.FOLLOW_UP}:
+                return
+            if state is ConversationState.FOLLOW_UP and (
+                self._follow_up_reason == "question"
+            ):
+                # Miso asked something and nobody answered. Dropping it in
+                # silence is the honest end of the turn; announcing a goodbye
+                # every time would make the room noisier, not quieter.
+                self._close_session_locked("unanswered question")
                 return
             if not checked_back:
                 self._checked_back = True
+                self._follow_up_reason = "checkback"
                 self._transition_locked(
                     ConversationState.CHECKING_BACK, "listening timeout"
                 )
             else:
+                cue = "goodbye"
                 self._transition_locked(ConversationState.GOODBYE, "follow-up timeout")
-        if not checked_back:
+        if cue == "checkback":
             self._start_cue(
                 self.checkbacks[language],
                 language,
@@ -1301,6 +1500,18 @@ class ConversationManager:
                 "timeout goodbye completed",
             )
 
+    def _close_session_locked(self, reason: str) -> None:
+        """End the session and shut the microphone. Caller holds the lock."""
+        self._deadline = None
+        self._session_deadline = None
+        self._active_cancel = None
+        self._turn_origin = None
+        self._discards = 0
+        self._checked_back = False
+        self._conversation_id = None
+        if self._state is not ConversationState.IDLE:
+            self._transition_locked(ConversationState.IDLE, reason)
+
     def _cancel_active(self) -> None:
         with self._lock:
             cancel = self._active_cancel
@@ -1314,6 +1525,8 @@ class ConversationManager:
             self._errors += 1
             self._last_error = str(error)[:200]
             self._deadline = None
+            self._session_deadline = None
+            self._discards = 0
             self._active_cancel = None
             self._turn_origin = None
             if self._state not in {
@@ -1347,17 +1560,19 @@ class ConversationManager:
 
     @staticmethod
     def _is_goodbye(text: str) -> bool:
+        """Recognise the household telling Miso the conversation is over.
+
+        Matching had to be the whole transcript, which meant "ok Miso thanks"
+        or "stop listening" carried on the session instead of ending it. The
+        phrases below are unambiguous enough to accept as a prefix, which is
+        where a dismissal actually lands in speech.
+        """
         normalized = re.sub(r"[^\wáéíóúüñ]+", " ", text.casefold()).strip()
-        return normalized in {
-            "bye",
-            "goodbye",
-            "good bye",
-            "that is all",
-            "that s all",
-            "adios",
-            "adiós",
-            "hasta luego",
-            "eso es todo",
-            "nada más",
-            "nada mas",
-        }
+        if not normalized:
+            return False
+        if normalized in _GOODBYE_EXACT:
+            return True
+        return any(
+            normalized == phrase or normalized.startswith(f"{phrase} ")
+            for phrase in _GOODBYE_PREFIXES
+        )

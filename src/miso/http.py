@@ -59,9 +59,13 @@ from miso.speech import PiperBackend, PiperVoice, SpeechError, SpeechManager
 from miso.toolpick import ToolPicker
 from miso.transcription import (
     EnergySpeechDetector,
+    FallbackTranscriber,
+    Transcriber,
     TranscriptionManager,
     UtteranceAssembler,
     WhisperCppTranscriber,
+    WhisperServerTranscriber,
+    WisprFlowTranscriber,
 )
 from miso.wake import OpenWakeWordModel, WakeWordManager
 from miso.tools import (
@@ -1396,6 +1400,46 @@ def _jsonl_tail(path: Path, limit: int) -> list[dict[str, object]]:
     return events
 
 
+def _transcription_lanes(settings: Settings) -> tuple[Transcriber, ...]:
+    """Order the transcription lanes fastest first, offline last.
+
+    Wispr Flow answers in a few hundred milliseconds but needs the uplink. The
+    resident whisper server keeps the model in memory and answers with no
+    network at all. The CLI stays last because it reloads the model for every
+    utterance, which is the latency this ordering exists to avoid.
+    """
+    lanes: list[Transcriber] = []
+    if settings.stt_wispr_api_key:
+        lanes.append(
+            WisprFlowTranscriber(
+                settings.stt_wispr_api_key,
+                base_url=settings.stt_wispr_base_url,
+                languages=settings.stt_languages,
+                timeout_seconds=settings.stt_wispr_timeout_seconds,
+            )
+        )
+    if settings.stt_server_url:
+        lanes.append(
+            WhisperServerTranscriber(
+                settings.stt_server_url,
+                model=settings.stt_model,
+                timeout_seconds=settings.stt_server_timeout_seconds,
+                prompt=settings.stt_prompt,
+            )
+        )
+    lanes.append(
+        WhisperCppTranscriber(
+            settings.stt_executable,
+            settings.stt_model,
+            threads=settings.stt_threads,
+            timeout_seconds=settings.stt_timeout_seconds,
+            work_directory=Path("/run/miso"),
+            prompt=settings.stt_prompt,
+        )
+    )
+    return tuple(lanes)
+
+
 def create_server(
     settings: Settings,
     port: int | None = None,
@@ -1491,13 +1535,9 @@ def create_server(
     transcription = transcription_manager or TranscriptionManager(
         enabled=settings.stt_enabled,
         audio=audio,
-        transcriber=WhisperCppTranscriber(
-            settings.stt_executable,
-            settings.stt_model,
-            threads=settings.stt_threads,
-            timeout_seconds=settings.stt_timeout_seconds,
-            work_directory=Path("/run/miso"),
-            prompt=settings.stt_prompt,
+        transcriber=FallbackTranscriber(
+            _transcription_lanes(settings),
+            cooldown_seconds=settings.stt_lane_cooldown_seconds,
         ),
         detector=EnergySpeechDetector(settings.stt_vad_threshold_dbfs),
         assembler=UtteranceAssembler(
@@ -1512,6 +1552,7 @@ def create_server(
             pre_roll_milliseconds=settings.stt_vad_pre_roll_milliseconds,
         ),
         result_capacity=settings.stt_result_capacity,
+        gated=settings.stt_gated,
     )
     calibration = wake_calibration or WakeCalibration(
         enabled=settings.audio_enabled and settings.stt_enabled,
@@ -1580,6 +1621,12 @@ def create_server(
         wake_phrase=settings.wake_phrase,
         listen_timeout_seconds=settings.conversation_listen_timeout_seconds,
         checkback_timeout_seconds=settings.conversation_checkback_timeout_seconds,
+        follow_up_timeout_seconds=settings.conversation_follow_up_timeout_seconds,
+        session_timeout_seconds=settings.conversation_session_timeout_seconds,
+        transcribe_timeout_seconds=(
+            settings.conversation_transcribe_timeout_seconds
+        ),
+        maximum_discards=settings.conversation_maximum_discards,
         acknowledgement=settings.conversation_acknowledgement,
         acknowledge_wake=settings.conversation_acknowledge_wake,
         languages=settings.stt_languages,

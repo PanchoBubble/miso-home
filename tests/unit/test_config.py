@@ -393,5 +393,32 @@ class LanguageAndWakeSettingsTests(unittest.TestCase):
         settings = self._settings(MISO_CONVERSATION_ACKNOWLEDGE_WAKE="false")
         self.assertFalse(settings.conversation_acknowledge_wake)
 
+    def test_the_recogniser_is_gated_and_the_hosted_lane_is_opt_in(self) -> None:
+        settings = self._settings()
+        self.assertTrue(settings.stt_gated)
+        # No key means no audio leaves the house.
+        self.assertIsNone(settings.stt_wispr_api_key)
+
+    def test_the_hosted_lane_must_use_https(self) -> None:
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_STT_WISPR_BASE_URL="http://platform-api.example")
+
+    def test_the_local_server_must_stay_on_loopback(self) -> None:
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_STT_SERVER_URL="http://192.168.1.20:8910")
+        self.assertEqual(
+            self._settings(MISO_STT_SERVER_URL="").stt_server_url, ""
+        )
+
+    def test_conversation_windows_are_bounded(self) -> None:
+        settings = self._settings()
+        self.assertEqual(settings.conversation_follow_up_timeout_seconds, 4.0)
+        self.assertEqual(settings.conversation_session_timeout_seconds, 45.0)
+        self.assertEqual(settings.conversation_maximum_discards, 3)
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_CONVERSATION_SESSION_TIMEOUT_SECONDS="1")
+        with self.assertRaises(ConfigError):
+            self._settings(MISO_CONVERSATION_MAXIMUM_DISCARDS="0")
+
 if __name__ == "__main__":
     unittest.main()
