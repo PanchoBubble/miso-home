@@ -166,14 +166,58 @@ The remaining Spanish gap therefore has to be closed after transcription, not
 inside it: the fast-lane matcher needs tolerance for near-miss number words.
 That is tracked separately.
 
-## Transcription lanes
+## Where the transcription time actually goes
 
-Change date: 2026-09-05. The numbers above were all measured against
-`whisper-cli`, which is forked once per utterance: write a temporary WAV, spawn
-a process, load `ggml-tiny.bin` from disk, infer, parse JSON, exit. On a live
-pipeline that fires on every short segment, the model load dominates and the
-compute hides behind it, so a 1.7 s median for roughly two seconds of audio is
-mostly startup, not recognition.
+Change date: 2026-09-05. The lane work below was originally justified by the
+claim that forking `whisper-cli` per utterance made the model load dominate the
+1.7 s median. That claim was wrong, and measuring it on the Pi is what showed
+it.
+
+### The model load was never the problem
+
+Measured on the Pi on 2026-09-05, `whisper-cli` on a 1.5 s utterance:
+
+```
+load time   =  131 ms
+mel  time   =    9 ms
+encode time = 2699 ms /  2 runs (1349 ms per run)
+decode time =   65 ms
+total       = 3192 ms
+```
+
+Model load is 4% of the wall clock, not "most of it". The cost is the encoder,
+and it runs **twice** because `--language auto` performs a detection encode
+before the transcription encode. Whisper also pads every clip to its 30 s
+window, so a 1.5 s command encodes 30 seconds of mel either way.
+
+A same-moment A/B on the loaded Pi put `whisper-cli` at 3.10 s and
+`whisper-server` at 2.98 s. The resident server is the better architecture (no
+process spawn, no temporary WAV) but it is worth roughly 4%, not the large win
+the lane was originally justified by. Both figures are about 1.8x the 1.7 s
+recorded earlier in this document because that run was on an idle cooled host;
+this one had a load average of 3.76, at 54 C with `throttled=0x0`.
+
+### Flags that do move it, unvalidated
+
+Same file, same box, same model, flags only:
+
+| Configuration | Total |
+| --- | ---: |
+| `--language auto` (shipping) | 3274 ms |
+| `--language auto --audio-ctx 768` | 2406 ms |
+| `--language en` | 1775 ms |
+| `--language en --audio-ctx 768` | 1052 ms |
+| `--language en --audio-ctx 512` | 951 ms |
+
+None of these are shipped. Pinning a language costs bilingual auto-detection,
+which the household needs, and `--audio-ctx` alters decoding: at 768 the
+segment end drifted from 1.400 s to 2.520 s even though the text stayed
+correct. Both need a word error rate run over the fixtures before they can be
+trusted. whisper-server accepts `language` as a per-request form field, so
+sending the conversation's last known language and falling back to `auto` on
+low confidence is the bilingual-safe route to that last column.
+
+## Transcription lanes
 
 Transcription is now a chain of lanes, tried in order. A lane that fails falls
 through to the next and then sits out `MISO_STT_LANE_COOLDOWN_SECONDS`
@@ -183,6 +227,7 @@ having no hosted lane at all.
 
 | Lane | Where | Notes |
 | --- | --- | --- |
+| `openai` | hosted | `POST /audio/transcriptions`, OpenAI-compatible multipart, so OpenAI and Groq differ only by base URL and model. Key falls back to the LLM lane's `MISO_OPENAI_API_KEY`. `whisper-1` with `verbose_json` reports the language; the 4o transcribe models do not, so it is guessed from function words. Audio leaves the house. |
 | `wispr-flow` | hosted | Base64 16 kHz WAV to `POST /api`, `Authorization: Bearer`. Dictation-tuned rather than a raw recogniser: it drops filler words and repairs names. Audio leaves the house. Unset the key to disable. |
 | `whisper-server` | local | `miso-whisper.service`, model resident, `POST /inference` multipart on loopback. Same model and prompt as the CLI. |
 | `whisper-cli` | local | Unchanged, last resort. Reloads the model per utterance. |
@@ -194,7 +239,48 @@ wake and the end of the sentence rather than inside the request.
 `MISO_STT_VAD_END_SILENCE_MILLISECONDS` dropped from 600 to 400. That silence
 is paid on every sentence before the recogniser starts at all.
 
-### Not measured yet
+### Engine comparison on the Pi
+
+Run date: 2026-09-05, on Pancho Pi under normal service load. Six bilingual
+fixtures (1.37-4.90 s; Paulina `es_MX` substitutes for Mónica `es_ES`, which
+was unavailable on the generating host, so these word error rates are
+engine-against-engine on identical audio and are **not** comparable to the
+Mónica figures earlier in this document). Latency is warm: the model is loaded
+once and each fixture transcribed three times, best of three, because that is
+how a resident lane serves a turn. Word error rate uses Miso's own scorer.
+
+| Engine | Mean WER | Median | Max | RTF |
+| --- | ---: | ---: | ---: | ---: |
+| `sherpa-onnx` Parakeet TDT 0.6B v3 int8 | 3.66% | **0.438 s** | 0.688 s | 0.18 |
+| `whisper-server` tiny, `audio_ctx=768` | **1.19%** | 0.898 s | 0.984 s | 0.37 |
+| `whisper-server` tiny, default context | 2.38% | 1.864 s | 4.425 s | 0.88 |
+| `faster-whisper` tiny int8 | 22.46% | 2.043 s | 2.218 s | 0.83 |
+| `faster-whisper` base int8 | 23.48% | 3.765 s | 4.189 s | 1.62 |
+
+Two predictions in the earlier revision of this document were wrong.
+
+**Parakeet was expected to be too slow for this hardware**, on the reasoning
+that 600 M parameters against `tiny`'s 39 M would sink an encoder-bound
+workload on four A76 cores. It is instead the fastest lane measured, at 0.18
+real-time factor, and it transcribed four of the six fixtures exactly. Its two
+misses are on the wake word and one verb ("Meso" for "Miso", "con un
+temporizador" for "pon un temporizador"), and that second one would defeat the
+Spanish timer fast lane, which is why whisper-server stays behind it.
+
+**faster-whisper was expected to beat whisper.cpp**, on its usual CPU
+advantage. Its int8 quantisation of multilingual `tiny` mangles Spanish badly
+enough to disqualify it: "Enciende la luz de la cocina" came back as "en
+cíndela luz de la cocina", and "Añade leche y café" as "Añar el Echeica fe".
+English was fine. It is rejected, not deferred.
+
+`audio_ctx=768` is now shipped for the whisper-server lane. It halves latency
+and, on these fixtures, slightly improves word error rate rather than costing
+any, because a two second command has no use for a thirty second context
+window.
+
+### Still not measured
+
+
 
 None of the lane latencies have been measured on the Pi. `ops/benchmark-whisper.py`
 still scores the CLI only, and the whisper-server lane also runs with

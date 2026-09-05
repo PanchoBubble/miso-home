@@ -142,15 +142,34 @@ class Settings:
     # recogniser runs on every sound in the house and hands the state machine
     # whatever the room said. See docs/miso-transcription-benchmark.md.
     stt_gated: bool = True
-    # Hosted dictation lane. Audio leaves the house on this lane; the local
-    # lanes below are what answers when it is unset or unreachable.
+    # Hosted OpenAI-compatible lane. Audio leaves the house on this lane. The
+    # key defaults to the one the LLM lane already uses, so one credential
+    # covers both; the base URL and model make it point at Groq or anything
+    # else speaking the same API. Unset to keep Miso fully offline.
+    stt_cloud_api_key: str | None = field(default=None, repr=False)
+    stt_cloud_base_url: str = "https://api.openai.com/v1"
+    stt_cloud_model: str = "whisper-1"
+    # whisper-1 answers verbose_json and names the language, which is what
+    # keeps bilingual replies working. The 4o transcribe models answer json
+    # only; the text-based guess covers them.
+    stt_cloud_response_format: str = "verbose_json"
+    stt_cloud_timeout_seconds: float = 6.0
+    # Hosted dictation lane, approval-gated by Wispr. Audio leaves the house.
     stt_wispr_api_key: str | None = field(default=None, repr=False)
     stt_wispr_base_url: str = "https://platform-api.wisprflow.ai/api/v1/dash"
     stt_wispr_timeout_seconds: float = 4.0
+    # Resident local Parakeet, served by miso-parakeet.service. Measured on the
+    # Pi it is the fastest local lane by a wide margin. Empty disables it.
+    stt_parakeet_url: str = "http://127.0.0.1:8911"
+    stt_parakeet_timeout_seconds: float = 15.0
     # Resident local whisper.cpp. Empty disables the lane and falls through to
     # the CLI, which reloads the model for every single utterance.
     stt_server_url: str = "http://127.0.0.1:8910"
     stt_server_timeout_seconds: float = 15.0
+    # Whisper pads every clip to a 30 s window regardless of length. Measured
+    # on the fixtures, 768 halved latency and slightly improved word error
+    # rate; 0 keeps whisper's default.
+    stt_server_audio_ctx: int = 768
     stt_lane_cooldown_seconds: float = 30.0
     stt_vad_threshold_dbfs: float = -38.0
     stt_vad_minimum_speech_milliseconds: int = 250
@@ -278,11 +297,20 @@ class Settings:
             stt_threads = int(source.get("MISO_STT_THREADS", "4"))
             stt_timeout_seconds = float(source.get("MISO_STT_TIMEOUT_SECONDS", "45"))
             stt_result_capacity = int(source.get("MISO_STT_RESULT_CAPACITY", "16"))
+            stt_cloud_timeout_seconds = float(
+                source.get("MISO_STT_CLOUD_TIMEOUT_SECONDS", "6")
+            )
             stt_wispr_timeout_seconds = float(
                 source.get("MISO_STT_WISPR_TIMEOUT_SECONDS", "4")
             )
             stt_server_timeout_seconds = float(
                 source.get("MISO_STT_SERVER_TIMEOUT_SECONDS", "15")
+            )
+            stt_server_audio_ctx = int(
+                source.get("MISO_STT_SERVER_AUDIO_CTX", "768")
+            )
+            stt_parakeet_timeout_seconds = float(
+                source.get("MISO_STT_PARAKEET_TIMEOUT_SECONDS", "15")
             )
             stt_lane_cooldown_seconds = float(
                 source.get("MISO_STT_LANE_COOLDOWN_SECONDS", "30")
@@ -525,6 +553,19 @@ class Settings:
             stt_gated=_boolean(
                 source.get("MISO_STT_GATED", "true"), "MISO_STT_GATED"
             ),
+            stt_cloud_api_key=(
+                source.get("MISO_STT_CLOUD_API_KEY", "").strip()
+                or source.get("MISO_OPENAI_API_KEY", "").strip()
+                or None
+            ),
+            stt_cloud_base_url=source.get(
+                "MISO_STT_CLOUD_BASE_URL", "https://api.openai.com/v1"
+            ).strip(),
+            stt_cloud_model=source.get("MISO_STT_CLOUD_MODEL", "whisper-1").strip(),
+            stt_cloud_response_format=source.get(
+                "MISO_STT_CLOUD_RESPONSE_FORMAT", "verbose_json"
+            ).strip(),
+            stt_cloud_timeout_seconds=stt_cloud_timeout_seconds,
             stt_wispr_api_key=(
                 source.get("MISO_STT_WISPR_API_KEY", "").strip() or None
             ),
@@ -533,6 +574,11 @@ class Settings:
                 "https://platform-api.wisprflow.ai/api/v1/dash",
             ).strip(),
             stt_wispr_timeout_seconds=stt_wispr_timeout_seconds,
+            stt_parakeet_url=source.get(
+                "MISO_STT_PARAKEET_URL", "http://127.0.0.1:8911"
+            ).strip(),
+            stt_parakeet_timeout_seconds=stt_parakeet_timeout_seconds,
+            stt_server_audio_ctx=stt_server_audio_ctx,
             stt_server_url=source.get(
                 "MISO_STT_SERVER_URL", "http://127.0.0.1:8910"
             ).strip(),
@@ -862,6 +908,18 @@ class Settings:
             raise ConfigError("MISO_STT_PROMPT must be at most 500 characters")
         if not 1 <= self.stt_result_capacity <= 1_000:
             raise ConfigError("MISO_STT_RESULT_CAPACITY must be between 1 and 1000")
+        if not self.stt_cloud_base_url.startswith("https://"):
+            raise ConfigError("MISO_STT_CLOUD_BASE_URL must use HTTPS")
+        if not self.stt_cloud_model:
+            raise ConfigError("MISO_STT_CLOUD_MODEL must not be empty")
+        if self.stt_cloud_response_format not in {"json", "verbose_json"}:
+            raise ConfigError(
+                "MISO_STT_CLOUD_RESPONSE_FORMAT must be json or verbose_json"
+            )
+        if not 0.5 <= self.stt_cloud_timeout_seconds <= 60:
+            raise ConfigError(
+                "MISO_STT_CLOUD_TIMEOUT_SECONDS must be between 0.5 and 60"
+            )
         if not self.stt_wispr_base_url.startswith("https://"):
             raise ConfigError("MISO_STT_WISPR_BASE_URL must use HTTPS")
         if not 0.5 <= self.stt_wispr_timeout_seconds <= 60:
@@ -874,6 +932,16 @@ class Settings:
             raise ConfigError(
                 "MISO_STT_SERVER_URL must be loopback HTTP or HTTPS"
             )
+        if self.stt_parakeet_url and not self.stt_parakeet_url.startswith(
+            ("http://127.0.0.1", "http://localhost")
+        ):
+            raise ConfigError("MISO_STT_PARAKEET_URL must be loopback HTTP")
+        if not 1 <= self.stt_parakeet_timeout_seconds <= 600:
+            raise ConfigError(
+                "MISO_STT_PARAKEET_TIMEOUT_SECONDS must be between 1 and 600"
+            )
+        if not 0 <= self.stt_server_audio_ctx <= 1500:
+            raise ConfigError("MISO_STT_SERVER_AUDIO_CTX must be between 0 and 1500")
         if not 1 <= self.stt_server_timeout_seconds <= 600:
             raise ConfigError(
                 "MISO_STT_SERVER_TIMEOUT_SECONDS must be between 1 and 600"

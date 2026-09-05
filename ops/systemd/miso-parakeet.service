@@ -1,0 +1,53 @@
+[Unit]
+Description=Miso resident Parakeet transcription worker
+After=network.target
+Before=miso.service
+
+[Service]
+Type=simple
+User=miso
+Group=miso
+# Loopback only. cloudflared publishes a public hostname to this box, so a
+# recogniser bound wider would put household audio on the open internet. The
+# worker refuses a non-loopback --host itself as well.
+# Run as a module, never by path: invoking the file directly puts
+# /opt/miso/app/src/miso on sys.path[0], where miso's own http.py shadows the
+# standard library's http package and the worker cannot import http.server.
+ExecStart=/opt/miso/parakeet/bin/python -m miso.parakeet_worker \
+  --model-dir /var/lib/miso/models/parakeet \
+  --host 127.0.0.1 \
+  --port 8911 \
+  --threads 4
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+RuntimeDirectory=miso-parakeet
+RuntimeDirectoryMode=0750
+WorkingDirectory=/run/miso-parakeet
+UMask=0027
+Environment=PYTHONPATH=/opt/miso/app/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+# ONNX Runtime otherwise spawns a thread per core on top of --threads and the
+# two pools fight over the same four cores.
+Environment=OMP_NUM_THREADS=4
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/run/miso-parakeet
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

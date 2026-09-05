@@ -10,6 +10,8 @@ from miso.audio import AudioFormat
 from miso.transcription import (
     EnergySpeechDetector,
     FallbackTranscriber,
+    OpenAITranscriber,
+    ParakeetTranscriber,
     TranscriptionError,
     TranscriptionManager,
     TranscriptionResult,
@@ -18,6 +20,7 @@ from miso.transcription import (
     WhisperCppTranscriber,
     WhisperServerTranscriber,
     WisprFlowTranscriber,
+    guess_language,
     normalized_words,
     word_error_rate,
 )
@@ -342,6 +345,77 @@ class WisprFlowTranscriberTests(unittest.TestCase):
                 lane.transcribe(utterance())
 
 
+class OpenAITranscriberTests(unittest.TestCase):
+    def test_posts_multipart_and_keeps_the_reported_language(self) -> None:
+        payload = {"text": " Enciende la luz.", "language": "spanish"}
+        with JSONStubServer(payload) as stub:
+            lane = OpenAITranscriber("sk-test", base_url=stub.url)
+            result = lane.transcribe(utterance())
+
+        self.assertEqual(result.text, "Enciende la luz.")
+        # whisper-1 names the language in English; a raw "spanish" here would
+        # make the conversation answer a Spanish question in English.
+        self.assertEqual(result.language, "es")
+        self.assertEqual(result.model, "whisper-1")
+        path, body = stub.requests[-1]
+        self.assertEqual(path, "/audio/transcriptions")
+        self.assertIn(b'name="model"', body)
+        self.assertIn(b"whisper-1", body)
+        self.assertIn(b"verbose_json", body)
+        self.assertIn(b'filename="utterance.wav"', body)
+        # No language is pinned: forcing one would transcribe the other into
+        # nonsense in a bilingual house.
+        self.assertNotIn(b'name="language"', body)
+
+    def test_a_model_that_reports_no_language_falls_back_to_the_words(
+        self,
+    ) -> None:
+        with JSONStubServer({"text": "pon un temporizador de cinco minutos"}) as stub:
+            lane = OpenAITranscriber(
+                "sk-test",
+                base_url=stub.url,
+                model="gpt-4o-mini-transcribe",
+                response_format="json",
+            )
+            result = lane.transcribe(utterance())
+
+        self.assertEqual(result.language, "es")
+
+    def test_the_provider_is_a_base_url_not_a_code_change(self) -> None:
+        with JSONStubServer({"text": "hello", "language": "english"}) as stub:
+            lane = OpenAITranscriber(
+                "gsk-test", base_url=stub.url, model="whisper-large-v3-turbo"
+            )
+            result = lane.transcribe(utterance())
+
+        self.assertEqual(result.model, "whisper-large-v3-turbo")
+        self.assertEqual(result.language, "en")
+
+    def test_an_unconfigured_key_never_reaches_the_network(self) -> None:
+        lane = OpenAITranscriber(None)
+        self.assertFalse(lane.available())
+        with self.assertRaises(TranscriptionError):
+            lane.transcribe(utterance())
+
+    def test_a_server_error_is_a_transcription_error(self) -> None:
+        with JSONStubServer({"error": "nope"}, status=500) as stub:
+            lane = OpenAITranscriber("sk-test", base_url=stub.url)
+            with self.assertRaises(TranscriptionError):
+                lane.transcribe(utterance())
+
+
+class LanguageGuessTests(unittest.TestCase):
+    def test_function_words_decide_the_language(self) -> None:
+        self.assertEqual(guess_language("enciende la luz de la cocina"), "es")
+        self.assertEqual(guess_language("turn on the kitchen light"), "en")
+        self.assertEqual(guess_language("anade leche a la lista"), "es")
+
+    def test_no_signal_returns_no_verdict(self) -> None:
+        # Better to leave the caller's default in charge than invent one.
+        self.assertEqual(guess_language("ok"), "")
+        self.assertEqual(guess_language(""), "")
+
+
 class WhisperServerTranscriberTests(unittest.TestCase):
     def test_posts_multipart_audio_to_the_inference_endpoint(self) -> None:
         with JSONStubServer({"text": " turn on the kitchen light"}) as stub:
@@ -360,6 +434,53 @@ class WhisperServerTranscriberTests(unittest.TestCase):
         self.assertEqual(path, "/inference")
         self.assertIn(b'name="file"; filename="utterance.wav"', body)
         self.assertIn(b"RIFF", body)
+
+
+class ParakeetTranscriberTests(unittest.TestCase):
+    def test_posts_raw_wav_and_guesses_the_language_it_is_not_told(self) -> None:
+        with JSONStubServer({"text": "enciende la luz", "language": ""}) as stub:
+            lane = ParakeetTranscriber(stub.url)
+            result = lane.transcribe(utterance())
+
+        self.assertEqual(result.text, "enciende la luz")
+        # The shipped model leaves its language field empty, so a verdict has
+        # to come from the words or Spanish gets answered in English.
+        self.assertEqual(result.language, "es")
+        path, body = stub.requests[-1]
+        self.assertEqual(path, "/inference")
+        self.assertEqual(body[:4], b"RIFF")
+
+    def test_a_worker_that_is_down_is_a_transcription_error(self) -> None:
+        lane = ParakeetTranscriber("http://127.0.0.1:9")
+        with self.assertRaises(TranscriptionError):
+            lane.transcribe(utterance())
+        # A worker known to be down is skipped rather than retried, so the
+        # chain does not pay its timeout on the next utterance too.
+        self.assertFalse(lane.available())
+
+
+class WhisperServerAudioContextTests(unittest.TestCase):
+    def test_the_audio_context_is_sent_only_when_set(self) -> None:
+        with JSONStubServer({"text": "hi"}) as stub:
+            ParakeetTranscriber  # noqa: B018 - keep import obviously used
+            lane = WhisperServerTranscriber(
+                stub.url, model=Path("/m/ggml-tiny.bin"), audio_ctx=768
+            )
+            lane.transcribe(utterance())
+        self.assertIn(b'name="audio_ctx"', stub.requests[-1][1])
+        self.assertIn(b"768", stub.requests[-1][1])
+
+        with JSONStubServer({"text": "hi"}) as stub:
+            lane = WhisperServerTranscriber(stub.url, model=Path("/m/ggml-tiny.bin"))
+            lane.transcribe(utterance())
+        self.assertNotIn(b'name="audio_ctx"', stub.requests[-1][1])
+
+    def test_wrapped_transcripts_are_flattened(self) -> None:
+        # whisper-server hard-wraps long output; the newlines are not speech.
+        with JSONStubServer({"text": " Miso. Set a timer.\n For five minutes. "}) as stub:
+            lane = WhisperServerTranscriber(stub.url, model=Path("/m/ggml-tiny.bin"))
+            result = lane.transcribe(utterance())
+        self.assertEqual(result.text, "Miso. Set a timer. For five minutes.")
 
 
 class FallbackTranscriberTests(unittest.TestCase):
