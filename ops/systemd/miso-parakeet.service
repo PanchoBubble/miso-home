@@ -10,7 +10,10 @@ Group=miso
 # Loopback only. cloudflared publishes a public hostname to this box, so a
 # recogniser bound wider would put household audio on the open internet. The
 # worker refuses a non-loopback --host itself as well.
-ExecStart=/opt/miso/parakeet/bin/python /opt/miso/app/src/miso/parakeet_worker.py \
+# Run as a module, never by path: invoking the file directly puts
+# /opt/miso/app/src/miso on sys.path[0], where miso's own http.py shadows the
+# standard library's http package and the worker cannot import http.server.
+ExecStart=/opt/miso/parakeet/bin/python -m miso.parakeet_worker \
   --model-dir /var/lib/miso/models/parakeet \
   --host 127.0.0.1 \
   --port 8911 \
@@ -22,6 +25,7 @@ RuntimeDirectory=miso-parakeet
 RuntimeDirectoryMode=0750
 WorkingDirectory=/run/miso-parakeet
 UMask=0027
+Environment=PYTHONPATH=/opt/miso/app/src
 Environment=PYTHONDONTWRITEBYTECODE=1
 # ONNX Runtime otherwise spawns a thread per core on top of --threads and the
 # two pools fight over the same four cores.
