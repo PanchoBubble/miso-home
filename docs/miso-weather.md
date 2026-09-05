@@ -7,16 +7,27 @@ request to the fixed Open-Meteo geocoding and forecast endpoints. It does not
 accept caller-supplied URLs or require an API credential.
 
 The tool accepts a city or place name, `metric` or `imperial` units, an English
-or Spanish response language, and the number of forecast days. Results include
-a concise speakable summary, structured current/daily values, source attribution,
-and coordinates rounded to four decimal places. Responses are cached in memory
-for ten minutes. Location arguments are redacted from the durable tool audit.
+or Spanish response language, the number of forecast days, and `day`: which
+day the answer is about, 0 for today up to 6. Asking for a day past the
+requested `forecast_days` simply widens the fetch. Results include a concise
+speakable summary, structured current/daily values, source attribution, and
+coordinates rounded to four decimal places. Responses are cached in memory for
+ten minutes. Location arguments are redacted from the durable tool audit.
 
-The spoken summary is the answer somebody actually asked for: current
-conditions and temperature, whether it is raining now or likely to, and today's
-high and low. Attribution stays in the structured output rather than being read
-aloud every time. Rain is called likely at 60% or more and possible at 30% or
-more; below that the day is reported as dry.
+The spoken summary is the answer somebody actually asked for. For today it is
+current conditions and temperature, whether it is raining now or likely to,
+and the high and low. For a later day there is no live temperature, so the
+summary names the day ("tomorrow", "on Thursday", "el jueves"), the expected
+conditions, the high and low, and the chance of rain. Attribution stays in the
+structured output rather than being read aloud every time. Rain is called
+likely at 60% or more and possible at 30% or more; below that the day is
+reported as dry.
+
+The fast lane reads the day out of the utterance before any model is involved:
+"tomorrow", "the day after tomorrow", "mañana", "pasado mañana", and weekday
+names in either language set `day` counting from the Pi's local date. "Por la
+mañana" and "in the morning" stay today. The tool picker sees the same `day`
+argument, so an utterance the regexes miss can still land on the right day.
 
 ## Setting the household location
 
@@ -55,11 +66,11 @@ When a default location is configured, Miso polls it once at startup and then
 every `MISO_WEATHER_POLL_SECONDS` (900 by default, minimum 60, `0` disables
 polling). The snapshot is held in memory only: a restart simply polls again.
 
-The polled snapshot is what answers a voice question about the household
-location, so "is it going to rain" does not wait on the network. A question
-about anywhere else, or one asking for more forecast days than the poller
-carries, still makes a live request with the usual ten-minute cache. A snapshot
-older than three poll intervals stops standing in for a live lookup.
+The poller fetches the full seven days Open-Meteo returns in one request, so
+"is it going to rain", "what about tomorrow", and "the weather on Thursday" are
+all answered from the snapshot without waiting on the network. A question about
+anywhere else still makes a live request with the usual ten-minute cache. A
+snapshot older than three poll intervals stops standing in for a live lookup.
 
 Every successful poll publishes a `weather_update` live event and appears under
 `weather` in `/api/status`, which is what the companion screen's always-on

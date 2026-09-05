@@ -14,6 +14,7 @@ import re
 import time
 import threading
 from dataclasses import dataclass
+from datetime import date
 from typing import Callable, Mapping
 
 from miso.identity import Actor, VOICE_ACTOR
@@ -277,11 +278,57 @@ def _render_shopping_list(result: ToolResult, language: str) -> str:
 
 _WEATHER_WORDS = (
     "weather", "forecast", "tiempo hace", "qué tiempo", "que tiempo",
-    "clima", "pronóstico", "pronostico", "va a llover", "will it rain",
+    "tiempo hará", "tiempo hara", "el tiempo de", "clima", "pronóstico",
+    "pronostico", "va a llover", "lloverá", "llovera", "will it rain",
+    "going to rain",
 )
 _WEATHER_LOCATION = re.compile(
     r"\b(?:in|en)\s+(?P<place>[\wáéíóúüñ][\wáéíóúüñ' -]{1,80})$"
 )
+
+
+# Which day a weather question is about. "la mañana" and "esta mañana" are
+# the morning, not tomorrow, so the Spanish pattern refuses those articles.
+_WEATHER_DAY_AFTER = re.compile(
+    r"\b(?:the\s+day\s+after\s+tomorrow|pasado\s+ma[ñn]ana)\b"
+)
+_WEATHER_TOMORROW = re.compile(
+    r"\b(?:tomorrow|(?<!la\s)(?<!esta\s)ma[ñn]ana)\b"
+)
+_WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4,
+    "saturday": 5, "sunday": 6,
+    "lunes": 0, "martes": 1, "miércoles": 2, "miercoles": 2, "jueves": 3,
+    "viernes": 4, "sábado": 5, "sabado": 5, "domingo": 6,
+}
+_WEATHER_WEEKDAY = re.compile(
+    r"\b(?:on\s+|el\s+|este\s+|this\s+|next\s+|el\s+próximo\s+|el\s+proximo\s+)?"
+    r"(?P<day>" + "|".join(sorted(_WEEKDAYS, key=len, reverse=True)) + r")\b"
+)
+_WEATHER_FILLER = re.compile(r"\s+(?:for|para|el|la|on)$")
+
+
+_today = date.today
+
+
+def _weather_day(text: str, today: date) -> tuple[int, str]:
+    """Return the forecast offset and the text with the day phrase removed."""
+    match = _WEATHER_DAY_AFTER.search(text)
+    if match is not None:
+        return 2, _without(text, match)
+    match = _WEATHER_TOMORROW.search(text)
+    if match is not None:
+        return 1, _without(text, match)
+    match = _WEATHER_WEEKDAY.search(text)
+    if match is not None:
+        offset = (_WEEKDAYS[match.group("day")] - today.weekday()) % 7
+        return offset, _without(text, match)
+    return 0, text
+
+
+def _without(text: str, match: re.Match[str]) -> str:
+    remainder = " ".join((text[: match.start()] + " " + text[match.end() :]).split())
+    return _WEATHER_FILLER.sub("", remainder).strip()
 
 
 def _match_weather(text: str, language: str) -> Mapping[str, object] | None:
@@ -290,6 +337,9 @@ def _match_weather(text: str, language: str) -> Mapping[str, object] | None:
     if _match_weather_home(text, language) is not None:
         return None
     arguments: dict[str, object] = {"language": "es" if language == "es" else "en"}
+    day, text = _weather_day(text, _today())
+    if day:
+        arguments["day"] = day
     location = _WEATHER_LOCATION.search(text)
     if location is not None:
         place = location.group("place").strip()

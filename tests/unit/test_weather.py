@@ -1,4 +1,5 @@
 import json
+from datetime import date, timedelta
 from urllib.parse import parse_qs, urlsplit
 import unittest
 
@@ -72,7 +73,10 @@ class FakeWeatherTransport:
                     "wind_speed_10m": "km/h",
                 },
                 "daily": {
-                    "time": [f"2026-08-{29 + index:02d}" for index in range(days)],
+                    "time": [
+                        (date(2026, 8, 29) + timedelta(days=index)).isoformat()
+                        for index in range(days)
+                    ],
                     "weather_code": [self.weather_code] * days,
                     "temperature_2m_max": [21.0] * days,
                     "temperature_2m_min": [13.0] * days,
@@ -159,6 +163,36 @@ class WeatherToolTests(unittest.TestCase):
         self.assertIn("En London", result.summary)
         self.assertIn("cielo parcialmente nublado", result.summary)
         self.assertIn("No se espera lluvia hoy", result.summary)
+
+    def test_a_future_day_is_described_from_the_daily_outlook(self) -> None:
+        transport = FakeWeatherTransport(rain_chance=70.0)
+        registry = self.registry(transport=transport)
+        result = registry.invoke(
+            "weather_get", {"location": "London", "day": 1, "language": "en"}
+        )
+        self.assertEqual(result.status, ToolStatus.SUCCESS, result.error)
+        self.assertEqual(result.output["day"], 1)
+        # The day asked about has to be fetched even when forecast_days was not.
+        self.assertEqual(len(result.output["forecast"]), 2)
+        self.assertEqual(
+            result.summary,
+            "In London tomorrow expect partly cloudy skies, high 21°C, low 13°C, "
+            "and rain is likely tomorrow, 70% chance.",
+        )
+        spanish = registry.invoke(
+            "weather_get", {"location": "London", "day": 1, "language": "es"}
+        )
+        self.assertEqual(
+            spanish.summary,
+            "En London mañana se espera cielo parcialmente nublado, con máxima "
+            "de 21°C y mínima de 13°C. Lluvia probable mañana, 70%.",
+        )
+        weekday = registry.invoke(
+            "weather_get", {"location": "London", "day": 2, "language": "es"}
+        )
+        self.assertIn("el lunes", weekday.summary)
+        beyond = registry.invoke("weather_get", {"location": "London", "day": 7})
+        self.assertEqual(beyond.status, ToolStatus.REJECTED)
 
     def test_location_is_required_without_home_default(self) -> None:
         registry = self.registry(transport=FakeWeatherTransport())
@@ -262,9 +296,17 @@ class WeatherPollingTests(unittest.TestCase):
         self.assertEqual(away.output["source"], "live")
         self.assertGreater(len(self.transport.calls), polled_calls)
 
+        # The poller carries the whole week, so a weekday question is answered
+        # from the snapshot too.
         week = self.registry.invoke("weather_get", {"forecast_days": 7})
-        self.assertEqual(week.output["source"], "live")
+        self.assertEqual(week.output["source"], "poll")
         self.assertEqual(len(week.output["forecast"]), 7)
+
+        tuesday = self.registry.invoke("weather_get", {"day": 3})
+        self.assertEqual(tuesday.output["source"], "poll")
+        self.assertEqual(tuesday.output["day"], 3)
+        self.assertIn("on Tuesday", tuesday.summary)
+        self.assertEqual(len(self.transport.calls), polled_calls + 2)
 
     def test_a_stale_snapshot_is_replaced_by_a_live_lookup(self) -> None:
         self.poller.refresh_once()

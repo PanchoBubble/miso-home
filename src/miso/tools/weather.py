@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -28,9 +29,10 @@ GEOCODING_LANGUAGE = "en"
 ATTRIBUTION = "Weather data by Open-Meteo.com"
 ATTRIBUTION_URL = "https://open-meteo.com/"
 MAX_RESPONSE_BYTES = 512 * 1024
-# Today and tomorrow: enough for "is it going to rain" without asking the
-# poller to carry a week nobody looks at on a 720x1280 panel.
-POLL_FORECAST_DAYS = 2
+# A full week, so "what about Thursday" is answered from the snapshot rather
+# than a live call. Open-Meteo returns seven days in the same single request.
+POLL_FORECAST_DAYS = 7
+MAX_FORECAST_DAYS = 7
 DEFAULT_POLL_SECONDS = 900.0
 MIN_POLL_SECONDS = 60.0
 MAX_POLL_SECONDS = 86_400.0
@@ -235,7 +237,12 @@ class OpenMeteoWeatherAdapter:
         if not isinstance(raw_location, str) or not raw_location.strip():
             raise ToolRejected("location is required because no home location is configured")
         location = validate_location(raw_location)
-        forecast_days = int(arguments.get("forecast_days", 1))
+        day = int(arguments.get("day", 0))
+        if not 0 <= day < MAX_FORECAST_DAYS:
+            raise ToolRejected(f"day must be between 0 and {MAX_FORECAST_DAYS - 1}")
+        # The requested day has to be inside the fetched window, whatever the
+        # caller said about forecast_days.
+        forecast_days = max(int(arguments.get("forecast_days", 1)), day + 1)
         units = str(arguments.get("units", self.config.units))
         language = str(arguments.get("language", self.config.language))
 
@@ -243,7 +250,7 @@ class OpenMeteoWeatherAdapter:
         if polled is not None:
             snapshot, payload = polled
             return {
-                **render_forecast(payload, language),
+                **render_forecast(payload, language, day=day),
                 "cached": True,
                 "source": "poll",
                 "polled_at": snapshot.polled_at_utc,
@@ -251,7 +258,11 @@ class OpenMeteoWeatherAdapter:
         cache_key = (location.casefold(), forecast_days, units)
         cached = self._cached(cache_key)
         if cached is not None:
-            return {**render_forecast(cached, language), "cached": True, "source": "cache"}
+            return {
+                **render_forecast(cached, language, day=day),
+                "cached": True,
+                "source": "cache",
+            }
 
         context.raise_if_cancelled()
         timeout = min(self.config.request_timeout_seconds, context.remaining_seconds())
@@ -267,7 +278,11 @@ class OpenMeteoWeatherAdapter:
         context.raise_if_cancelled()
         with self._lock:
             self._cache[cache_key] = (self.now(), dict(payload))
-        return {**render_forecast(payload, language), "cached": False, "source": "live"}
+        return {
+            **render_forecast(payload, language, day=day),
+            "cached": False,
+            "source": "live",
+        }
 
     def weather_set_home(
         self, arguments: Mapping[str, object], context: ToolContext
@@ -589,9 +604,13 @@ def create_weather_poller(
 
 
 def render_forecast(
-    payload: Mapping[str, object], language: str
+    payload: Mapping[str, object], language: str, *, day: int = 0
 ) -> dict[str, object]:
-    """Add the spoken summary and condition words to a neutral forecast."""
+    """Add the spoken summary and condition words to a neutral forecast.
+
+    ``day`` picks which forecast entry the summary speaks about: 0 is today
+    with live conditions, later days are described from the daily outlook.
+    """
     current = dict(_mapping(payload, "current"))
     current["conditions"] = _condition(int(_number(current, "weather_code")), language)
     forecast = [
@@ -600,11 +619,18 @@ def render_forecast(
         if isinstance(day, Mapping)
     ]
     location = _mapping(payload, "location")
+    if day >= len(forecast):
+        raise ToolRejected("forecast does not reach the requested day")
+    if day == 0:
+        summary = _summary(location, current, forecast[0], language)
+    else:
+        summary = _day_summary(location, forecast[day], day, language)
     return {
         **dict(payload),
         "current": current,
         "forecast": forecast,
-        "summary": _summary(location, current, forecast[0], language),
+        "day": day,
+        "summary": summary,
     }
 
 
@@ -656,10 +682,16 @@ def weather_tool_definition(adapter: OpenMeteoWeatherAdapter) -> ToolDefinition:
             "maxLength": 120,
             "description": "City or place name, such as London or Madrid",
         },
+        "day": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": MAX_FORECAST_DAYS - 1,
+            "description": "Which day to describe: 0 today, 1 tomorrow, 2 the day after",
+        },
         "forecast_days": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 7,
+            "maximum": MAX_FORECAST_DAYS,
             "description": "Number of forecast days including today",
         },
         "units": {"type": "string", "enum": ["metric", "imperial"]},
@@ -669,9 +701,9 @@ def weather_tool_definition(adapter: OpenMeteoWeatherAdapter) -> ToolDefinition:
     return ToolDefinition(
         name="weather_get",
         description=(
-            "Get current weather and a short forecast for a real location using "
-            "Open-Meteo; consulta el tiempo y el pronóstico. Use language es for "
-            "Spanish requests."
+            "Get the weather for a real location using Open-Meteo, day 0 today "
+            "and day 1 tomorrow; consulta el tiempo y el pronóstico. Use "
+            "language es for Spanish requests."
         ),
         input_schema={
             "type": "object",
@@ -862,21 +894,30 @@ def _rain_phrase(
         if language == "es":
             return "Está nevando ahora" if snow else "Está lloviendo ahora"
         return "It is snowing right now" if snow else "It is raining right now"
-    chance = _format_number(_number(today, "precipitation_probability_max"))
-    percent = _number(today, "precipitation_probability_max")
+    return _rain_outlook(today, "hoy" if language == "es" else "today", language, snow)
+
+
+def _rain_outlook(
+    day: Mapping[str, object], when: str, language: str, snow: bool | None = None
+) -> str:
+    """The chance-of-rain clause for one day, with ``when`` already localised."""
+    if snow is None:
+        snow = _is_snow(day)
+    chance = _format_number(_number(day, "precipitation_probability_max"))
+    percent = _number(day, "precipitation_probability_max")
     if language == "es":
         precipitation = "Nieve" if snow else "Lluvia"
         if percent >= RAIN_LIKELY_PERCENT:
-            return f"{precipitation} probable hoy, {chance}%"
+            return f"{precipitation} probable {when}, {chance}%"
         if percent >= RAIN_POSSIBLE_PERCENT:
-            return f"{precipitation} posible hoy, {chance}%"
-        return "No se espera lluvia hoy"
-    precipitation = "Snow" if snow else "Rain"
+            return f"{precipitation} posible {when}, {chance}%"
+        return f"No se espera lluvia {when}"
+    precipitation = "snow" if snow else "rain"
     if percent >= RAIN_LIKELY_PERCENT:
-        return f"{precipitation.lower()} is likely today, {chance}% chance"
+        return f"{precipitation} is likely {when}, {chance}% chance"
     if percent >= RAIN_POSSIBLE_PERCENT:
-        return f"{precipitation.lower()} is possible today, {chance}% chance"
-    return "no rain expected today"
+        return f"{precipitation} is possible {when}, {chance}% chance"
+    return f"no rain expected {when}"
 
 
 def _rain_label(
@@ -915,4 +956,46 @@ def _summary(
     return (
         f"In {name} it is {current['conditions']} at {temperature}{temperature_unit}, "
         f"and {rain}. High {high}{temperature_unit}, low {low}{temperature_unit}."
+    )
+
+
+_WEEKDAYS_EN = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_WEEKDAYS_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+
+
+def _day_word(day: Mapping[str, object], offset: int, language: str) -> str:
+    """"tomorrow" or the weekday name, so the answer names the day asked about."""
+    if offset == 1:
+        return "mañana" if language == "es" else "tomorrow"
+    try:
+        weekday = date.fromisoformat(str(day["date"])).weekday()
+    except (KeyError, ValueError):
+        return f"en {offset} días" if language == "es" else f"in {offset} days"
+    if language == "es":
+        return f"el {_WEEKDAYS_ES[weekday]}"
+    return f"on {_WEEKDAYS_EN[weekday]}"
+
+
+def _day_summary(
+    place: Mapping[str, object],
+    day: Mapping[str, object],
+    offset: int,
+    language: str,
+) -> str:
+    """Speak one future day: no live temperature exists for it, so lead with
+    the expected conditions and the high and low."""
+    name = str(place["name"])
+    unit = str(day["temperature_unit"])
+    high = _format_number(day["temperature_max"])
+    low = _format_number(day["temperature_min"])
+    when = _day_word(day, offset, language)
+    rain = _rain_outlook(day, when, language)
+    if language == "es":
+        return (
+            f"En {name} {when} se espera {day['conditions']}, con máxima de "
+            f"{high}{unit} y mínima de {low}{unit}. {rain}."
+        )
+    return (
+        f"In {name} {when} expect {day['conditions']}, high {high}{unit}, "
+        f"low {low}{unit}, and {rain}."
     )

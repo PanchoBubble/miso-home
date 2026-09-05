@@ -181,5 +181,12 @@ at approximately 1 m measured only 30% recall at the deployed `0.999` threshold.
 Lowering the threshold to `0.95` recovered 80% English and Spanish recall but
 raised the existing negative-set prediction to 6.5452 false activations/hour.
 Those ten temporary clips and their path-bearing artifacts were deleted after
-aggregate metrics were recorded. Production therefore remains at `0.999` until
-a retrained model passes the disjoint physical evaluation above.
+aggregate metrics were recorded.
+
+In daily use the household still had to repeat or shout the phrase, so on
+2026-09-05 the deployed policy moved to `MISO_WAKE_THRESHOLD=0.97` with
+`MISO_WAKE_VAD_THRESHOLD=0.3`, trading a few false wakes per day (each is only
+the listening cue and an open microphone, since the spoken acknowledgement is
+off) for usable recall. This is a stopgap, not an acceptance result: the fix is
+a model retrained on consented microphone positives that passes the disjoint
+physical evaluation above, after which the threshold goes back up.

@@ -1,7 +1,9 @@
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from miso import intake
 from miso.intake import FastLane, guess_language, match_fast_intent
 from miso.tools import (
     InMemoryAuditLog,
@@ -167,6 +169,66 @@ class FastLaneTests(unittest.TestCase):
         self.assertEqual(guess_language("¿Qué tiempo hace?"), "es")
         self.assertEqual(guess_language("pon un temporizador de 5 minutos"), "es")
         self.assertEqual(guess_language("what's the weather like"), "en")
+
+
+class WeatherIntentTests(unittest.TestCase):
+    """Which day a weather question names decides which forecast entry is spoken."""
+
+    def setUp(self) -> None:
+        self._today = intake._today
+        intake._today = lambda: date(2026, 9, 5)  # a Saturday
+
+    def tearDown(self) -> None:
+        intake._today = self._today
+
+    def test_today_has_no_day_argument(self) -> None:
+        self.assertEqual(
+            match_fast_intent("what's the weather like in London", "en"),
+            ("weather_get", {"language": "en", "location": "london"}),
+        )
+
+    def test_tomorrow_in_either_language_and_word_order(self) -> None:
+        for text, language, location in (
+            ("what's the weather tomorrow", "en", None),
+            ("weather in London tomorrow", "en", "london"),
+            ("weather tomorrow in London", "en", "london"),
+            ("qué tiempo hará mañana en Madrid", "es", "madrid"),
+            ("el tiempo de mañana", "es", None),
+        ):
+            with self.subTest(text=text):
+                expected = {"language": language, "day": 1}
+                if location:
+                    expected["location"] = location
+                self.assertEqual(
+                    match_fast_intent(text, language), ("weather_get", expected)
+                )
+
+    def test_the_morning_is_not_tomorrow(self) -> None:
+        self.assertEqual(
+            match_fast_intent("va a llover por la mañana", "es"),
+            ("weather_get", {"language": "es"}),
+        )
+        self.assertEqual(
+            match_fast_intent("is it going to rain in the morning", "en"),
+            ("weather_get", {"language": "en"}),
+        )
+
+    def test_day_after_tomorrow_and_weekdays_count_from_today(self) -> None:
+        self.assertEqual(
+            match_fast_intent("weather the day after tomorrow", "en")[1]["day"], 2
+        )
+        self.assertEqual(
+            match_fast_intent("pasado mañana va a llover", "es")[1]["day"], 2
+        )
+        self.assertEqual(
+            match_fast_intent("will it rain on thursday", "en")[1]["day"], 5
+        )
+        self.assertEqual(
+            match_fast_intent("qué tiempo hará el lunes en Bilbao", "es"),
+            ("weather_get", {"language": "es", "day": 2, "location": "bilbao"}),
+        )
+        # Asking about today's weekday is asking about today.
+        self.assertNotIn("day", match_fast_intent("weather this saturday", "en")[1])
 
 
 if __name__ == "__main__":
