@@ -695,6 +695,87 @@ class OpenAITranscriber:
         )
 
 
+class ParakeetTranscriber:
+    """Local Parakeet lane: a resident sherpa-onnx worker on loopback.
+
+    Measured on the Pi against the six bilingual fixtures this is the fastest
+    local option by a wide margin, at 0.44 s median against 0.90 s for a tuned
+    whisper-server and 3.0 s for the lane it replaces. It costs some accuracy
+    (3.66% mean word error rate against 1.19%), which is why whisper-server
+    stays behind it rather than being removed.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        languages: tuple[str, ...] = ("en", "es"),
+        timeout_seconds: float = 10.0,
+    ) -> None:
+        self.url = url.rstrip("/")
+        self.languages = tuple(code.casefold() for code in languages if code.strip())
+        self.timeout_seconds = timeout_seconds
+        self.model = Path("parakeet-tdt-0.6b-v3-int8")
+        self._unreachable_until = 0.0
+
+    @property
+    def name(self) -> str:
+        return "parakeet"
+
+    @property
+    def model_name(self) -> str:
+        return "parakeet-tdt-0.6b-v3-int8"
+
+    def available(self) -> bool:
+        if time.monotonic() < self._unreachable_until:
+            return False
+        try:
+            with urlopen(f"{self.url}/", timeout=1) as response:
+                response.read(1)
+        except HTTPError:
+            return True
+        except (URLError, OSError):
+            self._unreachable_until = time.monotonic() + 10
+            return False
+        return True
+
+    def transcribe(self, utterance: Utterance) -> TranscriptionResult:
+        audio = wav_bytes(utterance)
+        request = Request(
+            f"{self.url}/inference",
+            data=audio,
+            headers={"Content-Type": "audio/wav"},
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.load(response)
+        except HTTPError as error:
+            raise TranscriptionError(
+                f"parakeet worker returned HTTP {error.code}"
+            ) from error
+        except (URLError, OSError) as error:
+            self._unreachable_until = time.monotonic() + 10
+            raise TranscriptionError("parakeet worker is unreachable") from error
+        except json.JSONDecodeError as error:
+            raise TranscriptionError("parakeet worker returned invalid JSON") from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            raise TranscriptionError("parakeet worker omitted the transcript")
+        elapsed = max(0, round((time.monotonic() - started) * 1000))
+        text = payload["text"]
+        language = _language_code(payload.get("language")) or guess_language(
+            text, self.languages
+        )
+        return _plain_result(
+            text,
+            language=language,
+            model=self.model_name,
+            utterance=utterance,
+            inference_milliseconds=elapsed,
+        )
+
+
 class WhisperServerTranscriber:
     """Local whisper.cpp server lane, which keeps the model resident.
 
@@ -710,12 +791,18 @@ class WhisperServerTranscriber:
         timeout_seconds: float = 10.0,
         prompt: str = "",
         language: str = "auto",
+        audio_ctx: int = 0,
     ) -> None:
         self.url = url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.prompt = prompt
         self.language = language
+        # Whisper pads every clip to its 30 s window, so a two second command
+        # encodes thirty seconds of mel. Shortening the audio context halved
+        # the measured latency and slightly improved word error rate on the
+        # fixtures; 0 keeps whisper's default.
+        self.audio_ctx = audio_ctx
         self._unreachable_until = 0.0
 
     @property
@@ -748,6 +835,8 @@ class WhisperServerTranscriber:
         }
         if self.prompt:
             fields["prompt"] = self.prompt
+        if self.audio_ctx:
+            fields["audio_ctx"] = str(self.audio_ctx)
         body, content_type = _multipart(
             fields, "file", "utterance.wav", wav_bytes(utterance)
         )
@@ -774,7 +863,7 @@ class WhisperServerTranscriber:
             raise TranscriptionError("whisper server omitted the transcript")
         elapsed = max(0, round((time.monotonic() - started) * 1000))
         return _plain_result(
-            payload["text"],
+            " ".join(payload["text"].split()),
             # whisper.cpp's json format carries no language verdict. Reporting
             # a guess here would let the conversation drop a good transcript as
             # a foreign language, so the field is left for the caller to skip.

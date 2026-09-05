@@ -61,6 +61,7 @@ from miso.transcription import (
     EnergySpeechDetector,
     FallbackTranscriber,
     OpenAITranscriber,
+    ParakeetTranscriber,
     Transcriber,
     TranscriptionManager,
     UtteranceAssembler,
@@ -1431,6 +1432,14 @@ def _transcription_lanes(settings: Settings) -> tuple[Transcriber, ...]:
                 timeout_seconds=settings.stt_wispr_timeout_seconds,
             )
         )
+    if settings.stt_parakeet_url:
+        lanes.append(
+            ParakeetTranscriber(
+                settings.stt_parakeet_url,
+                languages=settings.stt_languages,
+                timeout_seconds=settings.stt_parakeet_timeout_seconds,
+            )
+        )
     if settings.stt_server_url:
         lanes.append(
             WhisperServerTranscriber(
@@ -1438,6 +1447,7 @@ def _transcription_lanes(settings: Settings) -> tuple[Transcriber, ...]:
                 model=settings.stt_model,
                 timeout_seconds=settings.stt_server_timeout_seconds,
                 prompt=settings.stt_prompt,
+                audio_ctx=settings.stt_server_audio_ctx,
             )
         )
     lanes.append(

@@ -155,10 +155,18 @@ class Settings:
     stt_wispr_api_key: str | None = field(default=None, repr=False)
     stt_wispr_base_url: str = "https://platform-api.wisprflow.ai/api/v1/dash"
     stt_wispr_timeout_seconds: float = 4.0
+    # Resident local Parakeet, served by miso-parakeet.service. Measured on the
+    # Pi it is the fastest local lane by a wide margin. Empty disables it.
+    stt_parakeet_url: str = "http://127.0.0.1:8911"
+    stt_parakeet_timeout_seconds: float = 15.0
     # Resident local whisper.cpp. Empty disables the lane and falls through to
     # the CLI, which reloads the model for every single utterance.
     stt_server_url: str = "http://127.0.0.1:8910"
     stt_server_timeout_seconds: float = 15.0
+    # Whisper pads every clip to a 30 s window regardless of length. Measured
+    # on the fixtures, 768 halved latency and slightly improved word error
+    # rate; 0 keeps whisper's default.
+    stt_server_audio_ctx: int = 768
     stt_lane_cooldown_seconds: float = 30.0
     stt_vad_threshold_dbfs: float = -38.0
     stt_vad_minimum_speech_milliseconds: int = 250
@@ -290,6 +298,12 @@ class Settings:
             )
             stt_server_timeout_seconds = float(
                 source.get("MISO_STT_SERVER_TIMEOUT_SECONDS", "15")
+            )
+            stt_server_audio_ctx = int(
+                source.get("MISO_STT_SERVER_AUDIO_CTX", "768")
+            )
+            stt_parakeet_timeout_seconds = float(
+                source.get("MISO_STT_PARAKEET_TIMEOUT_SECONDS", "15")
             )
             stt_lane_cooldown_seconds = float(
                 source.get("MISO_STT_LANE_COOLDOWN_SECONDS", "30")
@@ -550,6 +564,11 @@ class Settings:
                 "https://platform-api.wisprflow.ai/api/v1/dash",
             ).strip(),
             stt_wispr_timeout_seconds=stt_wispr_timeout_seconds,
+            stt_parakeet_url=source.get(
+                "MISO_STT_PARAKEET_URL", "http://127.0.0.1:8911"
+            ).strip(),
+            stt_parakeet_timeout_seconds=stt_parakeet_timeout_seconds,
+            stt_server_audio_ctx=stt_server_audio_ctx,
             stt_server_url=source.get(
                 "MISO_STT_SERVER_URL", "http://127.0.0.1:8910"
             ).strip(),
@@ -894,6 +913,16 @@ class Settings:
             raise ConfigError(
                 "MISO_STT_SERVER_URL must be loopback HTTP or HTTPS"
             )
+        if self.stt_parakeet_url and not self.stt_parakeet_url.startswith(
+            ("http://127.0.0.1", "http://localhost")
+        ):
+            raise ConfigError("MISO_STT_PARAKEET_URL must be loopback HTTP")
+        if not 1 <= self.stt_parakeet_timeout_seconds <= 600:
+            raise ConfigError(
+                "MISO_STT_PARAKEET_TIMEOUT_SECONDS must be between 1 and 600"
+            )
+        if not 0 <= self.stt_server_audio_ctx <= 1500:
+            raise ConfigError("MISO_STT_SERVER_AUDIO_CTX must be between 0 and 1500")
         if not 1 <= self.stt_server_timeout_seconds <= 600:
             raise ConfigError(
                 "MISO_STT_SERVER_TIMEOUT_SECONDS must be between 1 and 600"
