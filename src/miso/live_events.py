@@ -243,6 +243,7 @@ class LiveToolResultPublisher:
             "reminder_update",
             "reminder_cancel",
             "shopping_add",
+            "shopping_add_many",
             "shopping_update",
             "shopping_remove",
         }

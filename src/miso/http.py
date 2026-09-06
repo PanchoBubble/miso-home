@@ -647,6 +647,12 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                         payload,
                         ("list_name", "name", "quantity", "shared"),
                     )
+                elif action == "shopping_add_many":
+                    tool_name = "shopping_add_many"
+                    output_key = "items"
+                    arguments = _copy_fields(
+                        payload, ("list_name", "items", "shared")
+                    )
                 elif action == "shopping_update":
                     tool_name = "shopping_update"
                     output_key = "item"
@@ -770,7 +776,10 @@ def handler_type() -> Type[BaseHTTPRequestHandler]:
                 return
             output = result.output or {}
             self._json(
-                HTTPStatus.CREATED if tool_name.endswith("_create") or tool_name == "shopping_add" else HTTPStatus.OK,
+                HTTPStatus.CREATED
+                if tool_name.endswith("_create")
+                or tool_name in {"shopping_add", "shopping_add_many"}
+                else HTTPStatus.OK,
                 {output_key: output.get(output_key)},
             )
 

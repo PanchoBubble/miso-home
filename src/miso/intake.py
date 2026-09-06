@@ -55,9 +55,13 @@ class FastReply:
 
 
 def _normalize(text: str) -> str:
-    lowered = re.sub(r"[¿¡?!.,;:]+", " ", text.casefold())
+    lowered = re.sub(r"[¿¡?!.;:]+", " ", text.casefold())
+    # Commas survive because they separate the items of one spoken list;
+    # a trailing one is punctuation rather than a separator.
+    lowered = re.sub(r"\s*,\s*", ", ", lowered)
+    lowered = re.sub(r",+\s*$", " ", lowered)
     lowered = re.sub(
-        r"^(please|hey|oye|por favor|can you|could you|puedes|podrías|podrias)\s+",
+        r"^(please|hey|oye|por favor|can you|could you|puedes|podrías|podrias)[\s,]+",
         "",
         lowered.strip(),
     )
@@ -213,40 +217,207 @@ def _seconds_until(due: object) -> int:
     return max(0, round((deadline - now).total_seconds()))
 
 
+# Which list a request means. Transcription drops tildes often enough that
+# every Spanish verb has to accept the bare "n" spelling, and "the list" on
+# its own is the shopping list as far as the household is concerned.
+_EN_LIST = (
+    r"(?:the\s+|my\s+|our\s+)?(?:shopping|grocery|groceries|food)?\s*list"
+)
+_ES_LIST = (
+    r"(?:la\s+lista(?:\s+de\s+(?:la\s+)?compras?)?"
+    r"|la\s+compra|las\s+compras|el\s+s[uú]per(?:mercado)?)"
+)
+_ES_LIST_OF = r"(?:de\s+" + _ES_LIST + r"|del\s+s[uú]per(?:mercado)?)"
+_COURTESY = r"(?:\s+please|\s+por\s+favor|\s+gracias)?"
+
 _SHOPPING_ADD_PATTERNS = (
-    re.compile(r"^(?:add|put)\s+(?P<item>.+?)\s+(?:to|on)\s+(?:the\s+|my\s+)?shopping\s+list$"),
-    re.compile(r"^(?:añade|agrega|apunta|pon)\s+(?P<item>.+?)\s+(?:a|en)\s+la\s+lista(?:\s+de\s+la\s+compra|\s+de\s+compras?)?$"),
+    re.compile(
+        r"^(?:add|put|stick)\s+(?P<item>.+?)\s+(?:to|on|onto)\s+"
+        + _EN_LIST + _COURTESY + r"$"
+    ),
+    re.compile(
+        r"^(?:a[ñn]ade|a[ñn]adir|agrega|agregar|apunta|apuntar|pon|poner|mete|"
+        r"meter|incluye|suma)\s+(?P<item>.+?)\s+(?:a|en)\s+"
+        + _ES_LIST + _COURTESY + r"$"
+    ),
+)
+_SHOPPING_REMOVE_PATTERNS = (
+    re.compile(
+        r"^(?:remove|delete|drop)\s+(?P<item>.+?)\s+(?:from|off)\s+(?:of\s+)?"
+        + _EN_LIST + _COURTESY + r"$"
+    ),
+    re.compile(
+        r"^(?:take|cross|scratch|tick|check)\s+(?P<item>.+?)\s+off\s+(?:of\s+)?"
+        + _EN_LIST + _COURTESY + r"$"
+    ),
+    re.compile(
+        r"^(?:quita|quitar|borra|borrar|elimina|eliminar|saca|sacar|tacha|"
+        r"tachar)\s+(?P<item>.+?)\s+" + _ES_LIST_OF + _COURTESY + r"$"
+    ),
 )
 _SHOPPING_LIST_PATTERNS = (
-    re.compile(r"^what(?:'s| is)\s+on\s+(?:the\s+|my\s+)?shopping\s+list$"),
-    re.compile(r"^(?:read|show|list)\s+(?:me\s+)?(?:the\s+|my\s+)?shopping\s+list$"),
-    re.compile(r"^qué\s+hay\s+en\s+la\s+lista(?:\s+de\s+la\s+compra|\s+de\s+compras?)?$"),
-    re.compile(r"^que\s+hay\s+en\s+la\s+lista(?:\s+de\s+la\s+compra|\s+de\s+compras?)?$"),
-    re.compile(r"^(?:lee|muestra|dime)\s+la\s+lista(?:\s+de\s+la\s+compra|\s+de\s+compras?)?$"),
+    re.compile(
+        r"^what(?:'s| is| are)\s+(?:on|in)\s+" + _EN_LIST + _COURTESY + r"$"
+    ),
+    re.compile(
+        r"^(?:read|show|list|tell)\s+(?:me\s+)?(?:out\s+)?"
+        + _EN_LIST + _COURTESY + r"$"
+    ),
+    re.compile(
+        r"^(?:qu[eé]|cu[aá]les)\s+(?:hay|est[aá]n?|tenemos|falta|faltan)\s+"
+        r"(?:en|de)\s+" + _ES_LIST + _COURTESY + r"$"
+    ),
+    re.compile(
+        r"^(?:lee|leeme|l[eé]eme|muestra|mu[eé]strame|dime|dame|ens[eé][ñn]ame)"
+        r"\s+" + _ES_LIST + _COURTESY + r"$"
+    ),
+)
+
+# Articles a spoken item name carries but the stored item should not, so
+# "quita la leche" removes the same row "añade leche" created.
+_ITEM_ARTICLE = re.compile(
+    r"^(?:the|a|an|some|el|la|los|las|unos|unas|algo\s+de)\s+(?=\S)"
+)
+# One utterance often names several items. Splitting here keeps each one its
+# own row, which is what the dashboard and a later removal both need.
+_ITEM_SEPARATOR = re.compile(r"\s*,\s*|\s+and\s+|\s+y\s+|\s+e\s+")
+_ITEM_QUANTITY = re.compile(
+    r"^(?P<quantity>\d{1,3}|"
+    + "|".join(re.escape(word) for word in _NUMBER_WORDS)
+    + r")\s+(?P<rest>\S.*)$"
 )
 
 
-def _match_shopping_add(text: str, language: str) -> Mapping[str, object] | None:
+def _clean_item(item: str) -> str | None:
+    cleaned = _ITEM_ARTICLE.sub("", item.strip()).strip()
+    if not 1 <= len(cleaned) <= 120:
+        return None
+    return cleaned
+
+
+def _split_quantity(item: str) -> tuple[str, int]:
+    """Peel a leading count off an item name, leaving the name speakable."""
+    found = _ITEM_QUANTITY.match(item)
+    if found is None:
+        return item, 1
+    quantity_text = found.group("quantity")
+    quantity = (
+        int(quantity_text)
+        if quantity_text.isdigit()
+        else _NUMBER_WORDS[quantity_text]
+    )
+    rest = _clean_item(found.group("rest"))
+    if rest is None or not 1 <= quantity <= 999:
+        return item, 1
+    return rest, quantity
+
+
+def _parse_shopping_items(text: str) -> list[dict[str, object]] | None:
+    """Parse an add request into one entry per item, or None if it is not one."""
     for pattern in _SHOPPING_ADD_PATTERNS:
         found = pattern.match(text)
         if found is None:
             continue
-        item = found.group("item").strip()
-        if not 1 <= len(item) <= 120:
+        entries: list[dict[str, object]] = []
+        for part in _ITEM_SEPARATOR.split(found.group("item")):
+            item = _clean_item(part)
+            if item is None:
+                return None
+            name, quantity = _split_quantity(item)
+            entry: dict[str, object] = {"name": name}
+            if quantity > 1:
+                entry["quantity"] = quantity
+            entries.append(entry)
+        if not 1 <= len(entries) <= 20:
             return None
-        return {"name": item}
+        return entries
     return None
+
+
+def _match_shopping_add(text: str, language: str) -> Mapping[str, object] | None:
+    entries = _parse_shopping_items(text)
+    if entries is None or len(entries) != 1:
+        return None
+    return entries[0]
+
+
+def _match_shopping_add_many(text: str, language: str) -> Mapping[str, object] | None:
+    entries = _parse_shopping_items(text)
+    if entries is None or len(entries) < 2:
+        return None
+    return {"items": entries}
+
+
+def _shopping_label(result: ToolResult, language: str) -> tuple[str, int]:
+    item = (result.output or {}).get("item")
+    name = item.get("name") if isinstance(item, Mapping) else None
+    quantity = item.get("quantity") if isinstance(item, Mapping) else None
+    label = str(name) if isinstance(name, str) and name else (
+        "el artículo" if language == "es" else "the item"
+    )
+    return label, quantity if isinstance(quantity, int) and quantity > 1 else 1
+
+
+def _describe_item(item: object, language: str) -> str:
+    name = item.get("name") if isinstance(item, Mapping) else None
+    quantity = item.get("quantity") if isinstance(item, Mapping) else None
+    label = str(name) if isinstance(name, str) and name else (
+        "el artículo" if language == "es" else "the item"
+    )
+    if isinstance(quantity, int) and quantity > 1:
+        return f"{quantity} {label}"
+    return label
 
 
 def _render_shopping_add(result: ToolResult, language: str) -> str:
     if not result.ok:
         return _failure_phrase(language)
-    item = (result.output or {}).get("item")
-    name = item.get("name") if isinstance(item, Mapping) else None
-    label = str(name) if isinstance(name, str) and name else (
-        "el artículo" if language == "es" else "the item"
+    added = (result.output or {}).get("items")
+    entries = added if isinstance(added, list) else []
+    labels = [
+        _describe_item(entry, language)
+        for entry in entries
+        if isinstance(entry, Mapping)
+    ]
+    if not labels:
+        labels = [_describe_item((result.output or {}).get("item"), language)]
+    joiner = " y " if language == "es" else " and "
+    listed = (
+        joiner.join(labels)
+        if len(labels) < 3
+        else ", ".join(labels[:-1]) + joiner + labels[-1]
     )
-    return f"He añadido {label}." if language == "es" else f"Added {label}."
+    return f"He añadido {listed}." if language == "es" else f"Added {listed}."
+
+
+def _match_shopping_remove(text: str, language: str) -> Mapping[str, object] | None:
+    for pattern in _SHOPPING_REMOVE_PATTERNS:
+        found = pattern.match(text)
+        if found is None:
+            continue
+        item = _clean_item(found.group("item"))
+        if item is None:
+            return None
+        name, _ = _split_quantity(item)
+        return {"name": name}
+    return None
+
+
+def _render_shopping_remove(result: ToolResult, language: str) -> str:
+    if not result.ok:
+        return _failure_phrase(language)
+    output = result.output or {}
+    if output.get("removed") is False:
+        asked = output.get("name")
+        label = str(asked) if isinstance(asked, str) and asked else (
+            "eso" if language == "es" else "that"
+        )
+        spoken = label[:1].upper() + label[1:]
+        if language == "es":
+            return f"{spoken} no está en la lista."
+        return f"{spoken} isn't on the list."
+    label, _ = _shopping_label(result, language)
+    return f"He quitado {label}." if language == "es" else f"Removed {label}."
 
 
 def _match_shopping_list(text: str, language: str) -> Mapping[str, object] | None:
@@ -261,7 +432,7 @@ def _render_shopping_list(result: ToolResult, language: str) -> str:
     items = (result.output or {}).get("items")
     entries = items if isinstance(items, list) else []
     names = [
-        str(entry["name"])
+        _describe_item(entry, language)
         for entry in entries
         if isinstance(entry, Mapping) and isinstance(entry.get("name"), str)
     ]
@@ -473,8 +644,9 @@ def _failure_phrase(language: str) -> str:
 
 
 _SPANISH_MARKERS = re.compile(
-    r"[¿¡ñ]|\b(qué|que|cuánto|cuanto|añade|agrega|lista|temporizador|tiempo|"
-    r"pon|hace|hay|para|minutos?|horas?|segundos?)\b"
+    r"[¿¡ñ]|\b(qué|que|cuánto|cuanto|añade|anade|agrega|apunta|mete|incluye|"
+    r"quita|borra|elimina|saca|tacha|compra|compras|súper|super|lista|"
+    r"temporizador|tiempo|pon|hace|hay|para|minutos?|horas?|segundos?)\b"
 )
 
 
@@ -488,6 +660,18 @@ def default_intents() -> tuple[FastIntent, ...]:
         FastIntent("timer_create", "timer_create", _match_timer_create, _render_timer_create),
         FastIntent("timer_list", "timer_list", _match_timer_list, _render_timer_list),
         FastIntent("shopping_add", "shopping_add", _match_shopping_add, _render_shopping_add),
+        FastIntent(
+            "shopping_add_many",
+            "shopping_add_many",
+            _match_shopping_add_many,
+            _render_shopping_add,
+        ),
+        FastIntent(
+            "shopping_remove",
+            "shopping_remove",
+            _match_shopping_remove,
+            _render_shopping_remove,
+        ),
         FastIntent("shopping_list", "shopping_list", _match_shopping_list, _render_shopping_list),
         FastIntent(
             "weather_set_home",

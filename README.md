@@ -88,6 +88,17 @@ revision. Shopping removals are retained as tombstones so operator views can
 inspect history. Tool results use stable object shapes suitable for both local
 models and the dashboard.
 
+`shopping_add` takes one item; `shopping_add_many` takes a list of them, so
+"add milk and eggs to the shopping list" and a comma-separated dashboard entry
+both become one row per item rather than one row named after the sentence.
+
+`shopping_remove` takes either an item `id`, which the dashboard has, or an
+item `name`, which is all a spoken request carries. A name resolves against the
+active items the actor can see, preferring an exact match over a partial one; a
+name nobody listed comes back as `removed: false` rather than an error, so the
+voice lane can say so instead of handing the turn to a model that cannot see
+the list.
+
 ## Optional model providers
 
 The Pi Ollama adapter remains the default local provider. A separate LAN Ollama
@@ -111,7 +122,8 @@ in, health reports `binary_not_found` or `not_authenticated` and the router
 skips the tier instead of stalling the lane.
 
 Message intake is three-tiered. A deterministic fast lane (`intake.py`) matches
-common bilingual household intents (timers, shopping list, weather) with strict
+common bilingual household intents (timers, shopping list add/remove/read,
+weather) with strict
 parsers and invokes the tool directly, answering in milliseconds without any
 model; an ambiguous parse always falls through rather than guessing arguments.
 It can be disabled with `MISO_FAST_LANE_ENABLED=false`.

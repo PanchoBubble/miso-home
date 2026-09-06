@@ -81,6 +81,93 @@ class FastLaneTests(unittest.TestCase):
         self.assertEqual(listed.tool, "shopping_list")
         self.assertEqual(listed.spoken, "On the list: milk.")
 
+    def test_shopping_add_reads_a_leading_quantity(self) -> None:
+        reply = self.lane.try_handle("Add 3 apples to the grocery list", "en")
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.result.output["item"]["quantity"], 3)
+        self.assertEqual(reply.result.output["item"]["name"], "apples")
+        self.assertEqual(reply.spoken, "Added 3 apples.")
+
+    def test_shopping_add_splits_several_items_in_one_utterance(self) -> None:
+        reply = self.lane.try_handle("Add milk and eggs to the shopping list", "en")
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.tool, "shopping_add_many")
+        self.assertEqual(
+            [item["name"] for item in reply.result.output["items"]],
+            ["milk", "eggs"],
+        )
+        self.assertEqual(reply.spoken, "Added milk and eggs.")
+        spanish = self.lane.try_handle(
+            "Añade leche, pan y 2 huevos a la lista de la compra", "es"
+        )
+        self.assertIsNotNone(spanish)
+        self.assertEqual(
+            [item["name"] for item in spanish.result.output["items"]],
+            ["leche", "pan", "huevos"],
+        )
+        self.assertEqual(spanish.result.output["items"][2]["quantity"], 2)
+        self.assertEqual(spanish.spoken, "He añadido leche, pan y 2 huevos.")
+
+    def test_shopping_remove_by_name_in_both_languages(self) -> None:
+        self.lane.try_handle("Add milk to the shopping list", "en")
+        self.lane.try_handle("Añade pan a la lista de la compra", "es")
+        english = self.lane.try_handle("Remove milk from the shopping list", "en")
+        self.assertIsNotNone(english)
+        self.assertEqual(english.tool, "shopping_remove")
+        self.assertEqual(english.spoken, "Removed milk.")
+        spanish = self.lane.try_handle("Quita el pan de la lista", "es")
+        self.assertIsNotNone(spanish)
+        self.assertEqual(spanish.spoken, "He quitado pan.")
+        listed = self.lane.try_handle("What's on the shopping list", "en")
+        self.assertEqual(listed.spoken, "The shopping list is empty.")
+
+    def test_shopping_remove_answers_an_item_that_is_not_listed(self) -> None:
+        reply = self.lane.try_handle("Take chorizo off the shopping list", "en")
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.spoken, "Chorizo isn't on the list.")
+        spanish = self.lane.try_handle("Quita el chorizo de la compra", "es")
+        self.assertIsNotNone(spanish)
+        self.assertEqual(spanish.spoken, "Chorizo no está en la lista.")
+
+    def test_shopping_phrasings_reach_the_fast_lane(self) -> None:
+        adds = (
+            "put bread on the list",
+            "stick coffee on the groceries list",
+            "anade leche a la lista de la compra",
+            "agrega dos leches a la lista",
+            "mete el pan en la compra",
+        )
+        for phrase in adds:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(
+                    match_fast_intent(phrase, guess_language(phrase))[0],
+                    "shopping_add",
+                )
+        removes = (
+            "delete bread from the list",
+            "cross eggs off the shopping list",
+            "borra el pan de la lista",
+            "saca la leche del super",
+        )
+        for phrase in removes:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(
+                    match_fast_intent(phrase, guess_language(phrase))[0],
+                    "shopping_remove",
+                )
+        reads = (
+            "what is in the list",
+            "show the grocery list",
+            "leeme la lista de la compra",
+            "que falta en la lista",
+        )
+        for phrase in reads:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(
+                    match_fast_intent(phrase, guess_language(phrase))[0],
+                    "shopping_list",
+                )
+
     def test_spanish_shopping_add(self) -> None:
         reply = self.lane.try_handle(
             "Añade leche a la lista de la compra", "es"

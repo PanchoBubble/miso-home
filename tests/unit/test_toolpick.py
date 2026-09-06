@@ -216,7 +216,9 @@ class ToolPickerTests(unittest.TestCase):
             sorted(picker.pickable),
             [
                 "shopping_add",
+                "shopping_add_many",
                 "shopping_list",
+                "shopping_remove",
                 "timer_create",
                 "timer_list",
                 "tools_refresh",

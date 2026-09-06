@@ -160,6 +160,58 @@ class HouseholdToolTests(unittest.TestCase):
         self.assertEqual(history[0]["status"], "removed")
         self.assertEqual(history[0]["revision"], 3)
 
+    def test_shopping_add_many_writes_one_row_per_item(self) -> None:
+        added = self.invoke(
+            self.registry,
+            "shopping_add_many",
+            {"items": [{"name": "Milk"}, {"name": "Eggs", "quantity": 6}]},
+        )
+        self.assertEqual([item["name"] for item in added["items"]], ["Milk", "Eggs"])
+        self.assertEqual(added["items"][1]["quantity"], 6)
+        self.assertEqual(added["item"]["name"], "Milk")
+        listed = self.invoke(self.registry, "shopping_list", {})["items"]
+        self.assertEqual([item["name"] for item in listed], ["Milk", "Eggs"])
+
+    def test_shopping_remove_resolves_a_spoken_item_name(self) -> None:
+        self.invoke(self.registry, "shopping_add", {"name": "Oat milk"})
+        milk = self.invoke(self.registry, "shopping_add", {"name": "Milk"})["item"]
+        exact = self.invoke(self.registry, "shopping_remove", {"name": "milk"})
+        self.assertTrue(exact["removed"])
+        self.assertEqual(exact["item"]["id"], milk["id"])
+        partial = self.invoke(self.registry, "shopping_remove", {"name": "oat"})
+        self.assertTrue(partial["removed"])
+        self.assertEqual(partial["item"]["name"], "Oat milk")
+        self.assertEqual(
+            self.invoke(self.registry, "shopping_list", {})["items"], []
+        )
+
+    def test_shopping_remove_reports_a_name_that_is_not_listed(self) -> None:
+        missing = self.invoke(
+            self.registry, "shopping_remove", {"name": "chorizo"}
+        )
+        self.assertFalse(missing["removed"])
+        self.assertIsNone(missing["item"])
+        self.assertEqual(missing["name"], "chorizo")
+
+    def test_shopping_remove_needs_an_id_or_a_name(self) -> None:
+        result = self.registry.invoke("shopping_remove", {})
+        self.assertEqual(result.status, ToolStatus.REJECTED)
+        unknown_id = self.registry.invoke(
+            "shopping_remove", {"id": "00000000-0000-4000-8000-000000000000"}
+        )
+        self.assertEqual(unknown_id.status, ToolStatus.REJECTED)
+
+    def test_shopping_remove_by_name_respects_private_lists(self) -> None:
+        juan = web_actor("juan@example.com")
+        ana = web_actor("ana@example.com")
+        MemoryStore(self.path).provision_household_members((juan.email, ana.email))
+        store = HouseholdStore(self.path)
+        store.add_shopping_item(
+            "Juan private", "Gift", 1, actor=juan, shared=False
+        )
+        self.assertIsNone(store.find_shopping_item("Gift", actor=ana))
+        self.assertIsNotNone(store.find_shopping_item("Gift", actor=juan))
+
     def test_revision_conflicts_do_not_overwrite_newer_household_state(self) -> None:
         item = self.invoke(
             self.registry,

@@ -522,6 +522,39 @@ class DashboardIntegrationTests(unittest.TestCase):
             "POST",
             "/api/household",
             {
+                "action": "shopping_add_many",
+                "list_name": "Shopping",
+                "items": [{"name": "Rice"}, {"name": "Beans", "quantity": 4}],
+                "shared": True,
+            },
+        )
+        self.assertEqual(response.status, 201)
+        self.assertEqual(
+            [item["name"] for item in json.loads(content)["items"]],
+            ["Rice", "Beans"],
+        )
+        for name in ("Rice", "Beans"):
+            self.assertTrue(
+                self.server.tool_registry.invoke(
+                    "shopping_remove", {"name": name}, actor=VOICE_ACTOR
+                ).output["removed"]
+            )
+
+        spoken_removal = self.server.tool_registry.invoke(
+            "shopping_remove", {"name": "bread"}, actor=VOICE_ACTOR
+        )
+        self.assertTrue(spoken_removal.ok)
+        self.assertTrue(spoken_removal.output["removed"])
+        response, content = self.request("GET", "/api/household")
+        self.assertEqual(
+            [item["name"] for item in json.loads(content)["lists"][0]["items"]],
+            ["Coffee"],
+        )
+
+        response, content = self.request(
+            "POST",
+            "/api/household",
+            {
                 "action": "shopping_update",
                 "id": created["id"],
                 "name": "Decaf coffee",
