@@ -142,15 +142,18 @@ visible output do not mix providers. Every decision, fast-lane match, attempt
 latency, fallback reason, and final selection is written to
 `state_dir / "audit" / "routing.jsonl"` and the tool audit log. Provider
 overrides are strict by default, and progress chunks are emitted before health
-checks or model loading. Voice replies now speak sentence by sentence: synthesis
-of the first sentence overlaps generation of the rest, so long answers start
-sounding almost immediately. Piper emits nothing until it has synthesised the
-whole string it was handed - measured on the Pi, first audio tracks length at
-roughly 65 ms per word - so a long opening sentence is additionally broken at
-its own commas, semicolons or dashes once it passes twelve words. Fragments
-below four words are kept attached to what follows, and a long sentence with no
-punctuation in it is still spoken whole, because a break Piper was not given
-lands as an unnatural pause.
+checks or model loading. Voice replies speak sentence by sentence: each
+completed sentence is queued on the speech manager the moment it exists, so
+synthesis of sentence N+1 overlaps playback of sentence N and generation of
+sentence N+2, and sentences run on with no synthesis gap between them. Piper
+emits nothing until it has synthesised the whole string it was handed -
+measured on the Pi, first audio tracks length at roughly 65 ms per word - so a
+long sentence is additionally broken at its own commas, semicolons or dashes
+once it passes twelve words, and the opening fragment of an answer is cut once
+it passes eight. Fragments below four words (three for the opening one) are
+kept attached to what follows, and a long sentence with no punctuation in it is
+still spoken whole, because a break Piper was not given lands as an unnatural
+pause.
 
 Each completed Pi attempt records a `generation` block in
 `routing.jsonl` with prompt tokens, prompt-evaluation milliseconds, generated

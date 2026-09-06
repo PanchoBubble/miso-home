@@ -373,10 +373,20 @@ _CLAUSE_BOUNDARY = re.compile(r"(?<=[,;:])\s+|\s+[—–-]\s+")
 _MINIMUM_SEGMENT_WORDS = 4
 _MAXIMUM_SEGMENT_WORDS = 12
 
+# The opening fragment is the one the household is waiting in silence for, and
+# the sentences behind it queue up gaplessly, so it is cut sooner: eight words
+# is roughly 300 ms less waiting for the model and another 250 ms less in Piper.
+_FIRST_MINIMUM_SEGMENT_WORDS = 3
+_FIRST_MAXIMUM_SEGMENT_WORDS = 8
 
-def _split_long_clause(buffer: str) -> tuple[str, str]:
+
+def _split_long_clause(
+    buffer: str,
+    minimum_words: int = _MINIMUM_SEGMENT_WORDS,
+    maximum_words: int = _MAXIMUM_SEGMENT_WORDS,
+) -> tuple[str, str]:
     """Split an over-long pending sentence at its last usable clause break."""
-    if len(buffer.split()) <= _MAXIMUM_SEGMENT_WORDS:
+    if len(buffer.split()) <= maximum_words:
         return "", buffer
     head = ""
     rest = buffer
@@ -386,25 +396,26 @@ def _split_long_clause(buffer: str) -> tuple[str, str]:
             break
         candidate = rest[: match.start()]
         remainder = rest[match.end() :]
-        if len(candidate.split()) < _MINIMUM_SEGMENT_WORDS:
+        if len(candidate.split()) < minimum_words:
             # Too small on its own; keep it attached to what follows.
             break
         head = (head + " " + candidate).strip()
         rest = remainder
-        if len(head.split()) >= _MINIMUM_SEGMENT_WORDS:
+        if len(head.split()) >= minimum_words:
             break
-    if not head or len(rest.split()) < _MINIMUM_SEGMENT_WORDS:
+    if not head or len(rest.split()) < minimum_words:
         return "", buffer
     return head, rest
 
 
 class _SegmentSpeaker:
-    """Speak completed sentences while the rest of the answer still streams.
+    """Queue completed sentences while the rest of the answer still streams.
 
-    Synthesis of sentence N overlaps generation of sentence N+1, so the first
-    audio starts as soon as the first sentence exists instead of after the
-    whole answer. Segments are spoken strictly one at a time because
-    SpeechManager.speak cancels any active request.
+    Each segment is handed to SpeechManager.enqueue as soon as it exists, so
+    synthesis of sentence N+1 overlaps playback of sentence N and generation of
+    sentence N+2, and the model stream is never paused for the speaker. The
+    results are settled in order: early ones opportunistically on every feed,
+    the rest in finish(), which returns once the whole answer has played.
     """
 
     def __init__(
@@ -422,6 +433,8 @@ class _SegmentSpeaker:
         self._on_first_audio = on_first_audio
         self._reported_first_audio = False
         self._buffer = ""
+        self._pending: list[tuple[float, str]] = []
+        self._segments = 0
         self.received = False
         self.opened_gate = False
 
@@ -432,19 +445,36 @@ class _SegmentSpeaker:
         if len(parts) > 1:
             self._buffer = parts[-1]
             for segment in parts[:-1]:
-                self._speak(segment)
-        head, self._buffer = _split_long_clause(self._buffer)
+                self._emit(segment)
+        if self._segments:
+            head, self._buffer = _split_long_clause(self._buffer)
+        else:
+            head, self._buffer = _split_long_clause(
+                self._buffer,
+                _FIRST_MINIMUM_SEGMENT_WORDS,
+                _FIRST_MAXIMUM_SEGMENT_WORDS,
+            )
         if head:
-            self._speak(head)
+            self._emit(head)
+        self._settle_ready()
 
     def finish(self) -> None:
         remainder, self._buffer = self._buffer, ""
-        self._speak(remainder)
+        self._emit(remainder)
+        while self._pending:
+            requested_at, request_id = self._pending.pop(0)
+            result = self._manager._wait_for_speech(request_id, self._cancel)
+            self._settle(requested_at, result)
 
     def close(self) -> None:
         if self.opened_gate:
             self._manager._close_echo_gate()
             self.opened_gate = False
+
+    def _emit(self, segment: str) -> None:
+        if segment.strip():
+            self._segments += 1
+            self._speak(segment)
 
     def _speak(self, segment: str) -> None:
         segment = segment.strip()
@@ -459,8 +489,20 @@ class _SegmentSpeaker:
             self.opened_gate = True
         manager._remember_spoken(segment)
         requested_at = time.monotonic()
-        request_id = manager.speech.speak(segment, self._language)
-        result = manager._wait_for_speech(request_id, self._cancel)
+        request_id = manager.speech.enqueue(segment, self._language)
+        self._pending.append((requested_at, request_id))
+
+    def _settle_ready(self) -> None:
+        """Surface a failed or interrupted segment without waiting for the rest."""
+        while self._pending:
+            requested_at, request_id = self._pending[0]
+            result = self._manager.speech.wait(request_id, 0)
+            if result is None:
+                return
+            self._pending.pop(0)
+            self._settle(requested_at, result)
+
+    def _settle(self, requested_at: float, result: SpeechResult | None) -> None:
         self._note_first_audio(requested_at, result)
         if result is not None and result.status == "completed":
             return
@@ -479,8 +521,9 @@ class _SegmentSpeaker:
     ) -> None:
         """Report when the speaker first produced sound for this turn.
 
-        Piper measures its own first chunk relative to the start of synthesis,
-        so the request time plus that offset is the wall moment audio began.
+        The speech result measures its first chunk relative to the moment the
+        segment was queued, so the request time plus that offset is the wall
+        moment audio began.
         """
         if self._reported_first_audio or self._on_first_audio is None:
             return

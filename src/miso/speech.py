@@ -131,6 +131,7 @@ class PiperBackend:
         self.timeout_seconds = timeout_seconds
         self.worker = worker or Path(__file__).with_name("piper_worker.py")
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._ready: dict[str, threading.Event] = {}
         self._process_lock = threading.Lock()
         self._stopped = False
 
@@ -174,32 +175,51 @@ class PiperBackend:
                 raise SpeechError("Piper backend is stopped")
             existing = self._processes.get(language)
             if existing is not None and existing.poll() is None:
-                return existing
-            voice = self.voices[language]
-            process = subprocess.Popen(
-                [
-                    str(self.executable),
-                    str(self.worker),
-                    "--model",
-                    str(voice.model),
-                    "--config",
-                    str(voice.config),
-                    "--chunk-bytes",
-                    str(self.chunk_bytes),
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-                bufsize=0,
-            )
-            self._processes[language] = process
-        ready = self._read_size(
-            process, cancel_event, time.monotonic() + self.timeout_seconds
-        )
-        if ready != 0xFFFFFFFF:
-            self._discard_worker(language, process)
-            raise SpeechError("Piper worker did not become ready")
+                process = existing
+                ready = self._ready[language]
+                spawned = False
+            else:
+                voice = self.voices[language]
+                process = subprocess.Popen(
+                    [
+                        str(self.executable),
+                        str(self.worker),
+                        "--model",
+                        str(voice.model),
+                        "--config",
+                        str(voice.config),
+                        "--chunk-bytes",
+                        str(self.chunk_bytes),
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                    bufsize=0,
+                )
+                ready = threading.Event()
+                self._processes[language] = process
+                self._ready[language] = ready
+                spawned = True
+        deadline = time.monotonic() + self.timeout_seconds
+        if spawned:
+            value = self._read_size(process, cancel_event, deadline)
+            if value != 0xFFFFFFFF:
+                self._discard_worker(language, process)
+                raise SpeechError("Piper worker did not become ready")
+            ready.set()
+            return process
+        # Another thread (usually a rewarm after a barge-in) is still reading
+        # the READY frame from this process; reading alongside it would swallow
+        # that frame as an audio size.
+        while not ready.is_set():
+            if cancel_event.is_set():
+                raise InterruptedError("speech synthesis was cancelled")
+            if time.monotonic() >= deadline:
+                raise SpeechError("Piper worker did not become ready")
+            if process.poll() is not None:
+                raise SpeechError("Piper worker stopped unexpectedly")
+            ready.wait(0.01)
         return process
 
     def _discard_worker(
@@ -337,8 +357,35 @@ class PiperBackend:
         )
 
 
+@dataclass(slots=True)
+class _SpeechRequest:
+    request_id: str
+    text: str
+    language: str
+    volume: float
+    cancel_event: threading.Event
+    enqueued_at: float
+
+
+@dataclass(slots=True)
+class _Synthesized:
+    """A request whose PCM is fully queued on the sink and awaiting drain."""
+
+    request: _SpeechRequest
+    metrics: SynthesisMetrics
+    first_audio_milliseconds: int | None
+    synthesis_milliseconds: int
+
+
 class SpeechManager:
-    """Coordinate one cancellable speech request and bounded result history."""
+    """Coordinate a queue of speech requests and bounded result history.
+
+    Requests queued with ``enqueue`` form one utterance: synthesis of request
+    N+1 begins as soon as request N's PCM is handed to the audio sink, not
+    after it has played, so sentence boundaries carry no synthesis gap. The
+    sink only drains once the queue is empty. ``speak`` cancels whatever is
+    active or queued first, which is what cues and the HTTP API want.
+    """
 
     def __init__(
         self,
@@ -356,9 +403,10 @@ class SpeechManager:
         self.result_capacity = result_capacity
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
-        self._active_id: str | None = None
-        self._cancel_event: threading.Event | None = None
+        self._queue: deque[_SpeechRequest] = deque()
+        self._active: _SpeechRequest | None = None
         self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
         self._state = "disabled" if not enabled else "idle"
         self._last_error: str | None = None
         self._results: dict[str, SpeechResult] = {}
@@ -370,7 +418,10 @@ class SpeechManager:
             start()
 
     def stop(self) -> None:
+        self._stop_event.set()
         self.cancel()
+        with self._condition:
+            self._condition.notify_all()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=2)
@@ -383,6 +434,21 @@ class SpeechManager:
     def speak(
         self, text: str, language: str, *, volume: float | None = None
     ) -> str:
+        """Replace anything active or queued with this text."""
+        request = self._validate(text, language, volume)
+        self.cancel()
+        return self._submit(request)
+
+    def enqueue(
+        self, text: str, language: str, *, volume: float | None = None
+    ) -> str:
+        """Append this text to the current utterance without interrupting it."""
+        request = self._validate(text, language, volume)
+        return self._submit(request)
+
+    def _validate(
+        self, text: str, language: str, volume: float | None
+    ) -> _SpeechRequest:
         if not self.enabled:
             raise SpeechError("speech synthesis is disabled")
         normalized = text.strip()
@@ -397,38 +463,56 @@ class SpeechManager:
         selected_volume = self.default_volume if volume is None else volume
         if not 0 <= selected_volume <= 2:
             raise SpeechError("speech volume must be between 0 and 2")
-        self.cancel()
-        previous = self._thread
-        if previous is not None and previous.is_alive():
-            previous.join(timeout=1)
-            if previous.is_alive():
-                raise SpeechError("previous speech request is still stopping")
-        request_id = str(uuid.uuid4())
-        cancel_event = threading.Event()
-        with self._lock:
-            self._active_id = request_id
-            self._cancel_event = cancel_event
-            self._state = "synthesizing"
+        return _SpeechRequest(
+            request_id=str(uuid.uuid4()),
+            text=normalized,
+            language=language,
+            volume=selected_volume,
+            cancel_event=threading.Event(),
+            enqueued_at=time.monotonic(),
+        )
+
+    def _submit(self, request: _SpeechRequest) -> str:
+        with self._condition:
+            if self._stop_event.is_set():
+                raise SpeechError("speech synthesis is stopped")
+            self._queue.append(request)
+            if self._active is None:
+                self._state = "synthesizing"
             self._last_error = None
-            self._thread = threading.Thread(
-                target=self._run,
-                args=(request_id, normalized, language, selected_volume, cancel_event),
-                name="miso-speech",
-                daemon=True,
-            )
-            self._thread.start()
-        return request_id
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._serve, name="miso-speech", daemon=True
+                )
+                self._thread.start()
+            self._condition.notify_all()
+        return request.request_id
 
     def cancel(self, request_id: str | None = None) -> bool:
-        with self._lock:
-            if self._active_id is None or (
-                request_id is not None and request_id != self._active_id
-            ):
+        """Cancel the whole utterance: the active request and everything queued.
+
+        A queued sentence only makes sense after the one before it, so
+        cancelling any single request drops the rest of the utterance too.
+        """
+        with self._condition:
+            active = self._active
+            queued = tuple(self._queue)
+            known = {item.request_id for item in queued}
+            if active is not None:
+                known.add(active.request_id)
+            if not known or (request_id is not None and request_id not in known):
                 return False
-            cancel_event = self._cancel_event
-            self._state = "cancelling"
-        if cancel_event is not None:
-            cancel_event.set()
+            self._queue.clear()
+            for item in queued:
+                self._record_locked(
+                    self._result(item, "cancelled", None, None, 0, 0, None)
+                )
+            if active is not None:
+                active.cancel_event.set()
+                self._state = "cancelling"
+            else:
+                self._state = "idle"
+            self._condition.notify_all()
         self.audio.cancel_playback()
         return True
 
@@ -453,7 +537,10 @@ class SpeechManager:
                 "enabled": self.enabled,
                 "available": self.backend.available() if self.enabled else False,
                 "state": self._state,
-                "active_request_id": self._active_id,
+                "active_request_id": (
+                    None if self._active is None else self._active.request_id
+                ),
+                "queued": len(self._queue),
                 "default_volume": self.default_volume,
                 "voices": [
                     voice.public_dict() for voice in self.backend.voices.values()
@@ -462,74 +549,179 @@ class SpeechManager:
                 "latest": None if latest is None else latest.as_dict(),
             }
 
-    def _run(
-        self,
-        request_id: str,
-        text: str,
-        language: str,
-        volume: float,
-        cancel_event: threading.Event,
-    ) -> None:
+    def _serve(self) -> None:
+        pending: list[_Synthesized] = []
+        drain_deadline = 0.0
+        while not self._stop_event.is_set():
+            with self._condition:
+                request = self._queue.popleft() if self._queue else None
+                if request is not None:
+                    self._active = request
+                    self._state = "synthesizing"
+                elif not pending:
+                    self._active = None
+                    self._state = "idle"
+                    self._condition.wait(0.25)
+                    continue
+            if any(item.request.cancel_event.is_set() for item in pending):
+                # cancel() already cleared the sink; only the bookkeeping is left.
+                self._resolve(pending, "cancelled")
+            if request is None:
+                # Nothing left to synthesize: let the sink run dry, but keep
+                # checking the queue so a late sentence starts synthesizing
+                # while the previous one is still sounding.
+                if pending:
+                    self._drain(pending, drain_deadline)
+                continue
+            synthesized = self._synthesize(request, pending)
+            if synthesized is not None:
+                pending.append(synthesized)
+                audio_seconds = sum(
+                    item.metrics.audio_milliseconds for item in pending
+                ) / 1000
+                drain_deadline = time.monotonic() + max(2.0, audio_seconds + 2)
+
+    def _synthesize(
+        self, request: _SpeechRequest, pending: list[_Synthesized]
+    ) -> _Synthesized | None:
+        cancel_event = request.cancel_event
         started = time.monotonic()
+        queue_wait = round((started - request.enqueued_at) * 1000)
 
         def on_audio(chunk: bytes) -> None:
             if cancel_event.is_set():
                 return
             with self._lock:
-                if self._active_id == request_id:
+                if self._active is request:
                     self._state = "playing"
-            self.audio.play_stream(chunk, timeout=0.25, cancel_event=cancel_event)
+            self.audio.play_stream(chunk, timeout=1.0, cancel_event=cancel_event)
 
         try:
             metrics = self.backend.synthesize(
-                text, language, volume, cancel_event, on_audio
-            )
-            cancelled = metrics.cancelled or cancel_event.is_set()
-            if cancelled:
-                self.audio.cancel_playback()
-            elif not self.audio.wait_playback(
-                max(2.0, metrics.audio_milliseconds / 1000 + 2)
-            ):
-                raise SpeechError("audio playback did not drain before timeout")
-            result = SpeechResult(
-                request_id=request_id,
-                status="cancelled" if cancelled else "completed",
-                language=language,
-                voice=metrics.voice.name,
-                first_audio_milliseconds=metrics.first_audio_milliseconds,
-                synthesis_milliseconds=metrics.synthesis_milliseconds,
-                total_milliseconds=round((time.monotonic() - started) * 1000),
-                audio_milliseconds=metrics.audio_milliseconds,
-                chunks=metrics.chunks,
+                request.text, request.language, request.volume, cancel_event, on_audio
             )
         except (SpeechError, RuntimeError, OSError) as error:
-            self.audio.cancel_playback()
-            result = SpeechResult(
-                request_id=request_id,
-                status="cancelled" if cancel_event.is_set() else "error",
-                language=language,
-                voice=self.backend.voices.get(
-                    language, PiperVoice(language, "unknown", Path(), Path())
-                ).name,
-                first_audio_milliseconds=None,
-                synthesis_milliseconds=round((time.monotonic() - started) * 1000),
-                total_milliseconds=round((time.monotonic() - started) * 1000),
-                audio_milliseconds=0,
-                chunks=0,
-                error=None if cancel_event.is_set() else str(error)[:200],
+            elapsed = round((time.monotonic() - started) * 1000)
+            if cancel_event.is_set():
+                self.audio.cancel_playback()
+                self._resolve(pending, "cancelled")
+                self._record(
+                    self._result(request, "cancelled", None, elapsed, 0, 0, None)
+                )
+                return None
+            # Earlier sentences are already on the sink and still make sense on
+            # their own, so they keep playing; only this request fails.
+            self._record(
+                self._result(
+                    request, "error", None, elapsed, 0, 0, str(error)[:200]
+                )
             )
+            return None
+        elapsed = round((time.monotonic() - started) * 1000)
+        if metrics.cancelled or cancel_event.is_set():
+            self.audio.cancel_playback()
+            self._resolve(pending, "cancelled")
+            self._record(
+                self._result(
+                    request,
+                    "cancelled",
+                    metrics.first_audio_milliseconds,
+                    elapsed,
+                    metrics.audio_milliseconds,
+                    metrics.chunks,
+                    None,
+                    voice=metrics.voice.name,
+                )
+            )
+            return None
+        first_audio = (
+            None
+            if metrics.first_audio_milliseconds is None
+            else metrics.first_audio_milliseconds + queue_wait
+        )
+        return _Synthesized(request, metrics, first_audio, elapsed)
+
+    def _drain(self, pending: list[_Synthesized], deadline: float) -> None:
+        if self.audio.wait_playback(0.05):
+            self._resolve(pending, "completed")
+            return
+        if time.monotonic() >= deadline:
+            self.audio.cancel_playback()
+            self._resolve(
+                pending, "error", "audio playback did not drain before timeout"
+            )
+
+    def _resolve(
+        self, pending: list[_Synthesized], status: str, error: str | None = None
+    ) -> None:
+        items = list(pending)
+        pending.clear()
         with self._condition:
-            self._results[request_id] = result
-            self._result_order.append(request_id)
-            while len(self._result_order) > self.result_capacity:
-                expired = self._result_order.popleft()
-                self._results.pop(expired, None)
-            if self._active_id == request_id:
-                self._active_id = None
-                self._cancel_event = None
+            for item in items:
+                self._record_locked(
+                    self._result(
+                        item.request,
+                        status,
+                        item.first_audio_milliseconds,
+                        item.synthesis_milliseconds,
+                        item.metrics.audio_milliseconds,
+                        item.metrics.chunks,
+                        error,
+                        voice=item.metrics.voice.name,
+                    )
+                )
+
+    def _result(
+        self,
+        request: _SpeechRequest,
+        status: str,
+        first_audio_milliseconds: int | None,
+        synthesis_milliseconds: int | None,
+        audio_milliseconds: int,
+        chunks: int,
+        error: str | None,
+        *,
+        voice: str | None = None,
+    ) -> SpeechResult:
+        now = time.monotonic()
+        return SpeechResult(
+            request_id=request.request_id,
+            status=status,
+            language=request.language,
+            voice=voice
+            or self.backend.voices.get(
+                request.language,
+                PiperVoice(request.language, "unknown", Path(), Path()),
+            ).name,
+            first_audio_milliseconds=first_audio_milliseconds,
+            synthesis_milliseconds=(
+                round((now - request.enqueued_at) * 1000)
+                if synthesis_milliseconds is None
+                else synthesis_milliseconds
+            ),
+            total_milliseconds=round((now - request.enqueued_at) * 1000),
+            audio_milliseconds=audio_milliseconds,
+            chunks=chunks,
+            error=error,
+        )
+
+    def _record(self, result: SpeechResult) -> None:
+        with self._condition:
+            self._record_locked(result)
+
+    def _record_locked(self, result: SpeechResult) -> None:
+        self._results[result.request_id] = result
+        self._result_order.append(result.request_id)
+        while len(self._result_order) > self.result_capacity:
+            expired = self._result_order.popleft()
+            self._results.pop(expired, None)
+        if self._active is not None and self._active.request_id == result.request_id:
+            self._active = None
+            if not self._queue:
                 self._state = "idle"
-                self._last_error = result.error
-            self._condition.notify_all()
+        if result.error is not None:
+            self._last_error = result.error
+        self._condition.notify_all()
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:

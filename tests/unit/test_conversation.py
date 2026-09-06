@@ -100,6 +100,9 @@ class FakeSpeech:
             self.condition.notify_all()
         return request_id
 
+    def enqueue(self, text, language, *, volume=None):
+        return self.speak(text, language, volume=volume)
+
     def wait(self, request_id, timeout=None):
         with self.condition:
             if request_id not in self.results:
@@ -251,6 +254,8 @@ class SegmentSpeakerTests(unittest.TestCase):
     def _speaker(self, spoken):
         speaker = _SegmentSpeaker.__new__(_SegmentSpeaker)
         speaker._buffer = ""
+        speaker._pending = []
+        speaker._segments = 0
         speaker.received = False
         speaker.opened_gate = False
         speaker._speak = spoken.append
@@ -267,6 +272,18 @@ class SegmentSpeakerTests(unittest.TestCase):
         # Audio starts on the first clause instead of waiting for the full stop.
         self.assertEqual(len(spoken), 1)
         self.assertTrue(spoken[0].endswith("colours,"))
+
+    def test_the_opening_fragment_is_cut_sooner_than_later_ones(self) -> None:
+        spoken = []
+        speaker = self._speaker(spoken)
+        text = "Right now in London, it is cloudy with a light breeze and "
+        speaker.feed(text)
+        # Nine words with a clause break is enough to start the speaker...
+        self.assertEqual(spoken, ["Right now in London,"])
+        speaker._buffer = ""
+        speaker.feed(text)
+        # ...but the same text later in the answer waits for twelve.
+        self.assertEqual(spoken, ["Right now in London,"])
 
     def test_sentences_still_win_over_clauses(self) -> None:
         spoken = []

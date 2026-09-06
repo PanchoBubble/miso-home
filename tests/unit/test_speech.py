@@ -18,9 +18,12 @@ from miso.speech import (
 class FakeAudio:
     playback_format = AudioFormat(sample_rate=22_050)
 
-    def __init__(self) -> None:
+    def __init__(self, *, drained=True) -> None:
         self.chunks: list[bytes] = []
         self.cancelled = 0
+        self.drained = threading.Event()
+        if drained:
+            self.drained.set()
 
     def play_stream(self, pcm, timeout=1.0, cancel_event=None):
         if cancel_event is not None and cancel_event.is_set():
@@ -31,7 +34,7 @@ class FakeAudio:
         self.cancelled += 1
 
     def wait_playback(self, timeout):
-        return True
+        return self.drained.wait(timeout)
 
 
 class FakeBackend:
@@ -40,6 +43,7 @@ class FakeBackend:
         self.voices = {"en": self.voice}
         self.block = block
         self.volume = None
+        self.started: list[str] = []
 
     def available(self):
         return True
@@ -48,6 +52,7 @@ class FakeBackend:
         if language not in self.voices:
             raise SpeechError("speech language must be en or es")
         self.volume = volume
+        self.started.append(text)
         started = time.monotonic()
         chunks = 0
         while self.block and not cancel_event.wait(0.01):
@@ -156,6 +161,77 @@ class SpeechManagerTests(unittest.TestCase):
         self.assertEqual(result.status, "cancelled")
         self.assertLess((time.monotonic() - started) * 1000, 100)
         self.assertGreaterEqual(audio.cancelled, 1)
+
+    def test_queued_segments_synthesize_before_the_sink_drains(self) -> None:
+        # The gap between sentences used to be a full Piper pass: sentence N+1
+        # was only requested once sentence N had finished playing.
+        audio = FakeAudio(drained=False)
+        backend = FakeBackend()
+        manager = SpeechManager(
+            enabled=True,
+            backend=backend,
+            audio=audio,
+            default_volume=1,
+            result_capacity=4,
+        )
+        first = manager.enqueue("First sentence.", "en")
+        second = manager.enqueue("Second sentence.", "en")
+        deadline = time.monotonic() + 1
+        while len(backend.started) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        self.assertEqual(backend.started, ["First sentence.", "Second sentence."])
+        self.assertIsNone(manager.wait(first, 0.05))
+        self.assertEqual(manager.status()["state"], "playing")
+        audio.drained.set()
+        self.assertEqual(manager.wait(first, 1).status, "completed")
+        self.assertEqual(manager.wait(second, 1).status, "completed")
+        self.assertEqual(manager.status()["state"], "idle")
+        self.assertEqual(manager.status()["queued"], 0)
+
+    def test_speak_replaces_the_whole_queued_utterance(self) -> None:
+        audio = FakeAudio(drained=False)
+        backend = FakeBackend()
+        manager = SpeechManager(
+            enabled=True,
+            backend=backend,
+            audio=audio,
+            default_volume=1,
+            result_capacity=4,
+        )
+        first = manager.enqueue("First sentence.", "en")
+        second = manager.enqueue("Second sentence.", "en")
+        deadline = time.monotonic() + 1
+        while len(backend.started) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        cue = manager.speak("Interrupting cue.", "en")
+
+        self.assertEqual(manager.wait(first, 1).status, "cancelled")
+        self.assertEqual(manager.wait(second, 1).status, "cancelled")
+        self.assertGreaterEqual(audio.cancelled, 1)
+        audio.drained.set()
+        self.assertEqual(manager.wait(cue, 1).status, "completed")
+
+    def test_cancelling_one_queued_segment_drops_the_rest(self) -> None:
+        audio = FakeAudio()
+        manager = SpeechManager(
+            enabled=True,
+            backend=FakeBackend(block=True),
+            audio=audio,
+            default_volume=1,
+            result_capacity=4,
+        )
+        active = manager.enqueue("Long first sentence.", "en")
+        queued = manager.enqueue("Never reached.", "en")
+        deadline = time.monotonic() + 1
+        while not audio.chunks and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        self.assertFalse(manager.cancel("unknown"))
+        self.assertTrue(manager.cancel(queued))
+        self.assertEqual(manager.wait(queued, 1).status, "cancelled")
+        self.assertEqual(manager.wait(active, 1).status, "cancelled")
+        self.assertFalse(manager.cancel())
 
     def test_validates_input_and_disabled_state(self) -> None:
         manager = SpeechManager(
