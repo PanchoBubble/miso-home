@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Miso · microphone calibration</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#f3eee5;background:#151b19;color-scheme:dark}
+body{margin:0;padding:32px 20px}main{max-width:760px;margin:auto}header{display:flex;justify-content:space-between;align-items:center;color:#b8c8be;font-size:14px}.brand{font-weight:800;color:#f3eee5;font-size:22px}h1{font-size:clamp(28px,5vw,42px);line-height:1.12;margin-bottom:16px}p{line-height:1.6;color:#b8c8be}.card{background:#202b26;border:1px solid #405147;border-radius:24px;padding:28px;margin:24px 0}.tag{color:#edb57f;font-size:14px;font-weight:700}blockquote{margin:24px 0;font-size:clamp(28px,5vw,42px);line-height:1.25;font-weight:700}button{font:inherit;font-weight:700;padding:15px 22px;border-radius:12px;cursor:pointer;border:1px solid #5f7668;background:transparent;color:inherit}button.primary{background:#eeb77f;color:#23190e;border-color:#eeb77f}button:disabled{opacity:.45;cursor:default}.actions{display:flex;gap:12px;flex-wrap:wrap}#status{min-height:28px;color:#f3eee5;font-weight:650}#status.recording{color:#ffba9a}label{display:flex;gap:12px;line-height:1.5;font-size:14px;color:#c2cfc7}input{width:20px;height:20px;flex:none}small{display:block;color:#aab9af;line-height:1.6;margin:14px 0}progress{width:100%;accent-color:#eeb77f;height:8px}#error{color:#ffba9a}footer{font-size:13px;color:#aab9af}footer button{padding:8px 12px;font-size:13px}a{color:#edb57f}
+</style>
+<main>
+<header><span class="brand">miso</span><span>Pi USB microphone · guided calibration</span></header>
+<h1>Your voice. Your pace.</h1>
+<p>Read each phrase first. Press <strong>Record this prompt</strong> when you’re ready, then wait for <strong>Speak now</strong>. Nothing records between prompts.</p>
+<progress id="progress" value="0" max="26" aria-label="Saved recordings"></progress>
+<section class="card">
+<div class="tag" id="position"></div>
+<p id="instruction"></p>
+<blockquote id="phrase"></blockquote>
+<p id="status" role="status" aria-live="polite">Read the prompt. Take your time.</p>
+<p id="error" role="alert"></p>
+<div class="actions"><button class="primary" id="record">Record this prompt</button><button id="next" disabled>Next prompt →</button></div>
+<small id="saved"></small>
+</section>
+<label><input id="consent" type="checkbox"> <span>I agree to record these phrases through the Pi’s microphone and keep the clips on this PC for calibration. They are deleted when the helper stops, or after 24 hours while it stays running. No cloud upload.</span></label>
+<small>Miso pauses briefly for each clip and resumes afterwards. Keep the microphone on the Pi, in its normal position. Speak naturally; don’t shout. For the 3 m prompts, take this PC with you or have someone press Record.</small>
+<footer>This is a starter set, not a completed accuracy test. Keep the helper running after finishing so the clips can be analysed. <button id="delete">End session & delete clips</button></footer>
+</main>
+<script>
+let index=0, busy=false, current=null, pending=false, clientError='';
+const $=id=>document.getElementById(id);
+async function request(path,body){const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json','X-Calibration-Token':'__TOKEN__'},body:JSON.stringify(body)}:{});const d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d;}
+function render(s){current=s;busy=['preparing','recording'].includes(s.phase);const p=s.prompts[index];
+$('position').textContent=`Prompt ${index+1} of ${s.prompts.length} · ${p.language==='es'?'Spanish':'English'} · ${p.distance_meters} m`;
+$('instruction').textContent=`Stand about ${p.distance_meters} metre${p.distance_meters===1?'':'s'} from the Pi. `+(p.split==='evaluation'?'Fresh test round: change your stance slightly and say it naturally again. ':'')+(p.label==='negative'?'Say this similar-sounding phrase without adding “Miso”.':'Say the phrase once, then stay quiet for the rest of the clip.');
+$('phrase').textContent=p.phrase;$('progress').value=s.saved.length;$('progress').max=s.prompts.length;
+$('record').disabled=pending||busy||!$('consent').checked||s.phase==='closed';$('next').disabled=pending||busy||!s.saved.includes(index)||index===s.prompts.length-1||s.phase==='closed';$('delete').disabled=pending||busy||s.phase==='closed';$('consent').disabled=busy;
+$('record').textContent=s.saved.includes(index)?'Retry this prompt':'Record this prompt';
+$('saved').textContent=`${s.saved.length} of ${s.prompts.length} clips saved. Retrying replaces this clip.`;
+$('status').className=s.phase==='recording'?'recording':'';
+let message='Read the prompt. Take your time.';
+if(s.phase==='preparing')message='Connecting to the Pi… wait for “Speak now”.';
+else if(s.phase==='recording')message=`Speak now · ${Math.max(0,Math.ceil(s.duration-(Date.now()/1000-s.started)))} seconds left`;
+else if(s.phase==='closed')message='Session ended. Recordings deleted.';
+else if(s.index===index&&s.phase==='saved')message=s.saved.length===s.prompts.length?'All clips saved. Leave this helper running and tell me you’re done.':'Clip saved. Retry it, or press Next when ready.';
+else if(s.phase==='error')message='Clip not saved. You can retry when ready.';
+$('status').textContent=message;$('error').textContent=clientError||s.error||'';
+}
+$('consent').onchange=()=>current&&render(current);
+$('record').onclick=async()=>{clientError='';pending=true;render(current);try{render(await request('/record',{index,consent:$('consent').checked}));}catch(e){clientError=e.message;$('error').textContent=e.message;}finally{pending=false;if(current)render(current);}};
+$('next').onclick=()=>{clientError='';index++;render(current);};
+$('delete').onclick=async()=>{if(!confirm('Delete all clips from this calibration session?'))return;try{render(await request('/delete',{}));}catch(e){clientError=e.message;$('error').textContent=e.message;}};
+async function poll(){try{render(await request('/status'));}catch(e){$('status').textContent='Helper disconnected. Restart it to begin a new session.';$('record').disabled=true;$('next').disabled=true;}setTimeout(poll,250);}poll();
+</script>
+</html>

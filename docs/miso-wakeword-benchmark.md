@@ -183,3 +183,37 @@ raised the existing negative-set prediction to 6.5452 false activations/hour.
 Those ten temporary clips and their path-bearing artifacts were deleted after
 aggregate metrics were recorded. Production therefore remains at `0.999` until
 a retrained model passes the disjoint physical evaluation above.
+
+## Click-paced calibration guide
+
+From this PC, run:
+
+```bash
+PYTHONPATH=src python3 -m miso.calibration_guide
+```
+
+Open `http://127.0.0.1:8766`. The page shows each instruction before recording;
+check the local-recording consent box, press **Record this prompt**, wait for
+**Speak now**, and say the phrase once. Every clip is five seconds. **Next
+prompt** never records automatically; **Retry this prompt** replaces its saved
+clip. The 26-prompt starter set includes English/Spanish positives at 1 m and
+3 m in separate training/evaluation rounds, plus two training confusables. This
+small set does not establish final recall or household false-activation rates.
+
+The microphone stays on the Pi. The helper uses the existing `pancho-pi` SSH
+alias and the deployed `plughw:CARD=Device,DEV=0` mono 16 kHz S16_LE capture
+settings. It requires passwordless `sudo` for service control. Each explicit
+recording briefly stops `miso.service` to free the USB device, streams PCM over
+SSH, and restores the service if it was running. A 45-second transient systemd
+watchdog provides a second restoration path if the capture worker dies. No
+runtime source or wake thresholds are changed, and no remote WAV is written.
+
+Clips and a trainer-compatible `manifest.json` are stored under a fresh
+`.local/wake-corpus/guided-*` directory on this PC. Keep the helper running for
+analysis. **End session & delete clips**, normal helper shutdown, or the
+24-hour deadline deletes this session's corpus. Closing a browser tab does not
+stop the helper. If the PC loses power or the helper is forcibly killed, its
+cleanup cannot run: remove any orphaned session directory before reusing the
+corpus. Do not copy raw recordings elsewhere without carrying over the same
+retention deadline. No training, cloud upload, or deployment happens from this
+page.
