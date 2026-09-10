@@ -568,6 +568,14 @@ tail of their sentence recorded on top of Miso's own voice and transcribed as
 mumble. The listening cue on the companion display carries the feedback the
 sound used to. Turn it back on for a speaker-only setup with no screen.
 
+When idle transcription recognizes a leading "Miso" after the wake model misses
+it, the fallback keeps any command in that same transcript and answers it
+directly, without an acknowledgement or a second recording. A wake-only
+transcript still opens the normal listening window. This fallback requires
+transcription while idle; deployments that gate STT until a model/button wake
+cannot use it to recover missed wakes. It does not change acoustic wake-model
+recall or the calibrated detection threshold.
+
 Two defences keep Miso from answering itself. The microphone is closed while
 its own audio is on the speaker and for `MISO_CONVERSATION_ECHO_GUARD_SECONDS`
 afterwards, which has to cover the lag between the state machine finishing a

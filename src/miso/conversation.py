@@ -742,6 +742,13 @@ class ConversationManager:
         return True
 
     def _handle_wake(self, event: WakeEvent) -> None:
+        command = (
+            event.transcription
+            if event.source == "transcription"
+            and event.transcription is not None
+            and self._without_wake_phrase(event.transcription.text)
+            else None
+        )
         with self._lock:
             active = self._state not in _INACTIVE_STATES
         if active:
@@ -762,7 +769,7 @@ class ConversationManager:
             self._last_error = None
             self._ignore_activity_before = event.detected_at
             button = event.source == WAKE_SOURCE_BUTTON
-            if button or not self.acknowledge_wake:
+            if button or not self.acknowledge_wake or command is not None:
                 # A button press is already an unambiguous address, and when the
                 # spoken acknowledgement is off the wake phrase is treated the
                 # same way: someone saying "Miso, set a timer" in one breath is
@@ -778,9 +785,16 @@ class ConversationManager:
                     ConversationState.LISTENING,
                     "button talk" if button else "wake detected",
                 )
-                return
-            self._turn_origin = ("wake", _monotonic_for(event.detected_at))
-            self._transition_locked(ConversationState.ACKNOWLEDGING, "wake detected")
+                if command is None:
+                    return
+            else:
+                self._turn_origin = ("wake", _monotonic_for(event.detected_at))
+                self._transition_locked(ConversationState.ACKNOWLEDGING, "wake detected")
+        if command is not None:
+            # Recognition already completed: answer this request without asking
+            # the speaker to repeat it or playing a cue over the response.
+            self._handle_transcription(command)
+            return
         self._start_cue(
             self.acknowledgement,
             "en",
@@ -859,6 +873,7 @@ class ConversationManager:
                         result.confidence or 0.0,
                         time.time(),
                         source="transcription",
+                        transcription=result,
                     )
                 )
             return

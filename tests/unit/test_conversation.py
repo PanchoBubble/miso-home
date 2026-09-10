@@ -609,6 +609,39 @@ class ConversationManagerTests(unittest.TestCase):
         finally:
             manager.stop()
 
+    def test_fallback_preserves_command_without_acknowledgement_or_repeat(self) -> None:
+        for acknowledge in (True, False):
+            for text, language, command in (
+                ("Miso, tell me hello", "en", "tell me hello"),
+                ("Miso, dime hola", "es", "dime hola"),
+            ):
+                with self.subTest(acknowledge=acknowledge, language=language):
+                    speech = FakeSpeech()
+                    manager = self.manager(speech, acknowledge_wake=acknowledge)
+                    manager.start()
+                    try:
+                        self.source.put_result(text, language)
+                        wait_for(manager, "follow_up")
+                        self.assertEqual(
+                            [(item[1], item[2]) for item in speech.calls],
+                            [("First response", language)],
+                        )
+                        events = self.store.events(manager.status()["conversation_id"])
+                        self.assertEqual(events[0].content, command)
+                        self.assertEqual(manager.status()["turns"], 1)
+                        self.assertEqual(manager.status()["interruptions"], 0)
+                        self.assertEqual(len(self.source.events), 0)
+                    finally:
+                        manager.stop()
+
+    def test_fallback_transcript_is_not_exposed_in_wake_status(self) -> None:
+        event = WakeEvent(
+            "Miso", 0.9, time.time(), source="transcription",
+            transcription=transcript("Miso, private household request"),
+        )
+        self.assertNotIn("private household request", str(event.as_dict()))
+        self.assertNotIn("private household request", repr(event))
+
     def test_wake_phrase_interrupts_a_spoken_answer(self) -> None:
         # Wake-word barge-in survives the echo guard: openWakeWord is far more
         # selective than the VAD, so it does not fire on Miso's own voice.

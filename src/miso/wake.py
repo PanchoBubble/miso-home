@@ -10,12 +10,12 @@ import subprocess
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
 from miso.audio import AudioFormat, BoundedPCMBuffer
-from miso.transcription import EnergySpeechDetector
+from miso.transcription import EnergySpeechDetector, TranscriptionResult
 
 
 _READY = b"OWW1"
@@ -59,6 +59,8 @@ class WakeEvent:
     score: float
     detected_at: float
     source: str = "model"
+    # Keep fallback audio recognition with its queued activation, never in status.
+    transcription: TranscriptionResult | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict[str, object]:
         return {
