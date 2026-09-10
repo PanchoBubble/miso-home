@@ -217,3 +217,70 @@ cleanup cannot run: remove any orphaned session directory before reusing the
 corpus. Do not copy raw recordings elsewhere without carrying over the same
 retention deadline. No training, cloud upload, or deployment happens from this
 page.
+
+## Guided microphone result — 2026-09-10
+
+All 26 five-second clips completed through the Pi's deployed USB capture device:
+12 training positives, 12 reserved evaluation positives, and two training
+confusables. No clip was near-silent or clipped (peak levels ranged from -21.42
+to -8.69 dBFS). This checks signal levels, not pronunciation or absence of noise.
+Offline streaming replay on the workstation used the deployed model checksum,
+Silero VAD 0.5, energy floor -60 dBFS, one activation frame, and two-second
+cooldown. These are recognition measurements, not Pi response-time benchmarks.
+
+| Threshold | Evaluation detections | English | Spanish | At 3 m |
+| --- | ---: | ---: | ---: | ---: |
+| 0.999 (deployed) | 5/12 | 1/6 | 4/6 | 3/6 |
+| 0.997 | 10/12 | 5/6 | 5/6 | 4/6 |
+| 0.995 | 10/12 | 5/6 | 5/6 | 4/6 |
+| 0.98 | 12/12 | 6/6 | 6/6 | 6/6 |
+
+Neither training confusable activated at these thresholds, but ten seconds of
+training negatives cannot establish household false-wake performance. The
+existing upstream held-out feature benchmark predicts 3.2726 activations/hour
+at 0.98, above the 0.5/hour target. The production threshold remains unchanged.
+
+The starter guide omitted evaluation negatives. The trainer's preflight
+requires them, and final acceptance requires at least an hour of evaluation
+room sound. That needs a separate explicit recording step; the 26 clips do not
+complete retraining or acceptance. Fresh evaluation is also appropriate after
+using this small set for threshold comparisons. Aggregate results are retained
+in `benchmarks/openwakeword/microphone-2026-09-10.json`; raw clips remain subject
+to their original deletion deadline, 2026-09-11 20:27:34 UTC.
+
+### Consented room-audio follow-up
+
+For an explicitly authorized background session, leave the original guide
+running (it owns retention) and start:
+
+```bash
+PYTHONPATH=src python3 -m miso.room_calibration \
+  --manifest .local/wake-corpus/guided-SESSION/manifest.json --consent
+```
+
+This immediately starts a bounded 65-minute capture, with a countdown and Stop
+button at `http://127.0.0.1:8768`. Five minutes are reserved for training and the
+following 60 for evaluation. Each minute is saved as a separate WAV. The combined
+`room-manifest.json` includes the original voice clips and disjoint room groups;
+it does not overwrite the guide's manifest. Use the combined manifest for
+training and benchmarking after capture. Do not intentionally utter the wake
+phrase during this negative-audio session; review accidental target phrases
+before interpreting false-wake counts.
+
+Capture runs in a transient Pi systemd unit with `RuntimeMaxSec=4000` and
+`ExecStopPost` restoring Miso. Stop targets that unit. The local SSH stream has
+its own timeout, and partial clips remain available if the session ends early.
+An incomplete session does not pass the one-hour negative-audio acceptance gate.
+The helper refuses to start when Miso is already inactive. The original corpus
+deletion deadline still applies; keep the original guide running for cleanup.
+
+To show either loopback-only page on the Pi, forward the same port over SSH,
+then open it in the Pi desktop browser. For example:
+
+```bash
+ssh -fNT -o ExitOnForwardFailure=yes \
+  -R 127.0.0.1:8768:127.0.0.1:8768 pancho-pi
+```
+
+Use `http://127.0.0.1:8768` on the Pi. The helper stays on the PC; audio capture
+still uses the Pi's USB microphone.

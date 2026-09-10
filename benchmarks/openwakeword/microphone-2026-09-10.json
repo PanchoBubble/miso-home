@@ -1,0 +1,191 @@
+{
+  "date": "2026-09-10",
+  "model_sha256": "f7d67c3d67911e65ff51a10967661b56b1aead161efe3816646a5190aa2ba59f",
+  "platform": "workstation offline streaming replay of Pi USB microphone captures",
+  "captured_clips": 26,
+  "clip_duration_seconds": 5,
+  "raw_audio_delete_by": "2026-09-11T20:27:34.173903+00:00",
+  "notes": [
+    "12 training positives, 12 evaluation positives, 2 training confusables.",
+    "No evaluation negative audio; no false-wake acceptance or deployment.",
+    "Threshold comparisons use the evaluation set; fresh final acceptance is needed after selection/retraining."
+  ],
+  "results": [
+    {
+      "threshold": 0.999,
+      "split": "evaluation",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 5,
+        "misses": 7,
+        "recall": 0.4167,
+        "language_recall": {
+          "en": 0.1667,
+          "es": 0.6667
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 0.5,
+        "negative_files": 0,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.0,
+        "false_activations": 0,
+        "false_activations_per_hour": null,
+        "passed": false
+      }
+    },
+    {
+      "threshold": 0.999,
+      "split": "training",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 6,
+        "misses": 6,
+        "recall": 0.5,
+        "language_recall": {
+          "en": 0.6667,
+          "es": 0.3333
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 0.3333,
+        "negative_files": 2,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.002778,
+        "false_activations": 0,
+        "false_activations_per_hour": 0.0,
+        "passed": false
+      }
+    },
+    {
+      "threshold": 0.997,
+      "split": "evaluation",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 10,
+        "misses": 2,
+        "recall": 0.8333,
+        "language_recall": {
+          "en": 0.8333,
+          "es": 0.8333
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 0.6667,
+        "negative_files": 0,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.0,
+        "false_activations": 0,
+        "false_activations_per_hour": null,
+        "passed": false
+      }
+    },
+    {
+      "threshold": 0.997,
+      "split": "training",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 7,
+        "misses": 5,
+        "recall": 0.5833,
+        "language_recall": {
+          "en": 0.6667,
+          "es": 0.5
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 0.3333,
+        "negative_files": 2,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.002778,
+        "false_activations": 0,
+        "false_activations_per_hour": 0.0,
+        "passed": false
+      }
+    },
+    {
+      "threshold": 0.995,
+      "split": "evaluation",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 10,
+        "misses": 2,
+        "recall": 0.8333,
+        "language_recall": {
+          "en": 0.8333,
+          "es": 0.8333
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 0.6667,
+        "negative_files": 0,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.0,
+        "false_activations": 0,
+        "false_activations_per_hour": null,
+        "passed": false
+      }
+    },
+    {
+      "threshold": 0.995,
+      "split": "training",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 9,
+        "misses": 3,
+        "recall": 0.75,
+        "language_recall": {
+          "en": 0.8333,
+          "es": 0.6667
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 0.6667,
+        "negative_files": 2,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.002778,
+        "false_activations": 0,
+        "false_activations_per_hour": 0.0,
+        "passed": false
+      }
+    },
+    {
+      "threshold": 0.98,
+      "split": "evaluation",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 12,
+        "misses": 0,
+        "recall": 1.0,
+        "language_recall": {
+          "en": 1.0,
+          "es": 1.0
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 1.0,
+        "negative_files": 0,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.0,
+        "false_activations": 0,
+        "false_activations_per_hour": null,
+        "passed": false
+      }
+    },
+    {
+      "threshold": 0.98,
+      "split": "training",
+      "summary": {
+        "positive_cases": 12,
+        "true_positives": 10,
+        "misses": 2,
+        "recall": 0.8333,
+        "language_recall": {
+          "en": 1.0,
+          "es": 0.6667
+        },
+        "target_distance_positive_cases": 6,
+        "target_distance_recall": 0.8333,
+        "negative_files": 2,
+        "false_positive_files": 0,
+        "negative_audio_hours": 0.002778,
+        "false_activations": 0,
+        "false_activations_per_hour": 0.0,
+        "passed": false
+      }
+    }
+  ]
+}
