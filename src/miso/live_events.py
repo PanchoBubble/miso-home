@@ -239,10 +239,12 @@ class LiveToolResultPublisher:
             "timer_create",
             "timer_update",
             "timer_cancel",
+            "timer_control",
             "reminder_create",
             "reminder_update",
             "reminder_cancel",
             "shopping_add",
+            "shopping_add_many",
             "shopping_update",
             "shopping_remove",
         }
@@ -263,6 +265,8 @@ class LiveToolResultPublisher:
             actor=actor,
         )
         if not result.ok or result.tool not in self.HOUSEHOLD_MUTATIONS:
+            return
+        if result.tool == "timer_control" and (result.output or {}).get("action") == "remaining":
             return
         resource = self._resource(result)
         if resource is None:

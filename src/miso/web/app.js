@@ -83,6 +83,7 @@ function friendlyToolName(name) {
     reminder_create: "Reminder created",
     reminder_list: "Reminders checked",
     shopping_add: "Shopping list updated",
+  shopping_add_many: "Shopping list updated",
     shopping_list: "Shopping list checked",
     shopping_complete: "Shopping item completed",
     weather_get: "Weather checked",
@@ -1215,13 +1216,28 @@ function resetConversation() {
 
 $("#shopping-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const completed = await submitHouseholdAction({
-    action: "shopping_add",
-    name: $("#shopping-name").value.trim(),
-    quantity: Number($("#shopping-quantity").value),
+  // "milk, eggs" is one thing to type and two things to buy, so a
+  // comma-separated entry becomes one row per item, as voice does.
+  const names = $("#shopping-name").value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (!names.length) return;
+  const quantity = Number($("#shopping-quantity").value);
+  const shared = {
     list_name: $("#shopping-list-name").value.trim(),
     shared: $("#shopping-shared").checked,
-  }, event.submitter);
+  };
+  const completed = await submitHouseholdAction(
+    names.length === 1
+      ? { action: "shopping_add", name: names[0], quantity, ...shared }
+      : {
+        action: "shopping_add_many",
+        items: names.map((name) => ({ name, quantity })),
+        ...shared,
+      },
+    event.submitter,
+  );
   if (completed) {
     $("#shopping-name").value = "";
     $("#shopping-quantity").value = "1";

@@ -80,6 +80,24 @@ dashboard-facing controller. Its status includes the visible scope and expiry.
 
 ## Household tools
 
+Timers understand named requests such as “set a pasta timer for ten minutes”,
+“how long left on the pasta timer?”, “add two minutes to the pasta timer”, and
+“cancel the pasta timer”. During the same conversation, “add two minutes”,
+“how long left?”, and “cancel it” refer to the last selected running timer.
+Extensions add to its existing deadline. With multiple possible timers Miso
+asks which one; answer with its name. English and Spanish requests are supported.
+
+Shopping accepts “add milk and two eggs to the list”, “read the list”, and
+“remove milk from the list”. Follow with “and bread” or “remove eggs” in the
+same conversation. Ambiguous removals ask for the full item name and make no
+change until a unique item matches. Follow-up context expires after two minutes
+and is isolated by conversation and household member.
+
+The enclosure's stop button cancels the current voice turn and playback; the
+talk button opens listening immediately without saying “Miso”. The intended
+colour assignment is red for stop, the other button for talk. See
+[`docs/miso-bmo-buttons.md`](docs/miso-bmo-buttons.md) for GPIO configuration.
+
 The runtime registers durable timer, reminder, and shared shopping-list tools
 against the same transactional SQLite database as memory. A background worker
 normalizes scheduled timestamps to UTC, atomically fires overdue items (also on
@@ -87,6 +105,17 @@ process restart), and emits durable audit events. Every mutation increments a
 revision. Shopping removals are retained as tombstones so operator views can
 inspect history. Tool results use stable object shapes suitable for both local
 models and the dashboard.
+
+`shopping_add` takes one item; `shopping_add_many` takes a list of them, so
+"add milk and eggs to the shopping list" and a comma-separated dashboard entry
+both become one row per item rather than one row named after the sentence.
+
+`shopping_remove` takes either an item `id`, which the dashboard has, or an
+item `name`, which is all a spoken request carries. A name resolves against the
+active items the actor can see, preferring an exact match over a partial one; a
+name nobody listed comes back as `removed: false` rather than an error, so the
+voice lane can say so instead of handing the turn to a model that cannot see
+the list.
 
 ## Optional model providers
 
@@ -111,7 +140,8 @@ in, health reports `binary_not_found` or `not_authenticated` and the router
 skips the tier instead of stalling the lane.
 
 Message intake is three-tiered. A deterministic fast lane (`intake.py`) matches
-common bilingual household intents (timers, shopping list, weather) with strict
+common bilingual household intents (timers, shopping list add/remove/read,
+weather) with strict
 parsers and invokes the tool directly, answering in milliseconds without any
 model; an ambiguous parse always falls through rather than guessing arguments.
 It can be disabled with `MISO_FAST_LANE_ENABLED=false`.

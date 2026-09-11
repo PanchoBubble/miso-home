@@ -208,7 +208,7 @@ class ToolPickerTests(unittest.TestCase):
         self.assertNotIn("timer_cancel", call["system"])
         self.assertNotIn("developer_command", call["system"])
         # A Pi answers in seconds only while the replayed prompt stays tiny.
-        self.assertLess(len(call["system"]), 900)
+        self.assertLess(len(call["system"]), 1050)
 
     def test_pickable_tools_are_limited_to_rendered_intents(self) -> None:
         picker, _ = self.picker('{"tool": null}')
@@ -216,7 +216,10 @@ class ToolPickerTests(unittest.TestCase):
             sorted(picker.pickable),
             [
                 "shopping_add",
+                "shopping_add_many",
                 "shopping_list",
+                "shopping_remove",
+                "timer_control",
                 "timer_create",
                 "timer_list",
                 "tools_refresh",

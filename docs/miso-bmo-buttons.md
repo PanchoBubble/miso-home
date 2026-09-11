@@ -8,6 +8,11 @@ else changes.
 
 ## Behaviour
 
+Use the **red button for Stop** and the **other button for Talk**. The default
+mapping is Stop on BCM 24 and Talk on BCM 23. GPIO does not report button colour:
+if the enclosure has red wired to BCM 23, swap `MISO_BUTTON_STOP_PIN` and
+`MISO_BUTTON_TALK_PIN` in `/etc/miso/miso-buttons.env`, then restart Miso.
+
 **Talk (BCM 23).** A press publishes a wake event with `source=button` into the
 same `WakeEvents` queue openWakeWord publishes to, so it reuses the whole
 existing turn pipeline. The one difference is that the conversation skips the

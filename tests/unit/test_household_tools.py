@@ -48,6 +48,35 @@ class HouseholdToolTests(unittest.TestCase):
         self.assertIn("scheduled_items", tables)
         self.assertIn("shopping_items", tables)
 
+    def test_timer_control_respects_ownership_and_revision(self) -> None:
+        ana = web_actor("ana@example.com")
+        MemoryStore(self.path).provision_household_members((ana.email,))
+        private = self.registry.invoke("timer_create", {
+            "duration_seconds": 300, "title": "private tea",
+        }, actor=ana).output["timer"]
+        hidden = self.invoke(self.registry, "timer_control", {
+            "action": "cancel", "title": "private tea",
+        })
+        self.assertEqual(hidden["outcome"], "not_found")
+        extended = self.registry.invoke("timer_control", {
+            "action": "extend", "title": "private tea", "seconds": 120,
+        }, actor=ana).output["timer"]
+        self.assertEqual(extended["revision"], private["revision"] + 1)
+        self.assertEqual(extended["due_at"], "2026-08-22T12:07:00.000000+00:00")
+
+    def test_expired_timer_cannot_be_extended(self) -> None:
+        self.invoke(self.registry, "timer_create", {"duration_seconds": 30})
+        self.clock[0] += timedelta(seconds=31)
+        reply = self.invoke(self.registry, "timer_control", {"action": "extend", "seconds": 60})
+        self.assertEqual(reply["outcome"], "not_found")
+
+    def test_spoken_shopping_removal_stays_on_default_list(self) -> None:
+        self.invoke(self.registry, "shopping_add", {"name": "milk", "list_name": "Party"})
+        result = self.invoke(self.registry, "shopping_remove", {"name": "milk"})
+        self.assertFalse(result["removed"])
+        items = self.invoke(self.registry, "shopping_list", {"list_name": "Party"})["items"]
+        self.assertEqual(len(items), 1)
+
     def test_timers_create_update_cancel_and_survive_restart(self) -> None:
         created = self.invoke(
             self.registry,
@@ -159,6 +188,58 @@ class HouseholdToolTests(unittest.TestCase):
         )["items"]
         self.assertEqual(history[0]["status"], "removed")
         self.assertEqual(history[0]["revision"], 3)
+
+    def test_shopping_add_many_writes_one_row_per_item(self) -> None:
+        added = self.invoke(
+            self.registry,
+            "shopping_add_many",
+            {"items": [{"name": "Milk"}, {"name": "Eggs", "quantity": 6}]},
+        )
+        self.assertEqual([item["name"] for item in added["items"]], ["Milk", "Eggs"])
+        self.assertEqual(added["items"][1]["quantity"], 6)
+        self.assertEqual(added["item"]["name"], "Milk")
+        listed = self.invoke(self.registry, "shopping_list", {})["items"]
+        self.assertCountEqual([item["name"] for item in listed], ["Milk", "Eggs"])
+
+    def test_shopping_remove_resolves_a_spoken_item_name(self) -> None:
+        self.invoke(self.registry, "shopping_add", {"name": "Oat milk"})
+        milk = self.invoke(self.registry, "shopping_add", {"name": "Milk"})["item"]
+        exact = self.invoke(self.registry, "shopping_remove", {"name": "milk"})
+        self.assertTrue(exact["removed"])
+        self.assertEqual(exact["item"]["id"], milk["id"])
+        partial = self.invoke(self.registry, "shopping_remove", {"name": "oat"})
+        self.assertTrue(partial["removed"])
+        self.assertEqual(partial["item"]["name"], "Oat milk")
+        self.assertEqual(
+            self.invoke(self.registry, "shopping_list", {})["items"], []
+        )
+
+    def test_shopping_remove_reports_a_name_that_is_not_listed(self) -> None:
+        missing = self.invoke(
+            self.registry, "shopping_remove", {"name": "chorizo"}
+        )
+        self.assertFalse(missing["removed"])
+        self.assertIsNone(missing["item"])
+        self.assertEqual(missing["name"], "chorizo")
+
+    def test_shopping_remove_needs_an_id_or_a_name(self) -> None:
+        result = self.registry.invoke("shopping_remove", {})
+        self.assertEqual(result.status, ToolStatus.REJECTED)
+        unknown_id = self.registry.invoke(
+            "shopping_remove", {"id": "00000000-0000-4000-8000-000000000000"}
+        )
+        self.assertEqual(unknown_id.status, ToolStatus.REJECTED)
+
+    def test_shopping_remove_by_name_respects_private_lists(self) -> None:
+        juan = web_actor("juan@example.com")
+        ana = web_actor("ana@example.com")
+        MemoryStore(self.path).provision_household_members((juan.email, ana.email))
+        store = HouseholdStore(self.path)
+        store.add_shopping_item(
+            "Juan private", "Gift", 1, actor=juan, shared=False
+        )
+        self.assertIsNone(store.find_shopping_item("Gift", actor=ana))
+        self.assertIsNotNone(store.find_shopping_item("Gift", actor=juan))
 
     def test_revision_conflicts_do_not_overwrite_newer_household_state(self) -> None:
         item = self.invoke(

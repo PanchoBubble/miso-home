@@ -1028,7 +1028,8 @@ class ConversationManager:
             fast_reply = None
             if self.fast_lane is not None:
                 fast_reply = self.fast_lane.try_handle(
-                    text, language, cancel_event=cancel, actor=VOICE_ACTOR
+                    text, language, cancel_event=cancel, actor=VOICE_ACTOR,
+                    conversation_id=conversation_id,
                 )
             if fast_reply is None and self.tool_picker is not None:
                 fast_reply = self.tool_picker.try_handle(

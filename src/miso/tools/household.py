@@ -17,6 +17,11 @@ from miso.tools.base import ToolContext, ToolDefinition, ToolRegistry, ToolRejec
 
 LOGGER = logging.getLogger("miso.tools.household")
 
+# The list a request names nothing more specific than "the shopping list".
+# Stored names collate case-insensitively, so this matches a list the
+# dashboard created as "shopping" just the same.
+DEFAULT_LIST_NAME = "Shopping"
+
 
 def _system_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -427,6 +432,51 @@ class HouseholdStore:
             ).fetchone()
         return self._shopping_dict(row)
 
+    def find_shopping_item(
+        self,
+        name: str,
+        *,
+        list_name: str | None = None,
+        actor: Actor = VOICE_ACTOR,
+    ) -> dict[str, object] | None:
+        """Resolve a spoken item name without guessing between matching rows.
+
+        Voice never carries an item id, so removing "the milk" has to find the
+        row itself. An exact name wins over a partial one so "milk" never
+        removes "oat milk" while a plain "milk" entry is still on the list.
+        """
+        wanted = name.strip()
+        if not wanted:
+            return None
+        conditions = ["i.status = 'active'", "i.completed = 0", "(l.shared = 1 OR l.owner_email = ?)"]
+        values: list[object] = [actor.email]
+        if list_name is not None and list_name.strip():
+            conditions.append("l.name = ? COLLATE NOCASE")
+            values.append(list_name.strip())
+        query = f"""
+            SELECT i.*, l.name AS list_name, l.shared,
+                   l.owner_email, l.created_by
+            FROM shopping_items AS i JOIN shopping_lists AS l ON l.id = i.list_id
+            WHERE {' AND '.join(conditions)} AND {{match}}
+            ORDER BY i.completed, i.created_at DESC, i.id
+            LIMIT 2
+        """
+        escaped = wanted.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        attempts = (
+            ("i.name = ? COLLATE NOCASE", [wanted]),
+            ("i.name LIKE ? ESCAPE '\\' COLLATE NOCASE", [f"%{escaped}%"]),
+        )
+        with self.connect() as connection:
+            for match, extra in attempts:
+                rows = connection.execute(
+                    query.format(match=match), (*values, *extra)
+                ).fetchall()
+                if len(rows) > 1:
+                    raise ToolRejected("ambiguous_item")
+                if rows:
+                    return self._shopping_dict(rows[0])
+        return None
+
     def remove_shopping_item(
         self,
         identifier: str,
@@ -592,6 +642,7 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
     }
     list_name = {"type": "string", "minLength": 1, "maxLength": 100}
     revision = {"type": "integer", "minimum": 1}
+    quantity = {"type": "integer", "minimum": 1, "maximum": 999}
     visibility = {"type": "string", "enum": ["shared", "private"]}
 
     def timer_create(arguments: Mapping[str, object], context: ToolContext):
@@ -654,7 +705,110 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
             )
         }
 
+    def timer_control(arguments: Mapping[str, object], context: ToolContext):
+        context.raise_if_cancelled()
+        action = str(arguments["action"])
+        if action == "extend" and "seconds" not in arguments:
+            raise ToolRejected("seconds is required to extend a timer")
+        timers = store.list_scheduled("timer", actor=context.actor)
+        wanted = str(arguments.get("title", "")).strip().casefold()
+        if wanted:
+            timers = [item for item in timers if str(item["title"]).casefold() == wanted]
+        if not timers:
+            return {"outcome": "not_found", "action": action}
+        if len(timers) != 1:
+            return {"outcome": "ambiguous", "action": action,
+                    "choices": [item["title"] for item in timers]}
+        timer = timers[0]
+        context.raise_if_cancelled()
+        try:
+            if action == "cancel":
+                timer = store.cancel_scheduled(str(timer["id"]), "timer",
+                    expected_revision=int(timer["revision"]), actor=context.actor)
+            elif action == "extend":
+                # Extend the existing deadline, not the time of the request.
+                due = _parse_due_at(timer["due_at"]) + timedelta(seconds=int(arguments["seconds"]))
+                timer = store.update_scheduled(str(timer["id"]), "timer", due_at=due,
+                    expected_revision=int(timer["revision"]), actor=context.actor)
+        except ToolRejected:
+            return {"outcome": "changed", "action": action}
+        return {"outcome": "done", "action": action, "timer": timer}
+
+    def shopping_add(arguments: Mapping[str, object], context: ToolContext):
+        requested = arguments.get("items")
+        if requested is None:
+            if "name" not in arguments:
+                raise ToolRejected("either name or items is required")
+            requested = [
+                {"name": arguments["name"], "quantity": arguments.get("quantity", 1)}
+            ]
+        elif "name" in arguments:
+            raise ToolRejected("pass either name or items, not both")
+        added = [
+            store.add_shopping_item(
+                str(arguments.get("list_name", DEFAULT_LIST_NAME)),
+                str(entry["name"]),
+                int(entry.get("quantity", 1)),
+                actor=context.actor,
+                shared=bool(arguments.get("shared", True)),
+            )
+            for entry in requested
+        ]
+        # "item" stays the first one added so single-item callers, the
+        # dashboard and the live-event projection keep the shape they read.
+        return {"items": added, "item": added[0]}
+
+    def shopping_remove(arguments: Mapping[str, object], context: ToolContext):
+        identifier_value = arguments.get("id")
+        if identifier_value is None:
+            spoken_name = arguments.get("name")
+            if not isinstance(spoken_name, str) or not spoken_name.strip():
+                raise ToolRejected("either id or name is required")
+            try:
+                found = store.find_shopping_item(
+                    spoken_name,
+                    list_name=str(arguments.get("list_name", DEFAULT_LIST_NAME)),
+                    actor=context.actor,
+                )
+            except ToolRejected as error:
+                if str(error) != "ambiguous_item":
+                    raise
+                choices = [item["name"] for item in store.list_shopping_items(
+                    str(arguments.get("list_name", DEFAULT_LIST_NAME)), actor=context.actor
+                ) if spoken_name.casefold() in str(item["name"]).casefold()]
+                return {"item": None, "removed": False, "name": spoken_name,
+                        "outcome": "ambiguous", "choices": choices}
+            # A name nobody put on the list is an answerable question, not a
+            # failure: rejecting it would hand the turn to the model, which
+            # knows nothing about the list. An id, which only the dashboard
+            # sends, must still exist.
+            if found is None:
+                return {
+                    "item": None, "removed": False, "name": spoken_name.strip(),
+                }
+            identifier_value = found["id"]
+            arguments = {**arguments, "expected_revision": found["revision"]}
+        return {
+            "item": store.remove_shopping_item(
+                str(identifier_value),
+                expected_revision=(
+                    int(arguments["expected_revision"])
+                    if "expected_revision" in arguments else None
+                ),
+                actor=context.actor,
+            ),
+            "removed": True,
+        }
+
     definitions = (
+        ToolDefinition(
+            "timer_control", "Read, extend or cancel a timer by title; omit title only for a single active timer",
+            _object_schema({
+                "action": {"type": "string", "enum": ["remaining", "extend", "cancel"]},
+                "title": title,
+                "seconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+            }, ("action",)), timer_control,
+        ),
         ToolDefinition(
             "timer_create", "Create a durable countdown timer",
             _object_schema({
@@ -723,17 +877,25 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
             "shopping_add", "Add an item to a shared shopping list",
             _object_schema({
                 "list_name": list_name, "name": title,
-                "quantity": {"type": "integer", "minimum": 1, "maximum": 999},
+                "quantity": quantity,
                 "shared": {"type": "boolean"},
             }, ("name",)),
-            lambda arguments, context: {
-                "item": store.add_shopping_item(
-                    str(arguments.get("list_name", "shopping")), str(arguments["name"]),
-                    int(arguments.get("quantity", 1)),
-                    actor=context.actor,
-                    shared=bool(arguments.get("shared", True)),
-                )
-            },
+            shopping_add,
+        ),
+        ToolDefinition(
+            "shopping_add_many",
+            "Add several items to a shared shopping list at once",
+            _object_schema({
+                "list_name": list_name,
+                "items": {
+                    "type": "array", "minItems": 1, "maxItems": 20,
+                    "items": _object_schema(
+                        {"name": title, "quantity": quantity}, ("name",)
+                    ),
+                },
+                "shared": {"type": "boolean"},
+            }, ("items",)),
+            shopping_add,
         ),
         ToolDefinition(
             "shopping_list", "List items on a shared shopping list",
@@ -744,7 +906,7 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
             }),
             lambda arguments, context: {
                 "items": store.list_shopping_items(
-                    str(arguments.get("list_name", "shopping")),
+                    str(arguments.get("list_name", DEFAULT_LIST_NAME)),
                     include_completed=bool(arguments.get("include_completed", False)),
                     include_removed=bool(arguments.get("include_removed", False)),
                     actor=context.actor,
@@ -774,18 +936,15 @@ def household_tool_definitions(store: HouseholdStore) -> tuple[ToolDefinition, .
             },
         ),
         ToolDefinition(
-            "shopping_remove", "Remove an item from a shared shopping list",
-            _object_schema({"id": identifier, "expected_revision": revision}, ("id",)),
-            lambda arguments, context: {
-                "item": store.remove_shopping_item(
-                    str(arguments["id"]),
-                    expected_revision=(
-                        int(arguments["expected_revision"])
-                        if "expected_revision" in arguments else None
-                    ),
-                    actor=context.actor,
-                )
-            },
+            "shopping_remove",
+            "Remove an item from a shared shopping list, by id or by item name",
+            _object_schema({
+                "id": identifier,
+                "name": title,
+                "list_name": list_name,
+                "expected_revision": revision,
+            }),
+            shopping_remove,
         ),
     )
     return definitions
