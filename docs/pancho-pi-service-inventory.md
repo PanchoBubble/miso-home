@@ -199,3 +199,23 @@ weather-provider change, or deployed application replacement was needed.
 `miso-rgw` tracks automatic VPN endpoint-route recovery after network changes.
 Use the current endpoint, interface and gateway when diagnosing a recurrence;
 the addresses above describe this incident, not a permanent routing template.
+
+## VPN and DMAGA disabled — 2026-09-11
+
+At the user's explicit request, stopped and disabled `nordvpn.service` and
+`openvpn.service`, including the OpenVPN SysV boot links. No OpenVPN process or
+`tun0` interface remains. Internet traffic now uses the normal Wi-Fi gateway;
+Open-Meteo returns HTTP 200 and Miso's health endpoint returns `ok` on that route.
+This supersedes the VPN recovery configuration described above.
+
+All nine DMAGA containers were already stopped. Set their Docker restart
+policies to `no` and changed all nine `restart: unless-stopped` entries in
+`/var/www/services/dmaga/docker-compose.yml` to `restart: "no"`, so container
+recreation does not restore automatic startup. Compose configuration validation
+passed. This includes DMAGA's separate `gluetun` VPN container. The standalone
+host NordVPN service was separate; its original reason for installation was not
+established. Existing project data and VPN configuration remain on disk.
+
+Immich, Nextcloud, Vaultwarden, and the homepage containers remained running.
+No reboot was required. VPN route-recovery work (`miso-rgw`) is superseded by
+this deliberate disablement; manual re-enablement would be a separate decision.
