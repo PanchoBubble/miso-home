@@ -176,3 +176,26 @@ service data.
 | Medium | Several images use mutable `latest` tags, weakening reproducibility. |
 | Medium | Ports 80, 2283, 3001, 3002, 8080, 8081, 8082, 8191, and 6881 bind on all host interfaces; tunnel/VPN/firewall policy should be verified before changing networking. |
 | Low | Docker retains about 26 GiB of reclaimable images, but cleanup must wait until recovery sources are protected. |
+
+## Weather connectivity recovery — 2026-09-11
+
+The weather panel lost its old forecast after the calibration service restart
+and subsequent kiosk refresh. Weather polls had already been failing with
+`URLError`; Open-Meteo and a general HTTPS probe timed out from the Pi while the
+same forecast endpoint returned HTTP 200 from the workstation.
+
+NordVPN's `tun0` retained its two half-default routes, but the endpoint route
+for `89.34.98.110/32` was missing. `ip route get 89.34.98.110` sent VPN handshake
+traffic through `tun0`; OpenVPN was repeatedly failing TLS negotiation. Restored
+that single endpoint route through the observed LAN gateway/interface
+(`192.168.0.1`, `wlan0`), then restarted `nordvpn.service` to clear its accumulated
+five-minute reconnect backoff. OpenVPN reported `Initialization Sequence
+Completed`, installed the correct endpoint route, and HTTPS weather requests
+returned 200 through the re-established tunnel.
+
+Restarted `miso.service` to trigger its initial forecast poll and refreshed the
+companion kiosk. The panel then displayed a fresh forecast. No Pi reboot,
+weather-provider change, or deployed application replacement was needed.
+`miso-rgw` tracks automatic VPN endpoint-route recovery after network changes.
+Use the current endpoint, interface and gateway when diagnosing a recurrence;
+the addresses above describe this incident, not a permanent routing template.
